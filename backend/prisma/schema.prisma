@@ -1,0 +1,151 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum BuildStatus {
+  QUEUED
+  CLONING
+  BUILDING
+  PUSHING
+  DEPLOYING
+  READY
+  FAILED
+  CANCELLED
+}
+
+enum LogLevel {
+  INFO
+  WARN
+  ERROR
+  STEP
+  SUCCESS
+}
+
+model User {
+  id                     String    @id @default(cuid())
+  githubUserId           Int       @unique
+  githubLogin            String
+  email                  String?
+  avatarUrl              String?
+  githubTokenCiphertext  Bytes
+  githubTokenIv          Bytes
+  githubTokenAuthTag     Bytes
+  githubTokenKeyVersion  Int       @default(1)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  projects               Project[]
+}
+
+model Project {
+  id                     String       @id @default(cuid())
+  userId                 String
+  name                   String
+  slug                   String
+  githubRepoFullName     String
+  githubRepoId           Int
+  branch                 String       @default("main")
+  webhookId              Int?
+  webhookSecretCiphertext Bytes
+  webhookSecretIv        Bytes
+  webhookSecretAuthTag   Bytes
+  webhookSecretKeyVersion Int         @default(1)
+  containerAppName       String
+  liveUrl                String?
+  frameworkHint          String?
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+  deletedAt              DateTime?
+
+  user                   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  builds                 Build[]
+  deployments            Deployment[]
+  envVars                EnvVar[]
+  webhookEvents          WebhookEvent[]
+
+  @@unique([userId, slug])
+  @@index([githubRepoId])
+}
+
+model EnvVar {
+  id              String  @id @default(cuid())
+  projectId       String
+  key             String
+  valueCiphertext Bytes
+  valueIv         Bytes
+  valueAuthTag    Bytes
+  valueKeyVersion Int     @default(1)
+
+  project         Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, key])
+}
+
+model Build {
+  id             String      @id @default(cuid())
+  projectId      String
+  commitSha      String
+  commitMessage  String
+  commitAuthor   String
+  branch         String
+  status         BuildStatus @default(QUEUED)
+  imageTag       String?
+  acrRunId       String?
+  logBlobUrl     String?
+  logByteCursor  Int         @default(0)
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  durationMs     Int?
+  errorMessage   String?
+  createdAt      DateTime    @default(now())
+
+  project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  logLines       LogLine[]
+  deployment     Deployment?
+
+  @@index([projectId, createdAt])
+  @@index([status])
+}
+
+model Deployment {
+  id            String   @id @default(cuid())
+  projectId     String
+  buildId       String   @unique
+  revisionName  String
+  active        Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  build         Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+}
+
+model LogLine {
+  id      BigInt   @id @default(autoincrement())
+  buildId String
+  seq     Int
+  ts      DateTime @default(now())
+  level   LogLevel @default(INFO)
+  message String   @db.Text
+
+  build   Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@unique([buildId, seq])
+  @@index([buildId, id])
+}
+
+model WebhookEvent {
+  id         String   @id
+  projectId  String
+  receivedAt DateTime @default(now())
+
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, receivedAt])
+}

@@ -1,0 +1,18 @@
+:root {
+  /* surfaces */
+  --surface-0: #020617;  /* slate-950 */
+  --surface-1: #0f172a;  /* slate-900 */
+  --surface-2: #1e293b;  /* slate-800 */
+  /* accent */
+  --accent: #6366f1;     /* indigo-500 */
+  --accent-strong: #4f46e5;
+  /* status */
+  --status-ready: #10b981;    /* emerald-500 */
+  --status-building: #f59e0b; /* amber-500 */
+  --status-failed: #f43f5e;   /* rose-500 */
+  --status-queued: #0ea5e9;   /* sky-500 */
+  --status-neutral: #94a3b8;  /* slate-400 */
+  /* fonts */
+  --font-sans: 'Inter Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
+}

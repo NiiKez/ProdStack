@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: prodstack-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: prodstack
+      POSTGRES_PASSWORD: prodstack
+      POSTGRES_DB: prodstack
+    ports:
+      - "5432:5432"
+    volumes:
+      - prodstack-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prodstack -d prodstack"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  prodstack-pg-data:
