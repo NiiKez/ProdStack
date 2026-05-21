@@ -7,6 +7,7 @@ import { prisma } from '../db.js';
 import { decrypt } from '../lib/crypto.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
+import { runStubBuild } from '../services/builds/runStub.js';
 
 const router = Router();
 
@@ -157,8 +158,14 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
       throw err;
     }
 
-    // TODO M3: enqueue build
+    // M2.5 stub build engine — fire-and-forget. The runner has its own
+    // try/catch and marks the Build row FAILED on error; this .catch is a
+    // backstop so an unhandled rejection can't crash the process.
+    // TODO M3: replace with real Kaniko worker enqueue
     // TODO M4: emit SSE build.created
+    void runStubBuild(buildId).catch((err) => {
+      logger.error({ err, buildId }, 'stub build runner crashed');
+    });
 
     logger.info(
       { projectId: project.id, buildId, deliveryId, commitSha },
