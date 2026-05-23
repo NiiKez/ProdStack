@@ -98,6 +98,14 @@ model Build {
   acrRunId       String?
   logBlobUrl     String?
   logByteCursor  Int         @default(0)
+  // Postgres job-queue fields. `claimedAt`/`claimedBy` are set atomically
+  // by the worker's `FOR UPDATE SKIP LOCKED` claim — once claimed, a row
+  // is invisible to other workers even if its status is still QUEUED.
+  // `attempts` increments on each claim so a poison-pill build can be
+  // detected and dropped if it keeps crashing the worker.
+  claimedAt      DateTime?
+  claimedBy      String?
+  attempts       Int         @default(0)
   startedAt      DateTime?
   finishedAt     DateTime?
   durationMs     Int?
@@ -109,7 +117,7 @@ model Build {
   deployment     Deployment?
 
   @@index([projectId, createdAt])
-  @@index([status])
+  @@index([status, claimedAt, createdAt])
 }
 
 model Deployment {

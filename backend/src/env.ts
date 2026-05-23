@@ -91,6 +91,20 @@ const EnvSchema = z.object({
   ACR_NAME: z.string().optional(),
   CONTAINER_APPS_ENV_ID: z.string().optional(),
 
+  // Build worker (M3). `stub` mirrors the M2.5 fake build for tests / fast
+  // dev cycles; `docker` shells out to `docker run gcr.io/kaniko-project/...`
+  // so a laptop doesn't need kaniko/git installed natively; `kaniko` calls
+  // the in-image `/kaniko/executor` binary directly (used inside the
+  // prodstack-builder Container App). ACR creds are only consulted by the
+  // non-stub modes.
+  BUILD_RUNNER_MODE: z.enum(['stub', 'docker', 'kaniko']).default('stub'),
+  BUILD_TIMEOUT_MS: z.coerce.number().int().positive().default(10 * 60 * 1000),
+  BUILD_WORK_DIR: z.string().default('/tmp/prodstack-builds'),
+  ACR_USERNAME: z.string().optional(),
+  ACR_PASSWORD: z.string().optional(),
+  WORKER_ID: z.string().default(`worker-${process.pid}`),
+  WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
+
   // Feature gates
   ENABLE_WORKER: boolFromString(false),
   KILL_SWITCH: boolFromString(false),

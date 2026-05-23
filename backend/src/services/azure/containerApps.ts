@@ -18,7 +18,8 @@
  * The two branches share the public shape so callers (e.g. the Project
  * service) never need to know which is active beyond `isStub()`.
  */
-import type { ContainerApp } from '@azure/arm-appcontainers';
+import { ContainerAppsAPIClient, type ContainerApp } from '@azure/arm-appcontainers';
+import { DefaultAzureCredential } from '@azure/identity';
 import pino from 'pino';
 
 import { env } from '../../env.js';
@@ -126,10 +127,7 @@ async function stubDelete(name: string): Promise<void> {
 
 // --- Real branch -----------------------------------------------------------
 
-type ContainerAppsAPIClientType =
-  import('@azure/arm-appcontainers').ContainerAppsAPIClient;
-
-let cachedClient: ContainerAppsAPIClientType | undefined;
+let cachedClient: ContainerAppsAPIClient | undefined;
 
 function requireSubscriptionId(): string {
   if (!env.AZURE_SUBSCRIPTION_ID) {
@@ -158,16 +156,11 @@ function requireEnvironmentId(): string {
   return env.CONTAINER_APPS_ENV_ID;
 }
 
-async function getClient(): Promise<ContainerAppsAPIClientType> {
+function getClient(): ContainerAppsAPIClient {
   if (cachedClient) return cachedClient;
 
   const subscriptionId = requireSubscriptionId();
-  const identity = await import('@azure/identity');
-  const armAppContainers = await import('@azure/arm-appcontainers');
-  cachedClient = new armAppContainers.ContainerAppsAPIClient(
-    new identity.DefaultAzureCredential(),
-    subscriptionId,
-  );
+  cachedClient = new ContainerAppsAPIClient(new DefaultAzureCredential(), subscriptionId);
   return cachedClient;
 }
 
@@ -204,7 +197,7 @@ function buildEnvelope(opts: CreateContainerAppOpts, environmentId: string): Con
 }
 
 async function realCreate(opts: CreateContainerAppOpts): Promise<ContainerAppRef> {
-  const client = await getClient();
+  const client = getClient();
   const resourceGroup = requireResourceGroup();
   const envelope = buildEnvelope(opts, requireEnvironmentId());
 
@@ -223,7 +216,7 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
   // dedicated `beginUpdateAndWait` is intentionally avoided — its PATCH
   // semantics don't carry over the immutable `environmentId` / `location`
   // and quietly drop fields we don't echo back.
-  const client = await getClient();
+  const client = getClient();
   const resourceGroup = requireResourceGroup();
 
   const existing = await client.containerApps.get(resourceGroup, opts.name);
@@ -260,7 +253,7 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
 }
 
 async function realDelete(name: string): Promise<void> {
-  const client = await getClient();
+  const client = getClient();
   const resourceGroup = requireResourceGroup();
   await client.containerApps.beginDeleteAndWait(resourceGroup, name);
 }
