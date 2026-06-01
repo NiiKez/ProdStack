@@ -1,0 +1,14 @@
+# NOTE: the canonical frontend image is built with the REPO ROOT as the docker
+# build context (see frontend/Dockerfile + infra/build-and-push-web.sh), so the
+# .dockerignore that actually applies is the one at the repo root. This file is
+# the equivalent ignore list for the case where someone builds with `frontend/`
+# as the context, and documents intent regardless.
+node_modules
+dist
+.env
+.env.*
+*.log
+coverage
+.vitest
+Dockerfile
+nginx.conf

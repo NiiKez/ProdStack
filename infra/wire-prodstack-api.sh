@@ -26,12 +26,21 @@ WEB=https://prodstack-web.$SFX
 ENV_PATH=Microsoft.App/managedEnvironments/prodstack-env
 ENV_ID=/subscriptions/$SUB/resourceGroups/prodstack/providers/$ENV_PATH
 
+# NOTE (2026-06-01, M5 frontend): the OAuth callback lives on the WEB origin,
+# not the API. prodstack-web's nginx reverse-proxies /api to the backend, so the
+# browser runs the whole OAuth round-trip on the prodstack-web origin. The
+# callback MUST land there too — otherwise the signed `oauth_state` cookie (set
+# on the web origin during /github/begin) is never sent back and the callback
+# 400s with OAUTH_STATE_MISMATCH. PUBLIC_API_URL stays the API origin because
+# GitHub *webhooks* post server-to-server straight to the backend, not via nginx.
+# The same web-origin URL must also be registered in the GitHub OAuth App (a
+# manual step — there is no API to edit OAuth App callback URLs).
 echo "==> Setting environment variables on the Container App..."
 az containerapp update $APP --set-env-vars \
   NODE_ENV=production \
   WEB_ORIGIN=$WEB \
   PUBLIC_API_URL=$API \
-  GITHUB_OAUTH_CALLBACK_URL=$API/api/auth/github/callback \
+  GITHUB_OAUTH_CALLBACK_URL=$WEB/api/auth/github/callback \
   AZURE_STUB=false \
   AZURE_SUBSCRIPTION_ID=$SUB \
   AZURE_RESOURCE_GROUP=prodstack \

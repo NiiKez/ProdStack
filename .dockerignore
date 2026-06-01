@@ -8,8 +8,13 @@
 .github
 .vscode
 .idea
-frontend/*
-!frontend/package.json
+# The frontend image (frontend/Dockerfile) needs the full frontend workspace
+# source — index.html, src, config — to run `vite build`. The backend/worker
+# images only ever COPY frontend/package.json, so keeping the rest in context
+# doesn't bloat their builds (it's just not COPYed). The blanket `**/node_modules`
+# and `**/dist` rules above already strip the heavy frontend artifacts.
+frontend/node_modules
+frontend/dist
 infra
 *.png
 PLAN.md
