@@ -160,7 +160,10 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
     // The Build row is already QUEUED; the build worker (in-process when
     // ENABLE_WORKER=true, otherwise the prodstack-builder Container App)
     // picks it up via the Postgres claim queue on its next poll tick.
-    // TODO M4: emit SSE build.created
+    // No SSE "build.created" emit is needed: the M4 log-stream endpoint
+    // (`/api/builds/:id/logs/stream`) discovers state by polling Postgres,
+    // which works across the API/worker process boundary in prod. See
+    // `routes/builds.ts` for why Postgres is the bus instead of an emitter.
     logger.info(
       { projectId: project.id, buildId, deliveryId, commitSha },
       'webhook accepted; build queued',

@@ -45,6 +45,36 @@ export interface ProjectDetail extends ProjectSummary {
   builds: BuildSummary[];
 }
 
+export type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'STEP' | 'SUCCESS';
+
+export interface LogLine {
+  seq: number;
+  level: LogLevel;
+  message: string;
+  ts: string;
+}
+
+export interface BuildDetail {
+  id: string;
+  status: BuildStatus | string;
+  commitSha: string;
+  commitMessage: string;
+  commitAuthor: string;
+  branch: string;
+  imageTag: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+  project: {
+    id: string;
+    name: string;
+    githubRepoFullName: string;
+    liveUrl: string | null;
+  };
+}
+
 export interface CreateProjectInput {
   repoUrl: string;
   branch: string;

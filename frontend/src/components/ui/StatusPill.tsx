@@ -1,9 +1,17 @@
 import { cn } from '@/lib/cn';
-import { IN_FLIGHT_STATUSES, statusVisual, type BuildStatus, type StatusTone } from '@/lib/status';
+import {
+  IN_FLIGHT_STATUSES,
+  statusVisual,
+  toBuildStatus,
+  type BuildStatus,
+  type StatusTone,
+} from '@/lib/status';
 import { PulsingDot } from './PulsingDot';
 
 export interface StatusPillProps {
-  status: BuildStatus;
+  // Accept any string so raw API values (UPPERCASE enums) are tolerated;
+  // they're normalized to the lowercase UI vocabulary internally.
+  status: BuildStatus | string;
   className?: string;
 }
 
@@ -16,8 +24,9 @@ const TONE_STYLES: Record<StatusTone, string> = {
 };
 
 export function StatusPill({ status, className }: StatusPillProps) {
-  const visual = statusVisual[status];
-  const pulsing = IN_FLIGHT_STATUSES.has(status) && visual.pulsing;
+  const normalized = toBuildStatus(status);
+  const visual = statusVisual[normalized];
+  const pulsing = IN_FLIGHT_STATUSES.has(normalized) && visual.pulsing;
   return (
     <span
       className={cn(

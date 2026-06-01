@@ -80,6 +80,12 @@ const EnvSchema = z.object({
   GITHUB_OAUTH_CLIENT_ID: z.string().min(1, 'GITHUB_OAUTH_CLIENT_ID is required'),
   GITHUB_OAUTH_CLIENT_SECRET: z.string().min(1, 'GITHUB_OAUTH_CLIENT_SECRET is required'),
   GITHUB_OAUTH_CALLBACK_URL: z.string().url(),
+  // Single-user demo allow-list (CLAUDE.md "Operational policy"). When set,
+  // only this numeric GitHub user id may complete sign-in; everyone else is
+  // bounced with a "self-host" notice so the $100 student credit can't be
+  // drained by arbitrary users deploying arbitrary Dockerfiles. Leave unset
+  // (e.g. local dev / a self-hosted fork) to allow any GitHub user.
+  OWNER_GITHUB_ID: z.coerce.number().int().positive().optional(),
 
   // Azure. Required when AZURE_STUB=false. Credentials come from the API's
   // managed identity via DefaultAzureCredential — no SP env vars because the

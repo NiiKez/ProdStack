@@ -9,6 +9,7 @@ import { errorMiddleware } from './lib/errors.js';
 import { logger } from './lib/logger.js';
 import { requireAuth } from './middleware/requireAuth.js';
 import authRouter from './routes/auth.js';
+import buildsRouter from './routes/builds.js';
 import healthRouter from './routes/health.js';
 import meRouter from './routes/me.js';
 import projectsRouter from './routes/projects.js';
@@ -61,6 +62,7 @@ export function createApp(): Express {
   app.use('/api/health', healthRouter);
   app.use('/api/auth', authRouter);
   app.use('/api/projects', requireAuth, projectsRouter);
+  app.use('/api/builds', requireAuth, buildsRouter);
   app.use('/api/account', requireAuth, meRouter);
 
   app.use((_req, res) => {

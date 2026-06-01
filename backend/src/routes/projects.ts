@@ -105,6 +105,7 @@ function reshapeProject(project: ProjectWithRelations, opts: { allBuilds?: boole
         id: latest.id,
         status: latest.status,
         commitSha: latest.commitSha,
+        commitMessage: latest.commitMessage,
         createdAt: latest.createdAt,
       }
     : null;
@@ -139,6 +140,12 @@ function reshapeProject(project: ProjectWithRelations, opts: { allBuilds?: boole
       id: b.id,
       status: b.status,
       commitSha: b.commitSha,
+      commitMessage: b.commitMessage,
+      commitAuthor: b.commitAuthor,
+      branch: b.branch,
+      startedAt: b.startedAt,
+      finishedAt: b.finishedAt,
+      durationMs: b.durationMs,
       createdAt: b.createdAt,
     }));
   }

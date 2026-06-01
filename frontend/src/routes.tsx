@@ -10,6 +10,7 @@ import Placeholder from '@/pages/Placeholder';
 
 const Dashboard = lazy(() => import('@/pages/Dashboard'));
 const ProjectDetail = lazy(() => import('@/pages/ProjectDetail'));
+const BuildLogs = lazy(() => import('@/pages/BuildLogs'));
 
 function PageSpinner() {
   return (
@@ -53,7 +54,11 @@ export function AppRoutes() {
           />
           <Route
             path="/projects/:id/builds/:buildId"
-            element={<Placeholder title="Build logs" subtitle="Live logs ship in M4." />}
+            element={
+              <Suspense fallback={<PageSpinner />}>
+                <BuildLogs />
+              </Suspense>
+            }
           />
           <Route
             path="/deployments"

@@ -34,6 +34,7 @@ export default function Landing() {
   const toast = useToast();
   const next = searchParams.get('next');
   const sessionState = searchParams.get('session');
+  const denied = searchParams.get('denied');
 
   useEffect(() => {
     if (sessionState === 'expired') {
@@ -43,9 +44,17 @@ export default function Landing() {
         description: 'Your session expired — sign in again.',
       });
     }
+    if (denied === 'not_owner') {
+      toast.toast({
+        variant: 'info',
+        title: 'This is a single-user demo',
+        description:
+          'Sign-in is limited to the owner to keep hosting costs in check. Fork the repo to self-host your own instance.',
+      });
+    }
     // We intentionally only react to the search param changing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionState]);
+  }, [sessionState, denied]);
 
   const handleSignIn = () => {
     const url =
