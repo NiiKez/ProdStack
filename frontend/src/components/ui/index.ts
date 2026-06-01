@@ -47,3 +47,15 @@ export { ToastProvider, Toaster, useToast } from './Toast';
 export type { Toast, ToastInput, ToastVariant } from './Toast';
 
 export { Tabs, TabsList, TabsTrigger, TabsContent } from './Tabs';
+
+export { Select } from './Select';
+export type { SelectProps, SelectOption } from './Select';
+
+export { ConfirmDialog } from './ConfirmDialog';
+export type { ConfirmDialogProps } from './ConfirmDialog';
+
+export { KeyValueEditor, isValidEnvKey } from './KeyValueEditor';
+export type { KeyValueEditorProps, KeyValuePair } from './KeyValueEditor';
+
+export { Table, THead, TBody, TR, TH, TD, SortableTH } from './Table';
+export type { SortableTHProps, SortDirection } from './Table';

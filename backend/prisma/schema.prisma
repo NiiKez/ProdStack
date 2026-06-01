@@ -106,6 +106,13 @@ model Build {
   claimedAt      DateTime?
   claimedBy      String?
   attempts       Int         @default(0)
+  // Cooperative-cancellation flag (M5 build cancellation). The API sets this
+  // to true on `POST /api/builds/:id/cancel` for an already-claimed/in-flight
+  // build; the worker's `runBuild` poll-watches it and aborts the kaniko/git
+  // child via an AbortController, then marks the build CANCELLED. An unclaimed
+  // QUEUED build is cancelled directly by the API without this flag (it just
+  // flips status to CANCELLED before any worker can claim it).
+  cancelRequested Boolean    @default(false)
   startedAt      DateTime?
   finishedAt     DateTime?
   durationMs     Int?
@@ -114,7 +121,7 @@ model Build {
 
   project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
   logLines       LogLine[]
-  deployment     Deployment?
+  deployments    Deployment[]
 
   @@index([projectId, createdAt])
   @@index([status, claimedAt, createdAt])
@@ -123,15 +130,28 @@ model Build {
 model Deployment {
   id            String   @id @default(cuid())
   projectId     String
-  buildId       String   @unique
+  buildId       String
   revisionName  String
+  // True when this deployment is a rollback to a build that had already been
+  // deployed before (i.e. not the build's first deployment). Lets the activity
+  // feed and deployments table distinguish "deployed" from "rolled back"
+  // without re-deriving it from deployment ordering on every read.
+  rolledBack    Boolean  @default(false)
   active        Boolean  @default(false)
   createdAt     DateTime @default(now())
 
   project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   build         Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
 
+  // NOTE: a hand-maintained partial unique index enforces "one active
+  // deployment per project": `CREATE UNIQUE INDEX one_active_per_project ON
+  // "Deployment"("projectId") WHERE active = true;` (migration
+  // 20260516210200). Prisma can't express a WHERE-filtered unique in the schema,
+  // so it's invisible here — DO NOT `prisma migrate dev` against a prod DB
+  // without re-checking it isn't dropped as "drift". Prod uses `migrate deploy`
+  // (applies committed SQL only, no introspection), so it's safe there.
   @@index([projectId, createdAt])
+  @@index([buildId])
 }
 
 model LogLine {

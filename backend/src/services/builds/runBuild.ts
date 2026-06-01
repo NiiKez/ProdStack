@@ -31,6 +31,7 @@ import { env } from '../../env.js';
 import { decrypt } from '../../lib/crypto.js';
 import { logger } from '../../lib/logger.js';
 import { updateContainerApp } from '../azure/index.js';
+import { loadDecryptedEnvVars } from '../projectEnv.js';
 import { runKaniko } from './kaniko.js';
 
 const STUB_IMAGES = [
@@ -40,6 +41,12 @@ const STUB_IMAGES = [
 
 const MAX_LOG_LINES_PER_BUILD = 50_000;
 const LOG_LINE_MAX_BYTES = 8 * 1024;
+
+/** How often the runner re-reads `Build.cancelRequested` to honor a cancel. */
+const CANCEL_POLL_MS = 2000;
+
+/** Grace period after an abort's SIGTERM before escalating a child to SIGKILL. */
+const ABORT_KILL_GRACE_MS = 10_000;
 
 class LogSink {
   private nextSeq = 1;
@@ -152,25 +159,69 @@ export async function runBuild(buildId: string): Promise<void> {
 
   const startedAt = new Date();
 
+  // Cooperative cancellation: the API sets `Build.cancelRequested=true` (for a
+  // claimed/in-flight build it can't stop directly), and this controller's
+  // signal is threaded into the git clone, kaniko, and stub phases so they
+  // SIGTERM their child / bail early. A background timer polls the flag; we
+  // unref it so it can't keep the (single-use) worker process alive.
+  const cancel = new AbortController();
+  const checkCancelled = async (): Promise<boolean> => {
+    try {
+      const row = await prisma.build.findUnique({
+        where: { id: buildId },
+        select: { cancelRequested: true },
+      });
+      return row?.cancelRequested === true;
+    } catch {
+      return false;
+    }
+  };
+  const cancelTimer = setInterval(() => {
+    void (async () => {
+      if (!cancel.signal.aborted && (await checkCancelled())) cancel.abort();
+    })();
+  }, CANCEL_POLL_MS);
+  cancelTimer.unref?.();
+
   try {
     await mkdir(workDir, { recursive: true, mode: 0o700 });
     await mkdir(authDir, { recursive: true, mode: 0o700 });
+
+    // Immediate check: a cancel requested while the build sat in the claim
+    // window must be honored without waiting a full poll interval.
+    if (!cancel.signal.aborted && (await checkCancelled())) cancel.abort();
+
     await setStatus(buildId, 'CLONING', { startedAt });
 
     if (env.BUILD_RUNNER_MODE === 'stub') {
-      await runStubBuild(build, ctx);
+      await runStubBuild(build, ctx, cancel.signal);
     } else {
-      await runRealBuild(build, ctx);
+      await runRealBuild(build, ctx, cancel.signal);
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err, buildId }, 'build failed');
-    await ctx.logs.write('ERROR', `build failed: ${message}`);
-    await setStatus(buildId, 'FAILED', {
-      finishedAt: new Date(),
-      errorMessage: message,
-    });
+    if (cancel.signal.aborted) {
+      // A third terminal outcome alongside READY/FAILED. The user asked to
+      // stop; whatever the child threw on its SIGTERM is expected, not a
+      // failure — record CANCELLED, never FAILED. We still log the underlying
+      // throw (the err serializer scrubs secrets) so a real teardown error
+      // isn't fully masked by the cancellation.
+      logger.info({ buildId, err }, 'build cancelled by user');
+      await ctx.logs.write('WARN', 'build cancelled by user');
+      await setStatus(buildId, 'CANCELLED', {
+        finishedAt: new Date(),
+        errorMessage: 'cancelled by user',
+      });
+    } else {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err, buildId }, 'build failed');
+      await ctx.logs.write('ERROR', `build failed: ${message}`);
+      await setStatus(buildId, 'FAILED', {
+        finishedAt: new Date(),
+        errorMessage: message,
+      });
+    }
   } finally {
+    clearInterval(cancelTimer);
     // Drain any fire-and-forget log writes before the runner returns —
     // otherwise the trailing lines (npm error output before kaniko bails,
     // git's final fatal: …, etc.) race with `prisma.$disconnect()` in
@@ -188,7 +239,11 @@ type BuildWithRelations = Prisma.BuildGetPayload<{
   include: { project: { include: { user: true } } };
 }>;
 
-async function runRealBuild(build: BuildWithRelations, ctx: RunBuildContext): Promise<void> {
+async function runRealBuild(
+  build: BuildWithRelations,
+  ctx: RunBuildContext,
+  signal: AbortSignal,
+): Promise<void> {
   const token = decrypt({
     ciphertext: build.project.user.githubTokenCiphertext,
     iv: build.project.user.githubTokenIv,
@@ -206,6 +261,7 @@ async function runRealBuild(build: BuildWithRelations, ctx: RunBuildContext): Pr
     commitSha: build.commitSha,
     token,
     intoDir: ctx.repoDir,
+    signal,
     onLine: (line) => {
       ctx.logs.emit(classifyLine(line), `git: ${line}`);
     },
@@ -229,11 +285,18 @@ async function runRealBuild(build: BuildWithRelations, ctx: RunBuildContext): Pr
     dockerfile,
     destinations: [shaTag, latestTag],
     timeoutMs: env.BUILD_TIMEOUT_MS,
+    signal,
     onLine: (line, stream) => {
       ctx.logs.emit(classifyLine(line), `${stream}: ${line}`);
     },
   });
 
+  // A cancel during the build SIGTERMs kaniko → non-zero exit. Surface it as
+  // the cancellation it is (the catch in runBuild keys off signal.aborted),
+  // not a spurious "kaniko exited with code N" failure.
+  if (signal.aborted) {
+    throw new Error('cancelled');
+  }
   if (result.timedOut) {
     throw new Error(`build exceeded ${env.BUILD_TIMEOUT_MS}ms timeout`);
   }
@@ -246,6 +309,11 @@ async function runRealBuild(build: BuildWithRelations, ctx: RunBuildContext): Pr
   await setStatus(ctx.buildId, 'PUSHING');
   await ctx.logs.write('STEP', `pushed → ${shaTag}`);
 
+  // Last chance to bail before the (non-abortable) Azure deploy starts. Once
+  // updateContainerApp is in flight we let it finish → READY.
+  if (signal.aborted) {
+    throw new Error('cancelled');
+  }
   await deployAndRecord(build, ctx, shaTag);
 }
 
@@ -256,6 +324,7 @@ async function cloneRepo(opts: {
   token: string;
   intoDir: string;
   onLine: (line: string) => void;
+  signal?: AbortSignal;
 }): Promise<void> {
   // Auth via `http.<url>.extraheader` instead of embedding `x-access-token:`
   // in the URL. Two reasons:
@@ -291,15 +360,17 @@ async function cloneRepo(opts: {
     await spawnLogged(
       'git',
       ['-c', noCredHelper, '-c', authConfig, 'clone', '--depth', '1', '--branch', opts.branch, url, opts.intoDir],
-      { onLine: gitOnLine, redact: opts.token, env: gitEnv },
+      { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
     );
   } catch (err) {
+    // Don't retry anonymously on a cancel — the user asked to stop.
+    if (opts.signal?.aborted) throw err;
     opts.onLine(`git: authenticated clone failed (${(err as Error).message}); retrying anonymously`);
     await rm(opts.intoDir, { recursive: true, force: true });
     await spawnLogged(
       'git',
       ['-c', noCredHelper, 'clone', '--depth', '1', '--branch', opts.branch, url, opts.intoDir],
-      { onLine: gitOnLine, redact: opts.token, env: gitEnv },
+      { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
     );
   }
 
@@ -320,18 +391,21 @@ async function cloneRepo(opts: {
       'origin',
       opts.commitSha,
     ],
-    { onLine: gitOnLine, redact: opts.token, env: gitEnv },
+    { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
   ).catch(() => {
     // Older git servers reject single-sha fetch; the shallow clone above is
     // good enough when HEAD hasn't moved. Continue.
   });
+  if (opts.signal?.aborted) throw new Error('cancelled');
   await spawnLogged('git', ['-C', opts.intoDir, 'checkout', opts.commitSha], {
     onLine: gitOnLine,
     redact: opts.token,
     env: gitEnv,
+    signal: opts.signal,
   }).catch(() => {
     // Same fallback — if checkout fails the shallow HEAD is what we'll build.
   });
+  if (opts.signal?.aborted) throw new Error('cancelled');
 }
 
 function basicAuth(token: string): string {
@@ -345,6 +419,7 @@ function spawnLogged(
     onLine: (line: string) => void;
     redact: string;
     env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
   },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -352,6 +427,27 @@ function spawnLogged(
       stdio: ['ignore', 'pipe', 'pipe'],
       env: opts.env,
     });
+
+    // Cooperative cancel: SIGTERM the child if the build is being cancelled,
+    // escalating to SIGKILL if it doesn't exit within the grace period.
+    let killTimer: NodeJS.Timeout | undefined;
+    const onAbort = (): void => {
+      child.kill('SIGTERM');
+      killTimer = setTimeout(() => child.kill('SIGKILL'), ABORT_KILL_GRACE_MS);
+      killTimer.unref?.();
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        child.kill('SIGTERM');
+      } else {
+        opts.signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
+    const detach = (): void => {
+      if (killTimer) clearTimeout(killTimer);
+      opts.signal?.removeEventListener('abort', onAbort);
+    };
+
     let buffer = '';
     const onChunk = (chunk: Buffer | string): void => {
       buffer += chunk.toString();
@@ -364,8 +460,12 @@ function spawnLogged(
     };
     child.stdout?.on('data', onChunk);
     child.stderr?.on('data', onChunk);
-    child.on('error', reject);
+    child.on('error', (err) => {
+      detach();
+      reject(err);
+    });
     child.on('close', (code) => {
+      detach();
       const tail = buffer.trim();
       if (tail.length > 0) opts.onLine(redact(tail, opts.redact));
       if (code === 0) resolve();
@@ -381,20 +481,43 @@ function redact(line: string, secret: string): string {
 
 // --- Stub path (mirrors M2.5) ---------------------------------------------
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/** Sleep that resolves early when `signal` aborts, so a cancel isn't blocked. */
+function interruptibleSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
-async function runStubBuild(build: BuildWithRelations, ctx: RunBuildContext): Promise<void> {
+async function runStubBuild(
+  build: BuildWithRelations,
+  ctx: RunBuildContext,
+  signal: AbortSignal,
+): Promise<void> {
   const image = STUB_IMAGES[build.commitSha.charCodeAt(0) % STUB_IMAGES.length]!;
 
   await ctx.logs.write(
     'STEP',
     `stub: cloning ${build.project.githubRepoFullName}@${build.commitSha.slice(0, 7)}`,
   );
-  await sleep(1500);
+  await interruptibleSleep(1500, signal);
+  if (signal.aborted) throw new Error('cancelled');
 
   await setStatus(ctx.buildId, 'BUILDING', { imageTag: image });
   await ctx.logs.write('STEP', `stub: pretending to build (target image=${image})`);
-  await sleep(1500);
+  await interruptibleSleep(1500, signal);
+  if (signal.aborted) throw new Error('cancelled');
 
   await deployAndRecord(build, ctx, image);
 }
@@ -412,14 +535,28 @@ async function deployAndRecord(
     `rolling ${build.project.containerAppName} to ${image}`,
   );
 
+  // Reconcile the Container App's env to the project's declared env vars on
+  // every deploy: each value is surfaced as an Azure secret + `secretRef`
+  // (encrypted at rest), mirroring how it's stored in the DB. Passing the
+  // full list (even empty) keeps the running app's env in lockstep with the
+  // project — a deleted var disappears on the next build.
+  const envVars = await loadDecryptedEnvVars(build.projectId);
+  if (envVars.length > 0) {
+    await ctx.logs.write('STEP', `applying ${envVars.length} env var(s) as secrets`);
+  }
+
   const deploy = await updateContainerApp({
     name: build.project.containerAppName,
     image,
+    envVars,
   });
 
   const finishedAt = new Date();
   const startedAtMs = build.startedAt?.getTime() ?? finishedAt.getTime();
   const durationMs = finishedAt.getTime() - startedAtMs;
+
+  const fallbackRevision =
+    env.BUILD_RUNNER_MODE === 'stub' ? 'stub' : build.commitSha.slice(0, 12);
 
   await prisma.$transaction([
     prisma.deployment.updateMany({
@@ -430,7 +567,7 @@ async function deployAndRecord(
       data: {
         projectId: build.projectId,
         buildId: build.id,
-        revisionName: env.BUILD_RUNNER_MODE === 'stub' ? 'stub' : build.commitSha.slice(0, 12),
+        revisionName: deploy.revisionName ?? fallbackRevision,
         active: true,
       },
     }),

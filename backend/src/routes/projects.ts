@@ -4,6 +4,8 @@ import { Prisma } from '@prisma/client';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { z } from 'zod';
 
+import { BuildStatus } from '@prisma/client';
+
 import { prisma } from '../db.js';
 import { env } from '../env.js';
 import { decrypt, encrypt } from '../lib/crypto.js';
@@ -12,11 +14,18 @@ import { logger } from '../lib/logger.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 import { createContainerApp, deleteContainerApp } from '../services/azure/index.js';
 import {
+  IN_FLIGHT_BUILD_STATUSES,
+  redeployWithCurrentEnv,
+  rollbackToDeployment,
+} from '../services/deploy.js';
+import {
   createRepoWebhook,
   deleteRepoWebhook,
+  fetchBranchHeadCommit,
   GithubWebhookError,
   octokitForUser,
 } from '../services/github.js';
+import { loadDecryptedEnvVars } from '../services/projectEnv.js';
 import { containerAppName, dedupedSlug, slugify } from '../services/slug.js';
 
 const router = Router();
@@ -31,6 +40,34 @@ const MAX_ENV_VARS_PER_PROJECT = 100;
 const MAX_ENV_VALUE_BYTES = 32 * 1024;
 
 const idParamSchema = z.object({ id: z.string().min(1).max(40) });
+
+const rollbackParamSchema = z.object({
+  id: z.string().min(1).max(40),
+  deploymentId: z.string().min(1).max(40),
+});
+
+const BUILD_STATUSES = new Set<string>(Object.values(BuildStatus));
+
+const buildsQuerySchema = z.object({
+  // Comma-separated BuildStatus values, e.g. `?status=READY,FAILED`.
+  status: z.string().max(200).optional(),
+  branch: z.string().max(255).optional(),
+  sort: z.enum(['created', 'duration']).default('created'),
+  order: z.enum(['asc', 'desc']).default('desc'),
+  // ISO timestamp lower bound on createdAt (date-range filter).
+  since: z.string().datetime().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(40).optional(),
+});
+
+const deploymentsQuerySchema = z.object({
+  activeOnly: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => v === 'true'),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(40).optional(),
+});
 
 const createBodySchema = z.object({
   repoUrl: z.string().min(1).max(2048),
@@ -151,6 +188,89 @@ function reshapeProject(project: ProjectWithRelations, opts: { allBuilds?: boole
   }
 
   return base;
+}
+
+interface BuildRow {
+  id: string;
+  status: BuildStatus;
+  commitSha: string;
+  commitMessage: string;
+  commitAuthor: string;
+  branch: string;
+  imageTag: string | null;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  durationMs: number | null;
+  errorMessage: string | null;
+  createdAt: Date;
+}
+
+function serializeBuildRow(b: BuildRow) {
+  return {
+    id: b.id,
+    status: b.status,
+    commitSha: b.commitSha,
+    commitMessage: b.commitMessage,
+    commitAuthor: b.commitAuthor,
+    branch: b.branch,
+    imageTag: b.imageTag,
+    startedAt: b.startedAt,
+    finishedAt: b.finishedAt,
+    durationMs: b.durationMs,
+    errorMessage: b.errorMessage,
+    createdAt: b.createdAt,
+  };
+}
+
+function serializeDeploymentRow(d: {
+  id: string;
+  revisionName: string;
+  active: boolean;
+  rolledBack: boolean;
+  createdAt: Date;
+  build: BuildRow;
+}) {
+  return {
+    id: d.id,
+    revisionName: d.revisionName,
+    active: d.active,
+    rolledBack: d.rolledBack,
+    createdAt: d.createdAt,
+    build: {
+      id: d.build.id,
+      status: d.build.status,
+      commitSha: d.build.commitSha,
+      commitMessage: d.build.commitMessage,
+      commitAuthor: d.build.commitAuthor,
+      branch: d.build.branch,
+      imageTag: d.build.imageTag,
+    },
+  };
+}
+
+/** Parse a `?status=A,B` filter into a list of valid BuildStatus values. */
+function parseStatusFilter(raw: string | undefined): BuildStatus[] | undefined {
+  if (raw === undefined) return undefined;
+  const values = raw
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter((s) => BUILD_STATUSES.has(s)) as BuildStatus[];
+  return values.length > 0 ? values : undefined;
+}
+
+/**
+ * Look up a live project owned by `userId`, throwing 404 otherwise. Shared by
+ * the per-project sub-resource routes so each one enforces ownership before
+ * touching builds/deployments.
+ */
+async function requireOwnedProject(id: string, userId: string) {
+  const project = await prisma.project.findFirst({
+    where: { id, userId, deletedAt: null },
+  });
+  if (project === null) {
+    throw new HttpError(404, 'PROJECT_NOT_FOUND');
+  }
+  return project;
 }
 
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
@@ -318,11 +438,213 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
     if (project === null) {
       throw new HttpError(404, 'PROJECT_NOT_FOUND');
     }
-    res.json(reshapeProject(project, { allBuilds: true }));
+    const envVars = await loadDecryptedEnvVars(project.id);
+    res.json({
+      ...reshapeProject(project, { allBuilds: true }),
+      envVars: envVars.map((e) => ({ key: e.name, value: e.value })),
+    });
   } catch (err) {
     next(err);
   }
 });
+
+// --- GET /:id/builds (paginated, filterable, sortable) ---------------------
+
+router.get('/:id/builds', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = idParamSchema.parse(req.params);
+    const user = getUser(req);
+    const q = buildsQuerySchema.parse(req.query);
+    await requireOwnedProject(id, user.id);
+
+    const statuses = parseStatusFilter(q.status);
+    const where: Prisma.BuildWhereInput = { projectId: id };
+    if (statuses) where.status = { in: statuses };
+    if (q.branch) where.branch = q.branch;
+    if (q.since) where.createdAt = { gte: new Date(q.since) };
+
+    // Keyset pagination: order by the chosen field with `id` as a stable
+    // tiebreaker, continue strictly after the cursor row. `take: limit + 1`
+    // peeks one past the page to compute `nextCursor` without a count query.
+    const orderBy: Prisma.BuildOrderByWithRelationInput[] =
+      q.sort === 'duration'
+        ? [{ durationMs: q.order }, { id: 'desc' }]
+        : [{ createdAt: q.order }, { id: 'desc' }];
+
+    const rows = await prisma.build.findMany({
+      where,
+      orderBy,
+      take: q.limit + 1,
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+    });
+
+    const hasMore = rows.length > q.limit;
+    const items = hasMore ? rows.slice(0, q.limit) : rows;
+    res.json({
+      items: items.map(serializeBuildRow),
+      nextCursor: hasMore ? (items[items.length - 1]?.id ?? null) : null,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- GET /:id/deployments (paginated) --------------------------------------
+
+router.get('/:id/deployments', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = idParamSchema.parse(req.params);
+    const user = getUser(req);
+    const q = deploymentsQuerySchema.parse(req.query);
+    await requireOwnedProject(id, user.id);
+
+    const where: Prisma.DeploymentWhereInput = { projectId: id };
+    if (q.activeOnly) where.active = true;
+
+    const rows = await prisma.deployment.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: q.limit + 1,
+      include: { build: true },
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+    });
+
+    const hasMore = rows.length > q.limit;
+    const items = hasMore ? rows.slice(0, q.limit) : rows;
+    res.json({
+      items: items.map(serializeDeploymentRow),
+      nextCursor: hasMore ? (items[items.length - 1]?.id ?? null) : null,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- POST /:id/deployments/:deploymentId/rollback --------------------------
+
+router.post(
+  '/:id/deployments/:deploymentId/rollback',
+  requireXRequestedWith,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id, deploymentId } = rollbackParamSchema.parse(req.params);
+      const user = getUser(req);
+      // Ownership is enforced inside the service (scoped to the user's live
+      // project), which also 404s a foreign/unknown deployment.
+      const deployment = await rollbackToDeployment({
+        projectId: id,
+        deploymentId,
+        userId: user.id,
+      });
+      res.status(201).json(serializeDeploymentRow(deployment));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// --- POST /:id/rebuild (manual rebuild of the current branch head) ---------
+
+router.post(
+  '/:id/rebuild',
+  requireXRequestedWith,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id } = idParamSchema.parse(req.params);
+      const user = getUser(req);
+      const project = await requireOwnedProject(id, user.id);
+
+      // One build at a time per project: a concurrent in-flight build already
+      // owns the deploy, so a second one would race it. This check + insert is
+      // not atomic (no serializable tx / unique index), so two near-simultaneous
+      // rebuilds — or a rebuild racing a webhook push — can both enqueue. That's
+      // accepted: the single-replica worker claims QUEUED rows one at a time
+      // (FOR UPDATE SKIP LOCKED), so they run sequentially rather than racing the
+      // same deploy, and the single-user gate makes the window vanishingly rare.
+      const inFlight = await prisma.build.findFirst({
+        where: { projectId: project.id, status: { in: IN_FLIGHT_BUILD_STATUSES } },
+        select: { id: true },
+      });
+      if (inFlight !== null) {
+        throw new HttpError(409, 'BUILD_IN_PROGRESS', 'A build is already running for this project.');
+      }
+
+      // Resolve the commit to build: prefer the live branch head from GitHub,
+      // fall back to the project's most recent stored build if GitHub is
+      // unreachable (token revoked, repo gone, transient API error).
+      let commit: { sha: string; message: string; author: string } | null = null;
+      const [owner, repo] = project.githubRepoFullName.split('/');
+      if (owner !== undefined && repo !== undefined) {
+        try {
+          const userRow = await prisma.user.findUnique({ where: { id: user.id } });
+          if (userRow === null) {
+            throw new HttpError(401, 'UNAUTHENTICATED');
+          }
+          const githubToken = decrypt({
+            ciphertext: userRow.githubTokenCiphertext,
+            iv: userRow.githubTokenIv,
+            authTag: userRow.githubTokenAuthTag,
+            keyVersion: userRow.githubTokenKeyVersion,
+          });
+          const octokit = octokitForUser(githubToken);
+          commit = await fetchBranchHeadCommit(octokit, {
+            owner,
+            repo,
+            ref: project.branch,
+          });
+        } catch (err) {
+          if (err instanceof HttpError) throw err;
+          logger.warn(
+            { err, projectId: project.id, repo: project.githubRepoFullName },
+            'rebuild: github commit lookup failed; falling back to last build',
+          );
+        }
+      }
+
+      if (commit === null) {
+        const lastBuild = await prisma.build.findFirst({
+          where: { projectId: project.id },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (lastBuild !== null) {
+          commit = {
+            sha: lastBuild.commitSha,
+            message: lastBuild.commitMessage,
+            author: lastBuild.commitAuthor,
+          };
+        }
+      }
+
+      if (commit === null) {
+        throw new HttpError(
+          400,
+          'NO_COMMIT_AVAILABLE',
+          'Could not determine a commit to build. Push to the repo first.',
+        );
+      }
+
+      const build = await prisma.build.create({
+        data: {
+          projectId: project.id,
+          commitSha: commit.sha,
+          commitMessage: commit.message,
+          commitAuthor: commit.author,
+          branch: project.branch,
+          status: 'QUEUED',
+        },
+        select: { id: true },
+      });
+
+      logger.info(
+        { projectId: project.id, buildId: build.id, commitSha: commit.sha },
+        'manual rebuild queued',
+      );
+      res.status(202).json({ buildId: build.id });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 router.patch(
   '/:id',
@@ -343,6 +665,25 @@ router.patch(
       const updates: Prisma.ProjectUpdateInput = {};
       if (body.branch !== undefined) updates.branch = body.branch;
       if (body.name !== undefined) updates.name = body.name;
+
+      // When env vars are submitted, diff the desired set against what's stored
+      // so we only trigger a config-only redeploy when something actually
+      // changed (no-op saves shouldn't roll a new Azure revision).
+      const envVarsProvided = body.envVars !== undefined && body.envVars !== null;
+      let envVarsChanged = false;
+      if (envVarsProvided) {
+        const existing = await loadDecryptedEnvVars(project.id);
+        const desired = body.envVars!;
+        // Structural diff by (key → value): added/removed key or any value
+        // change triggers the redeploy; a no-op save doesn't. Compares maps
+        // directly rather than via a `KEY=value` string join so it doesn't
+        // lean on the key-charset invariant (keys can't contain `=`) to stay
+        // unambiguous — clearer and robust if that validation ever loosens.
+        const existingMap = new Map(existing.map((e) => [e.name, e.value]));
+        envVarsChanged =
+          existingMap.size !== desired.length ||
+          desired.some((e) => !existingMap.has(e.key) || existingMap.get(e.key) !== e.value);
+      }
 
       const refreshed = await prisma.$transaction(async (tx) => {
         if (Object.keys(updates).length > 0) {
@@ -390,7 +731,11 @@ router.patch(
               },
             });
           }
-          // TODO M5: trigger redeploy with last successful image
+          // Stored encrypted here; surfaced to the Container App as secrets on
+          // the next deploy via `loadDecryptedEnvVars`. A config-only change now
+          // auto-triggers a redeploy of the current image after this tx commits
+          // (see `redeployWithCurrentEnv` below), so saving env vars goes live
+          // without requiring a git push.
         }
 
         return tx.project.findFirstOrThrow({
@@ -399,7 +744,38 @@ router.patch(
         });
       });
 
-      res.json(reshapeProject(refreshed, { allBuilds: true }));
+      // After the save commits, redeploy the current image with the new env
+      // vars so the change is live immediately. This is best-effort: the env
+      // vars are already persisted, so a redeploy failure (including a 4xx like
+      // ROLLBACK_CONFLICT) is reported in the response but never fails the save.
+      let redeploySummary: { redeployed: boolean; reason?: string } | undefined;
+      if (envVarsProvided) {
+        if (!envVarsChanged) {
+          // Nothing changed → nothing to roll.
+          redeploySummary = { redeployed: false };
+        } else {
+          try {
+            const result = await redeployWithCurrentEnv({
+              projectId: project.id,
+              userId: user.id,
+            });
+            redeploySummary = result.reason
+              ? { redeployed: result.redeployed, reason: result.reason }
+              : { redeployed: result.redeployed };
+          } catch (err) {
+            logger.warn(
+              { err, projectId: project.id },
+              'redeploy after env-var save failed; env vars saved, redeploy skipped',
+            );
+            redeploySummary = { redeployed: false, reason: 'REDEPLOY_FAILED' };
+          }
+        }
+      }
+
+      res.json({
+        ...reshapeProject(refreshed, { allBuilds: true }),
+        ...(redeploySummary ? { redeploy: redeploySummary } : {}),
+      });
     } catch (err) {
       next(err);
     }

@@ -25,6 +25,9 @@ import { env } from '../../env.js';
 
 const KANIKO_IMAGE = 'gcr.io/kaniko-project/executor:v1.23.2';
 
+/** Grace period after an abort's SIGTERM before escalating to SIGKILL. */
+const ABORT_KILL_GRACE_MS = 10_000;
+
 export interface KanikoOptions {
   contextDir: string;
   /**
@@ -163,8 +166,16 @@ function spawnAndStream(
       child.kill('SIGKILL');
     }, opts.timeoutMs);
 
+    // On abort, SIGTERM the child and escalate to SIGKILL if it hasn't exited
+    // within the grace period. kaniko can be unresponsive to SIGTERM mid-
+    // snapshot, and in docker mode the `docker run` CLI doesn't reliably
+    // forward the signal — without the escalation a cancelled build would hog
+    // the single-replica builder's slot until the hard build timeout.
+    let killTimer: NodeJS.Timeout | undefined;
     const onAbort = (): void => {
       child.kill('SIGTERM');
+      killTimer = setTimeout(() => child.kill('SIGKILL'), ABORT_KILL_GRACE_MS);
+      killTimer.unref?.();
     };
     if (opts.signal) {
       if (opts.signal.aborted) {
@@ -181,12 +192,14 @@ function spawnAndStream(
 
     child.on('error', (err) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       reject(err);
     });
 
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       resolve({ exitCode: code ?? -1, timedOut });
     });

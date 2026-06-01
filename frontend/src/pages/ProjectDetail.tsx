@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -8,7 +8,9 @@ import {
   Github,
   GitBranch,
   Rocket,
+  RotateCcw,
   Trash2,
+  XCircle,
 } from 'lucide-react';
 import {
   Avatar,
@@ -16,27 +18,47 @@ import {
   Button,
   Card,
   CommitRef,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
   IconButton,
   Input,
+  KeyValueEditor,
   RelativeTime,
+  Select,
+  Skeleton,
   Spinner,
   StatusPill,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
   Tabs,
   TabsContent,
   TabsList,
   TabsTrigger,
+  isValidEnvKey,
   useToast,
 } from '@/components/ui';
+import type { KeyValuePair } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { api } from '@/lib/api';
+import { isInFlight } from '@/lib/status';
 import { useProject } from '@/hooks/useProject';
 import { useDeleteProject } from '@/hooks/useDeleteProject';
+import { useProjectBuilds, type BuildFilters } from '@/hooks/useProjectBuilds';
+import { useProjectDeployments } from '@/hooks/useProjectDeployments';
+import { useRollbackDeployment } from '@/hooks/useRollbackDeployment';
+import { useRebuildProject } from '@/hooks/useRebuildProject';
+import { useCancelBuild } from '@/hooks/useCancelBuild';
 import type {
   BuildSummary,
+  DeploymentListItem,
   ProjectDetail as ProjectDetailType,
   UpdateProjectInput,
+  UpdateProjectResult,
 } from '@/types/api';
 
 type TabValue = 'overview' | 'builds' | 'deployments' | 'settings';
@@ -151,7 +173,7 @@ export default function ProjectDetail() {
           <BuildsTab project={project} />
         </TabsContent>
         <TabsContent value="deployments">
-          <DeploymentsTab />
+          <DeploymentsTab project={project} />
         </TabsContent>
         <TabsContent value="settings">
           <SettingsTab project={project} />
@@ -242,6 +264,12 @@ interface OverviewTabProps {
 }
 
 function OverviewTab({ project }: OverviewTabProps) {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const rebuild = useRebuildProject();
+  const cancelBuild = useCancelBuild();
+  const [cancelOpen, setCancelOpen] = useState(false);
+
   const latest = project.latestBuild;
   const active = project.activeDeployment;
   // Look up author from builds list when available (richer than latestBuild).
@@ -249,6 +277,42 @@ function OverviewTab({ project }: OverviewTabProps) {
     ? project.builds.find((b) => b.id === latest.id)
     : undefined;
   const authorName = latestBuildFull?.commitAuthor ?? '';
+
+  const buildInFlight = isInFlight(latest?.status);
+
+  const handleRebuild = async () => {
+    try {
+      const result = await rebuild.mutateAsync(project.id);
+      toast({ title: 'Build queued', variant: 'success' });
+      navigate(`/projects/${project.id}/builds/${result.buildId}`);
+    } catch (err) {
+      const description = err instanceof Error ? err.message : '';
+      toast({
+        title: 'Could not start build',
+        variant: 'error',
+        ...(description ? { description } : {}),
+      });
+    }
+  };
+
+  const handleCancelLatest = async () => {
+    if (!latest) return;
+    try {
+      const result = await cancelBuild.mutateAsync({ buildId: latest.id, projectId: project.id });
+      toast({
+        title: result.cancelRequested ? 'Cancelling build…' : 'Build cancelled',
+        variant: 'success',
+      });
+      setCancelOpen(false);
+    } catch (err) {
+      const description = err instanceof Error ? err.message : '';
+      toast({
+        title: 'Could not cancel build',
+        variant: 'error',
+        ...(description ? { description } : {}),
+      });
+    }
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -277,13 +341,24 @@ function OverviewTab({ project }: OverviewTabProps) {
                 )}
                 <RelativeTime value={latest.createdAt} />
               </div>
-              <div>
+              <div className="flex items-center gap-3">
                 <Link
                   to={`/projects/${project.id}/builds/${latest.id}`}
                   className="inline-flex items-center gap-1 text-xs font-medium text-indigo-300 hover:text-indigo-200"
                 >
                   View logs
                 </Link>
+                {buildInFlight && (
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    leadingIcon={<XCircle size={14} />}
+                    onClick={() => setCancelOpen(true)}
+                    title="Stop this running build"
+                  >
+                    Cancel
+                  </Button>
+                )}
               </div>
             </>
           ) : (
@@ -327,8 +402,10 @@ function OverviewTab({ project }: OverviewTabProps) {
         <Button
           leadingIcon={<Rocket size={16} />}
           variant="secondary"
-          disabled
-          title="Available after first push"
+          disabled={buildInFlight || rebuild.isPending}
+          loading={rebuild.isPending}
+          title={buildInFlight ? 'A build is already running' : 'Build the latest commit on this branch'}
+          onClick={() => void handleRebuild()}
         >
           Trigger build
         </Button>
@@ -346,6 +423,18 @@ function OverviewTab({ project }: OverviewTabProps) {
           Open in GitHub
         </a>
       </div>
+
+      <ConfirmDialog
+        open={cancelOpen}
+        onOpenChange={setCancelOpen}
+        title="Cancel this build?"
+        description="The build will stop and be marked as cancelled."
+        confirmLabel="Cancel build"
+        cancelLabel="Keep building"
+        variant="danger"
+        loading={cancelBuild.isPending}
+        onConfirm={() => void handleCancelLatest()}
+      />
     </div>
   );
 }
@@ -354,52 +443,354 @@ interface BuildsTabProps {
   project: ProjectDetailType;
 }
 
+function Chip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
+        active
+          ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-200'
+          : 'border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200',
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function formatDuration(ms: number | null): string {
+  if (ms == null || ms < 0) return '—';
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}m ${s}s`;
+}
+
+const STATUS_GROUPS: ReadonlyArray<{ label: string; statuses: string[] }> = [
+  { label: 'Success', statuses: ['READY'] },
+  { label: 'In progress', statuses: ['QUEUED', 'CLONING', 'BUILDING', 'PUSHING', 'DEPLOYING'] },
+  { label: 'Failed', statuses: ['FAILED'] },
+  { label: 'Cancelled', statuses: ['CANCELLED'] },
+];
+
+const RANGE_OPTIONS = [
+  { value: 'all', label: 'All time' },
+  { value: '24h', label: 'Last 24h' },
+  { value: '7d', label: 'Last 7 days' },
+  { value: '30d', label: 'Last 30 days' },
+];
+
+const SORT_OPTIONS = [
+  { value: 'created:desc', label: 'Newest first' },
+  { value: 'created:asc', label: 'Oldest first' },
+  { value: 'duration:desc', label: 'Longest build' },
+  { value: 'duration:asc', label: 'Shortest build' },
+];
+
+function sinceFromRange(range: string): string | undefined {
+  const days = range === '24h' ? 1 : range === '7d' ? 7 : range === '30d' ? 30 : 0;
+  if (days === 0) return undefined;
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function BuildsTab({ project }: BuildsTabProps) {
-  if (project.builds.length === 0) {
+  const [groups, setGroups] = useState<Set<string>>(new Set());
+  const [range, setRange] = useState('all');
+  const [sort, setSort] = useState('created:desc');
+
+  const filters = useMemo<BuildFilters>(() => {
+    const statuses = STATUS_GROUPS.filter((g) => groups.has(g.label)).flatMap((g) => g.statuses);
+    const [sortField, order] = sort.split(':') as ['created' | 'duration', 'asc' | 'desc'];
+    const since = sinceFromRange(range);
+    return {
+      ...(statuses.length > 0 ? { status: statuses } : {}),
+      sort: sortField,
+      order,
+      ...(since ? { since } : {}),
+    };
+  }, [groups, range, sort]);
+
+  const query = useProjectBuilds(project.id, filters);
+  const builds = query.data?.pages.flatMap((p) => p.items) ?? [];
+  const anyFilter = groups.size > 0 || range !== 'all';
+
+  const toggleGroup = (label: string) => {
+    setGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {STATUS_GROUPS.map((g) => (
+            <Chip key={g.label} active={groups.has(g.label)} onClick={() => toggleGroup(g.label)}>
+              {g.label}
+            </Chip>
+          ))}
+        </div>
+        <div className="flex items-end gap-2">
+          <Select
+            label="Range"
+            options={RANGE_OPTIONS}
+            value={range}
+            onChange={(e) => setRange(e.target.value)}
+          />
+          <Select
+            label="Sort"
+            options={SORT_OPTIONS}
+            value={sort}
+            onChange={(e) => setSort(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {query.isLoading ? (
+        <Card className="p-4">
+          <Skeleton lines={5} />
+        </Card>
+      ) : query.isError ? (
+        <ErrorState
+          title="Couldn't load builds"
+          onRetry={() => {
+            void query.refetch();
+          }}
+        />
+      ) : builds.length === 0 ? (
+        <EmptyState
+          title={anyFilter ? 'No builds match these filters' : 'No builds yet'}
+          description={
+            anyFilter
+              ? 'Try clearing a filter or widening the date range.'
+              : 'Push a commit to your repo to trigger the first build.'
+          }
+        />
+      ) : (
+        <>
+          <Card className="overflow-hidden">
+            <ul className="divide-y divide-slate-800">
+              {builds.map((b) => (
+                <li key={b.id}>
+                  <Link
+                    to={`/projects/${project.id}/builds/${b.id}`}
+                    className={cn(
+                      'grid grid-cols-[auto_1fr_auto_auto_auto] items-center gap-3 px-4 py-3',
+                      'hover:bg-slate-800/40 transition-colors',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-inset',
+                    )}
+                  >
+                    <StatusPill status={b.status} />
+                    <div className="flex min-w-0 items-center gap-2">
+                      <CommitRef sha={b.commitSha} />
+                      <span className="truncate text-sm text-slate-300">{b.commitMessage}</span>
+                    </div>
+                    <Badge mono variant="neutral">
+                      {b.branch}
+                    </Badge>
+                    <span className="font-mono text-xs text-slate-500">
+                      {formatDuration(b.durationMs)}
+                    </span>
+                    <RelativeTime value={b.startedAt ?? b.createdAt} className="text-xs" />
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </Card>
+          {query.hasNextPage && (
+            <div className="flex justify-center">
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={query.isFetchingNextPage}
+                onClick={() => void query.fetchNextPage()}
+              >
+                Load more
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function DeploymentsTab({ project }: { project: ProjectDetailType }) {
+  const { toast } = useToast();
+  const query = useProjectDeployments(project.id);
+  const rollback = useRollbackDeployment();
+  const [target, setTarget] = useState<DeploymentListItem | null>(null);
+
+  const deployments = query.data?.pages.flatMap((p) => p.items) ?? [];
+
+  // The deployments list has no in-flight signal to poll on, but the project
+  // query does poll live while a build runs. When the newest build flips from
+  // in-flight → READY a fresh deployment row was just created, so refetch once
+  // on that transition (otherwise the tab shows the previous Active row stale).
+  const latestStatus = project.latestBuild?.status;
+  const prevStatusRef = useRef<string | undefined>(latestStatus);
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = latestStatus;
+    // On any in-flight → terminal transition the build just finished; a READY
+    // build means a fresh deployment row exists. (FAILED/CANCELLED refetch is a
+    // harmless no-op — no new deployment.)
+    if (prev && isInFlight(prev) && !isInFlight(latestStatus)) {
+      void query.refetch();
+    }
+    // query.refetch is stable across renders (TanStack Query).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [latestStatus]);
+
+  const handleRollback = async () => {
+    if (!target) return;
+    try {
+      await rollback.mutateAsync({ projectId: project.id, deploymentId: target.id });
+      toast({ title: `Rolling back to ${target.build.commitSha.slice(0, 7)}…`, variant: 'success' });
+      setTarget(null);
+    } catch (err) {
+      const description = err instanceof Error ? err.message : '';
+      toast({
+        title: 'Rollback failed',
+        variant: 'error',
+        ...(description ? { description } : {}),
+      });
+    }
+  };
+
+  if (query.isLoading) {
+    return (
+      <Card className="p-4">
+        <Skeleton lines={5} />
+      </Card>
+    );
+  }
+  if (query.isError) {
+    return (
+      <ErrorState
+        title="Couldn't load deployments"
+        onRetry={() => {
+          void query.refetch();
+        }}
+      />
+    );
+  }
+  if (deployments.length === 0) {
     return (
       <EmptyState
-        title="No builds yet"
-        description="Push a commit to your repo to trigger the first build."
+        title="No deployments yet"
+        description="Deployments appear after the first successful build."
       />
     );
   }
 
   return (
-    <Card className="overflow-hidden">
-      <ul className="divide-y divide-slate-800">
-        {project.builds.map((b) => (
-          <li key={b.id}>
-            <Link
-              to={`/projects/${project.id}/builds/${b.id}`}
-              className={cn(
-                'grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 px-4 py-3',
-                'hover:bg-slate-800/40 transition-colors',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-inset'
-              )}
-            >
-              <StatusPill status={b.status} />
-              <div className="flex min-w-0 items-center gap-2">
-                <CommitRef sha={b.commitSha} />
-                <span className="truncate text-sm text-slate-300">{b.commitMessage}</span>
-              </div>
-              <Badge mono variant="neutral">
-                {b.branch}
-              </Badge>
-              <RelativeTime value={b.startedAt ?? b.createdAt} className="text-xs" />
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </Card>
-  );
-}
+    <div className="flex flex-col gap-4">
+      <Table>
+        <THead>
+          <TR>
+            <TH>Status</TH>
+            <TH>Revision</TH>
+            <TH>Commit</TH>
+            <TH>Deployed</TH>
+            <TH className="text-right">Actions</TH>
+          </TR>
+        </THead>
+        <TBody>
+          {deployments.map((d) => (
+            <TR key={d.id}>
+              <TD>
+                {d.active ? (
+                  <Badge variant="success">Active</Badge>
+                ) : d.rolledBack ? (
+                  <Badge variant="accent">Rolled back</Badge>
+                ) : (
+                  <Badge variant="neutral">Replaced</Badge>
+                )}
+              </TD>
+              <TD className="font-mono text-xs text-slate-400">{d.revisionName}</TD>
+              <TD>
+                <div className="flex min-w-0 items-center gap-2">
+                  <CommitRef sha={d.build.commitSha} />
+                  <span className="max-w-[22ch] truncate text-sm text-slate-300">
+                    {d.build.commitMessage}
+                  </span>
+                </div>
+              </TD>
+              <TD className="text-xs text-slate-400">
+                <RelativeTime value={d.createdAt} />
+              </TD>
+              <TD>
+                <div className="flex items-center justify-end gap-2">
+                  <Link
+                    to={`/projects/${project.id}/builds/${d.build.id}`}
+                    className="text-xs font-medium text-indigo-300 hover:text-indigo-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 rounded"
+                  >
+                    Logs
+                  </Link>
+                  {!d.active && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      leadingIcon={<RotateCcw size={14} />}
+                      onClick={() => setTarget(d)}
+                    >
+                      Rollback
+                    </Button>
+                  )}
+                </div>
+              </TD>
+            </TR>
+          ))}
+        </TBody>
+      </Table>
 
-function DeploymentsTab() {
-  return (
-    <EmptyState
-      title="No deployments yet"
-      description="Deployments appear after the first successful build."
-    />
+      {query.hasNextPage && (
+        <div className="flex justify-center">
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={query.isFetchingNextPage}
+            onClick={() => void query.fetchNextPage()}
+          >
+            Load more
+          </Button>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={target !== null}
+        onOpenChange={(o) => {
+          if (!o) setTarget(null);
+        }}
+        title="Roll back to this deployment?"
+        description={
+          target
+            ? `Redeploys the image from commit ${target.build.commitSha.slice(0, 7)} to ${project.name}. Your current env vars are applied.`
+            : ''
+        }
+        confirmLabel="Roll back"
+        variant="primary"
+        loading={rollback.isPending}
+        onConfirm={() => void handleRollback()}
+      />
+    </div>
   );
 }
 
@@ -409,15 +800,16 @@ interface SettingsTabProps {
 
 function useUpdateProject(id: string) {
   const qc = useQueryClient();
-  return useMutation<ProjectDetailType, Error, UpdateProjectInput, { prev?: ProjectDetailType }>({
+  return useMutation<UpdateProjectResult, Error, UpdateProjectInput, { prev?: ProjectDetailType }>({
     mutationFn: (input) =>
-      api<ProjectDetailType>(`/api/projects/${id}`, {
+      api<UpdateProjectResult>(`/api/projects/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(input),
       }),
-    // Optimistic for `name` / `branch` per the spec. Env-var edits will land
-    // in M5 — when they do, skip the optimistic mirror for that path since
-    // the server-side redeploy is the source of truth there.
+    // Optimistic for `name` / `branch` per the spec. Env-var edits go through
+    // the same mutation but are NOT mirrored optimistically — the server
+    // re-reads + re-serializes them, so the refetch on settle is the source of
+    // truth (and `SettingsTab` re-syncs its local rows from it).
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: ['project', id] });
       const prev = qc.getQueryData<ProjectDetailType>(['project', id]);
@@ -433,9 +825,15 @@ function useUpdateProject(id: string) {
     onError: (_err, _input, ctx) => {
       if (ctx?.prev) qc.setQueryData(['project', id], ctx.prev);
     },
+    // Saving env vars can trigger a config-only redeploy server-side, which
+    // creates a new Deployment row — so also refresh the deployment + activity
+    // lists, not just the project itself.
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['project', id] });
       qc.invalidateQueries({ queryKey: ['projects'] });
+      qc.invalidateQueries({ queryKey: ['project-deployments', id] });
+      qc.invalidateQueries({ queryKey: ['deployments'] });
+      qc.invalidateQueries({ queryKey: ['activity'] });
     },
   });
 }
@@ -454,11 +852,73 @@ function SettingsTab({ project }: SettingsTabProps) {
     setBranch(project.branch);
   }, [project.name, project.branch]);
 
+  // Env vars: seed from the server, re-sync only when the saved content
+  // actually changes (keyed on the serialized list) so a background refetch
+  // doesn't clobber unsaved edits.
+  const savedEnvKey = JSON.stringify(project.envVars ?? []);
+  const [envVars, setEnvVars] = useState<KeyValuePair[]>(
+    () => (project.envVars ?? []).map((e) => ({ key: e.key, value: e.value })),
+  );
+  useEffect(() => {
+    setEnvVars((project.envVars ?? []).map((e) => ({ key: e.key, value: e.value })));
+    // Intentionally keyed on `savedEnvKey` (the serialized content), not the
+    // `project.envVars` array reference: refetches return a fresh array each
+    // time and would otherwise wipe in-progress edits on every poll.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedEnvKey]);
+
   const updateProject = useUpdateProject(project.id);
   const deleteProject = useDeleteProject();
 
   const dirty = name !== project.name || branch !== project.branch;
   const canSave = dirty && name.trim().length > 0 && branch.trim().length > 0;
+
+  const envDirty = JSON.stringify(envVars) !== savedEnvKey;
+  const envError = useMemo<string | null>(() => {
+    const seen = new Set<string>();
+    for (const row of envVars) {
+      if (row.key.trim() === '') return 'Every variable needs a name.';
+      if (!isValidEnvKey(row.key)) return `Invalid key "${row.key}" — use A–Z, 0–9, _.`;
+      if (seen.has(row.key)) return `Duplicate key "${row.key}".`;
+      seen.add(row.key);
+    }
+    return null;
+  }, [envVars]);
+  const canSaveEnv = envDirty && envError === null;
+
+  const handleSaveEnv = async () => {
+    if (!canSaveEnv) return;
+    try {
+      const result = await updateProject.mutateAsync({ envVars });
+      const redeploy = result.redeploy;
+      if (redeploy?.redeployed) {
+        toast({
+          title: 'Environment variables saved — redeploying with your latest image.',
+          variant: 'success',
+        });
+      } else if (redeploy?.reason === 'NO_ACTIVE_DEPLOYMENT') {
+        toast({ title: "Saved. They'll apply on your first deploy.", variant: 'success' });
+      } else if (redeploy?.reason === 'BUILD_IN_PROGRESS') {
+        toast({ title: 'Saved. Your in-progress build will pick them up.', variant: 'success' });
+      } else if (redeploy?.reason === 'NO_IMAGE') {
+        toast({ title: "Saved. They'll apply on your next successful build.", variant: 'success' });
+      } else if (redeploy?.reason === 'REDEPLOY_FAILED') {
+        toast({
+          title: 'Saved, but the redeploy failed. Push a commit or try again.',
+          variant: 'error',
+        });
+      } else {
+        toast({ title: 'Environment variables saved.', variant: 'success' });
+      }
+    } catch (err) {
+      const description = err instanceof Error ? err.message : '';
+      toast({
+        title: 'Could not save environment variables.',
+        variant: 'error',
+        ...(description ? { description } : {}),
+      });
+    }
+  };
 
   const handleSave = async () => {
     if (!canSave) return;
@@ -538,12 +998,25 @@ function SettingsTab({ project }: SettingsTabProps) {
         </div>
       </Card>
 
-      <Card className="flex flex-col gap-3 p-5">
-        <h2 className="text-sm font-semibold text-slate-200">Environment variables</h2>
-        <EmptyState
-          title="Coming soon"
-          description="Environment variables ship in M5."
-        />
+      <Card className="flex flex-col gap-4 p-5">
+        <div className="flex flex-col gap-1">
+          <h2 className="text-sm font-semibold text-slate-200">Environment variables</h2>
+          <p className="text-xs text-slate-500">
+            Stored encrypted and injected as Container App secrets. Saving redeploys your
+            app with the new values (using your latest successful image).
+          </p>
+        </div>
+        <KeyValueEditor value={envVars} onChange={setEnvVars} disabled={updateProject.isPending} />
+        {envError && <p className="text-xs text-rose-400">{envError}</p>}
+        <div className="flex items-center justify-end">
+          <Button
+            onClick={() => void handleSaveEnv()}
+            disabled={!canSaveEnv}
+            loading={updateProject.isPending}
+          >
+            Save variables
+          </Button>
+        </div>
       </Card>
 
       <Card className="flex flex-col gap-3 border-rose-500/30 p-5">

@@ -6,7 +6,7 @@ import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
 import { clearSessionCookie } from '../lib/cookies.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
-import { deleteContainerApp } from '../services/azure/index.js';
+import { deleteContainerApp, pingAzure } from '../services/azure/index.js';
 
 const router = Router();
 
@@ -28,19 +28,40 @@ function getUser(req: Request): {
   };
 }
 
+// GitHub scopes requested during OAuth (mirrors `OAUTH_SCOPES` in auth.ts).
+// Reported to the Settings page so it can show what access the stored token
+// grants. Kept in sync by hand — auth.ts owns the authoritative space-joined
+// string; we surface it as an array.
+const GITHUB_OAUTH_SCOPES = ['repo', 'admin:repo_hook'] as const;
+
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = getUser(req);
-    const projectsCount = await prisma.project.count({
-      where: { userId: user.id, deletedAt: null },
-    });
+
+    // `connected` reflects whether a usable GitHub token is still on file.
+    // Disconnect (POST /disconnect-github) zeroes these columns, so an
+    // empty ciphertext buffer means the account is no longer a credential.
+    const [tokenRow, projectsCount] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: user.id },
+        select: { githubTokenCiphertext: true },
+      }),
+      prisma.project.count({ where: { userId: user.id, deletedAt: null } }),
+    ]);
+    const connected = (tokenRow?.githubTokenCiphertext?.length ?? 0) > 0;
+
     res.json({
       id: user.id,
       githubLogin: user.githubLogin,
       email: user.email,
       avatarUrl: user.avatarUrl,
-      github: { connected: true },
-      azure: { mode: env.AZURE_STUB ? 'stub' : 'global-sp' },
+      github: { connected, scopes: [...GITHUB_OAUTH_SCOPES] },
+      azure: {
+        mode: env.AZURE_STUB ? 'stub' : 'managed-identity',
+        region: env.AZURE_REGION,
+        subscriptionId: env.AZURE_SUBSCRIPTION_ID ?? null,
+        resourceGroup: env.AZURE_RESOURCE_GROUP ?? null,
+      },
       counts: { projects: projectsCount },
     });
   } catch (err) {
@@ -83,11 +104,19 @@ router.post(
   },
 );
 
-router.put(
-  '/azure-credentials',
+// Connectivity probe surfaced on the Settings page. `pingAzure` never throws —
+// a failed ping is a normal inline result, so we always return 200 and let the
+// frontend render `ok: false` rather than treating it as an HTTP error.
+router.post(
+  '/azure/test',
   requireXRequestedWith,
-  (_req: Request, res: Response) => {
-    res.status(200).json({ mode: 'global-sp', message: 'Managed by ProdStack' });
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await pingAzure();
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
   },
 );
 
@@ -109,6 +138,20 @@ router.delete(
         where: { userId: user.id, deletedAt: null },
         select: { containerAppName: true },
       });
+
+      // Log the apps we're about to orphan *before* the cascade removes their DB
+      // rows. If the process dies between the delete and the teardown loop, this
+      // is the only remaining record of which Container Apps to reap by hand —
+      // and an unreaped app keeps burning the (capped) student credit.
+      // NB: the stored OAuth token is dropped with the row but is NOT revoked at
+      // GitHub here (deferred, same as POST /disconnect-github); the grant stays
+      // live on GitHub's side until the user revokes it there.
+      if (liveProjects.length > 0) {
+        logger.info(
+          { userId: user.id, containerApps: liveProjects.map((p) => p.containerAppName) },
+          'deleting account — tearing down container apps',
+        );
+      }
 
       await prisma.user.delete({ where: { id: user.id } });
       clearSessionCookie(res);

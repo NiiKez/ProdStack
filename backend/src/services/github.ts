@@ -107,6 +107,57 @@ export async function createRepoWebhook(
   }
 }
 
+/**
+ * Structured error from a commit lookup. Wraps the upstream GitHub failure so
+ * the route layer can fall back to the last stored build's commit instead of
+ * propagating a raw octokit error.
+ */
+export class GithubCommitError extends Error {
+  override readonly name = 'GithubCommitError';
+  constructor(
+    message: string,
+    readonly status: number | undefined,
+    readonly githubMessage?: string,
+    readonly cause?: unknown,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Fetch the head commit of `{owner}/{repo}@{ref}` for a manual rebuild. Returns
+ * the resolved sha + commit message + a best-effort author label. On any GitHub
+ * failure throws `GithubCommitError` so the caller can fall back to the
+ * project's most recent stored build.
+ */
+export async function fetchBranchHeadCommit(
+  octokit: Octokit,
+  opts: { owner: string; repo: string; ref: string },
+): Promise<{ sha: string; message: string; author: string }> {
+  try {
+    const response = await octokit.request('GET /repos/{owner}/{repo}/commits/{ref}', {
+      owner: opts.owner,
+      repo: opts.repo,
+      ref: opts.ref,
+    });
+    const data = response.data as {
+      sha: string;
+      commit: { message: string; author?: { name?: string; login?: string } | null };
+      author?: { login?: string } | null;
+    };
+    const author =
+      data.commit.author?.name ?? data.commit.author?.login ?? data.author?.login ?? 'unknown';
+    return { sha: data.sha, message: data.commit.message, author };
+  } catch (err) {
+    throw new GithubCommitError(
+      'failed to fetch branch head commit',
+      extractStatus(err),
+      extractGithubMessage(err),
+      err,
+    );
+  }
+}
+
 /** Delete the hook by id. Throws `GithubWebhookError` (incl. 404) for caller to branch. */
 export async function deleteRepoWebhook(
   octokit: Octokit,
