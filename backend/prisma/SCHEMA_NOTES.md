@@ -46,3 +46,34 @@ A partial unique index (`one_active_per_project` on `Deployment(projectId) WHERE
 - `Build → Deployment` (deployments reference the build that produced them)
 
 Deleting a `User` cleans up everything they own. `Project.deletedAt` is the soft-delete marker used by application code; cascade deletes only fire on a real row delete (e.g. account deletion).
+
+## Build queue claim columns (M3)
+
+Migration `20260521091425_build_queue_claim` adds three columns to `Build` plus a composite index. They turn the existing `Build` table into a lease queue without introducing a separate jobs table:
+
+| Column      | Type        | Purpose                                                                                    |
+|-------------|-------------|--------------------------------------------------------------------------------------------|
+| `claimedAt` | `DateTime?` | When a worker took the lease. `NULL` means available; non-null means leased.               |
+| `claimedBy` | `String?`   | Worker ID that holds the lease (default `worker-<pid>`; set explicitly via `WORKER_ID`).   |
+| `attempts`  | `Int`       | Incremented on every claim; lets us detect poison-pill builds that keep crashing a worker. |
+
+The new index `(status, claimedAt, createdAt)` is the index the claim query walks: `WHERE status = 'QUEUED' AND claimedAt IS NULL ORDER BY createdAt ASC`.
+
+Claim happens atomically via the standard Postgres pattern:
+
+```sql
+UPDATE "Build"
+SET "claimedAt" = NOW(), "claimedBy" = $1, "attempts" = "attempts" + 1
+WHERE id = (
+  SELECT id FROM "Build"
+  WHERE status = 'QUEUED' AND "claimedAt" IS NULL
+  ORDER BY "createdAt" ASC
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1
+)
+RETURNING id, attempts
+```
+
+`FOR UPDATE SKIP LOCKED` is what makes this safe for N concurrent workers: the inner select holds a row lock that the outer update consumes, so the row is invisible to other workers from the moment we pick it. We currently run one worker replica per the operational policy, but the queue pattern is correct without changes if we ever scale out.
+
+Stale claims (worker crashed mid-build, ACA replaced a replica, etc.) are recovered on each worker's boot via `recoverOwnClaims()` in `backend/src/services/builds/queue.ts`: any row leased longer ago than `BUILD_TIMEOUT_MS * 2` has its claim cleared, and any row past `QUEUED` (i.e. `CLONING|BUILDING|PUSHING|DEPLOYING`) is transitioned to `FAILED` with `errorMessage='worker restarted mid-build'` so the UI never shows a ghost build stuck in BUILDING forever.

@@ -74,6 +74,18 @@ router.get('/github/callback', async (req, res, next) => {
   try {
     const { accessToken } = await exchangeCodeForToken(code);
     const profile = await fetchGithubProfile(accessToken);
+
+    // Single-user demo gate (CLAUDE.md "Operational policy: single-user
+    // demo"). When `OWNER_GITHUB_ID` is configured, only the owner may sign
+    // in — anyone else is bounced to the landing page with a notice pointing
+    // them at the repo to self-host. We reject *before* the upsert so a
+    // non-owner's OAuth token is never persisted: no DB row, no stored token.
+    if (env.OWNER_GITHUB_ID !== undefined && profile.id !== env.OWNER_GITHUB_ID) {
+      clearOAuthCookies(res);
+      res.redirect(302, `${env.WEB_ORIGIN}/?denied=not_owner`);
+      return;
+    }
+
     const enc = encrypt(accessToken);
 
     const user = await prisma.user.upsert({

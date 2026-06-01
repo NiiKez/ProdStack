@@ -7,7 +7,6 @@ import { prisma } from '../db.js';
 import { decrypt } from '../lib/crypto.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
-import { runStubBuild } from '../services/builds/runStub.js';
 
 const router = Router();
 
@@ -158,15 +157,13 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
       throw err;
     }
 
-    // M2.5 stub build engine — fire-and-forget. The runner has its own
-    // try/catch and marks the Build row FAILED on error; this .catch is a
-    // backstop so an unhandled rejection can't crash the process.
-    // TODO M3: replace with real Kaniko worker enqueue
-    // TODO M4: emit SSE build.created
-    void runStubBuild(buildId).catch((err) => {
-      logger.error({ err, buildId }, 'stub build runner crashed');
-    });
-
+    // The Build row is already QUEUED; the build worker (in-process when
+    // ENABLE_WORKER=true, otherwise the prodstack-builder Container App)
+    // picks it up via the Postgres claim queue on its next poll tick.
+    // No SSE "build.created" emit is needed: the M4 log-stream endpoint
+    // (`/api/builds/:id/logs/stream`) discovers state by polling Postgres,
+    // which works across the API/worker process boundary in prod. See
+    // `routes/builds.ts` for why Postgres is the bus instead of an emitter.
     logger.info(
       { projectId: project.id, buildId, deliveryId, commitSha },
       'webhook accepted; build queued',

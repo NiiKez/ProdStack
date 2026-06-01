@@ -80,6 +80,12 @@ const EnvSchema = z.object({
   GITHUB_OAUTH_CLIENT_ID: z.string().min(1, 'GITHUB_OAUTH_CLIENT_ID is required'),
   GITHUB_OAUTH_CLIENT_SECRET: z.string().min(1, 'GITHUB_OAUTH_CLIENT_SECRET is required'),
   GITHUB_OAUTH_CALLBACK_URL: z.string().url(),
+  // Single-user demo allow-list (CLAUDE.md "Operational policy"). When set,
+  // only this numeric GitHub user id may complete sign-in; everyone else is
+  // bounced with a "self-host" notice so the $100 student credit can't be
+  // drained by arbitrary users deploying arbitrary Dockerfiles. Leave unset
+  // (e.g. local dev / a self-hosted fork) to allow any GitHub user.
+  OWNER_GITHUB_ID: z.coerce.number().int().positive().optional(),
 
   // Azure. Required when AZURE_STUB=false. Credentials come from the API's
   // managed identity via DefaultAzureCredential — no SP env vars because the
@@ -90,6 +96,20 @@ const EnvSchema = z.object({
   AZURE_REGION: z.string().default('francecentral'),
   ACR_NAME: z.string().optional(),
   CONTAINER_APPS_ENV_ID: z.string().optional(),
+
+  // Build worker (M3). `stub` mirrors the M2.5 fake build for tests / fast
+  // dev cycles; `docker` shells out to `docker run gcr.io/kaniko-project/...`
+  // so a laptop doesn't need kaniko/git installed natively; `kaniko` calls
+  // the in-image `/kaniko/executor` binary directly (used inside the
+  // prodstack-builder Container App). ACR creds are only consulted by the
+  // non-stub modes.
+  BUILD_RUNNER_MODE: z.enum(['stub', 'docker', 'kaniko']).default('stub'),
+  BUILD_TIMEOUT_MS: z.coerce.number().int().positive().default(10 * 60 * 1000),
+  BUILD_WORK_DIR: z.string().default('/tmp/prodstack-builds'),
+  ACR_USERNAME: z.string().optional(),
+  ACR_PASSWORD: z.string().optional(),
+  WORKER_ID: z.string().default(`worker-${process.pid}`),
+  WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
 
   // Feature gates
   ENABLE_WORKER: boolFromString(false),

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-shot wiring of prodstack-api Container App: pulls 6 secrets from Key
-# Vault via managed identity and sets the 16 env vars the backend's Zod
-# schema requires. Run in Azure Cloud Shell after uploading this file:
+# Vault via managed identity and sets the env vars the backend's Zod schema
+# requires (incl. OWNER_GITHUB_ID for the single-user gate). Run in Azure
+# Cloud Shell after uploading this file:
 #   bash wire-prodstack-api.sh
 set -euo pipefail
 
@@ -37,6 +38,7 @@ az containerapp update $APP --set-env-vars \
   AZURE_REGION=francecentral \
   ACR_NAME=prodstack \
   CONTAINER_APPS_ENV_ID=$ENV_ID \
+  OWNER_GITHUB_ID=182921896 \
   DATABASE_URL=secretref:database-url \
   JWT_SECRET=secretref:jwt-secret \
   COOKIE_SECRET=secretref:cookie-secret \
