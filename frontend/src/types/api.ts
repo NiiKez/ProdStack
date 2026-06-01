@@ -43,6 +43,8 @@ export interface BuildSummary {
 
 export interface ProjectDetail extends ProjectSummary {
   builds: BuildSummary[];
+  /** Present on `GET /api/projects/:id`; decrypted key/value pairs. */
+  envVars?: ProjectEnvVar[];
 }
 
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'STEP' | 'SUCCESS';
@@ -75,6 +77,71 @@ export interface BuildDetail {
   };
 }
 
+export interface ProjectEnvVar {
+  key: string;
+  value: string;
+}
+
+/** Cursor-paginated list envelope returned by the M5 list endpoints. */
+export interface Paginated<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+/** A row from `GET /api/projects/:id/builds` (richer than `BuildSummary`). */
+export interface BuildListItem extends BuildSummary {
+  imageTag: string | null;
+  errorMessage: string | null;
+}
+
+/** The build info embedded in a deployment row. */
+export interface DeploymentBuildInfo {
+  id: string;
+  status: BuildStatus | string;
+  commitSha: string;
+  commitMessage: string;
+  commitAuthor: string;
+  branch: string;
+  imageTag?: string | null;
+}
+
+/** A row from `GET /api/projects/:id/deployments`. */
+export interface DeploymentListItem {
+  id: string;
+  revisionName: string;
+  active: boolean;
+  rolledBack: boolean;
+  createdAt: string;
+  build: DeploymentBuildInfo;
+}
+
+/** A row from `GET /api/deployments` (cross-project, carries project info). */
+export interface CrossProjectDeployment extends DeploymentListItem {
+  project: { id: string; name: string; liveUrl: string | null };
+}
+
+export type ActivityType =
+  | 'build.queued'
+  | 'build.succeeded'
+  | 'build.failed'
+  | 'build.cancelled'
+  | 'deployment.created'
+  | 'deployment.rollback'
+  | 'project.created'
+  | 'project.deleted';
+
+export interface ActivityEvent {
+  id: string;
+  type: ActivityType;
+  ts: string;
+  projectId: string;
+  projectName: string;
+  buildId?: string;
+  commitSha?: string;
+  commitMessage?: string;
+  commitAuthor?: string;
+}
+
 export interface CreateProjectInput {
   repoUrl: string;
   branch: string;
@@ -84,4 +151,69 @@ export interface CreateProjectInput {
 export interface UpdateProjectInput {
   branch?: string;
   name?: string;
+  envVars?: ProjectEnvVar[] | null;
+}
+
+/**
+ * Why a config-only redeploy did or didn't happen after an env-var save
+ * (M5 #6). `NO_ACTIVE_DEPLOYMENT` = project never had a successful deploy, so
+ * the vars apply on its first build; `BUILD_IN_PROGRESS` = an in-flight build
+ * will pick them up; `NO_IMAGE` = the active deployment's build has no pushed
+ * image; `REDEPLOY_FAILED` = the vars saved but the Azure roll errored.
+ */
+export type RedeployReason =
+  | 'NO_ACTIVE_DEPLOYMENT'
+  | 'BUILD_IN_PROGRESS'
+  | 'NO_IMAGE'
+  | 'REDEPLOY_FAILED';
+
+export interface RedeploySummary {
+  redeployed: boolean;
+  reason?: RedeployReason;
+}
+
+/**
+ * `PATCH /api/projects/:id` response. Extends the project detail with an
+ * optional `redeploy` summary, present only when the request included
+ * `envVars` (saving env vars auto-redeploys with the last successful image).
+ */
+export interface UpdateProjectResult extends ProjectDetail {
+  redeploy?: RedeploySummary;
+}
+
+/** `POST /api/projects/:id/rebuild` response. */
+export interface RebuildResult {
+  buildId: string;
+}
+
+/** `POST /api/builds/:id/cancel` response. */
+export interface CancelBuildResult {
+  id: string;
+  status: BuildStatus | string;
+  /** True when cancellation was *requested* of a running build (cooperative). */
+  cancelRequested: boolean;
+}
+
+/** `GET /api/account`. */
+export interface AccountInfo {
+  id: string;
+  githubLogin: string;
+  email: string | null;
+  avatarUrl: string | null;
+  github: { connected: boolean; scopes: string[] };
+  azure: {
+    mode: 'managed-identity' | 'stub';
+    region: string;
+    subscriptionId: string | null;
+    resourceGroup: string | null;
+  };
+  counts: { projects: number };
+}
+
+/** `POST /api/account/azure/test`. */
+export interface AzureTestResult {
+  ok: boolean;
+  mode: 'managed-identity' | 'stub';
+  detail?: string;
+  latencyMs?: number;
 }

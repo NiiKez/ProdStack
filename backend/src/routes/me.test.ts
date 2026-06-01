@@ -19,6 +19,7 @@ const state = vi.hoisted(() => ({
 }));
 
 const mocks = vi.hoisted(() => ({
+  userFindUnique: vi.fn(),
   userUpdate: vi.fn(),
   userDelete: vi.fn(),
   projectCount: vi.fn(),
@@ -28,14 +29,27 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../db.js', () => ({
   prisma: {
-    user: { update: mocks.userUpdate, delete: mocks.userDelete },
+    user: {
+      findUnique: mocks.userFindUnique,
+      update: mocks.userUpdate,
+      delete: mocks.userDelete,
+    },
     project: { count: mocks.projectCount, findMany: mocks.projectFindMany },
   },
 }));
 
-vi.mock('../services/azure/index.js', () => ({
-  deleteContainerApp: mocks.deleteContainerApp,
-}));
+vi.mock('../services/azure/index.js', async () => {
+  // Delegate `pingAzure` to the real implementation so the route test
+  // exercises the actual stub path (AZURE_STUB=true here). `deleteContainerApp`
+  // stays mocked so the delete-account tests can assert on it.
+  const real = await vi.importActual<typeof import('../services/azure/index.js')>(
+    '../services/azure/index.js',
+  );
+  return {
+    deleteContainerApp: mocks.deleteContainerApp,
+    pingAzure: real.pingAzure,
+  };
+});
 
 vi.mock('../middleware/requireAuth.js', () => ({
   requireAuth: (
@@ -67,12 +81,15 @@ const supertest = (await import('supertest')).default;
 
 beforeEach(() => {
   state.stubAuth = true;
+  mocks.userFindUnique.mockReset();
   mocks.userUpdate.mockReset();
   mocks.userDelete.mockReset();
   mocks.projectCount.mockReset();
   mocks.projectFindMany.mockReset();
   mocks.deleteContainerApp.mockReset();
 
+  // Default: a connected user (non-empty token ciphertext).
+  mocks.userFindUnique.mockResolvedValue({ githubTokenCiphertext: Buffer.from([1, 2, 3]) });
   mocks.userUpdate.mockResolvedValue({});
   mocks.userDelete.mockResolvedValue({});
   mocks.projectCount.mockResolvedValue(0);
@@ -85,7 +102,7 @@ afterEach(() => {
 });
 
 describe('GET /api/account', () => {
-  it('returns the current user with connection flags and counts', async () => {
+  it('returns the current user with connection flags, scopes, azure config and counts', async () => {
     mocks.projectCount.mockResolvedValueOnce(3);
     const app = createApp();
     const res = await supertest(app).get('/api/account');
@@ -93,10 +110,27 @@ describe('GET /api/account', () => {
     expect(res.body).toMatchObject({
       id: 'u1',
       githubLogin: 'octocat',
-      github: { connected: true },
-      azure: { mode: 'stub' },
+      github: { connected: true, scopes: ['repo', 'admin:repo_hook'] },
+      // AZURE_STUB=true in tests → managed-identity mode is not reported here.
+      azure: { mode: 'stub', region: 'francecentral' },
       counts: { projects: 3 },
     });
+    // azure block exposes the (possibly null) subscription/resource-group keys.
+    expect(res.body.azure).toHaveProperty('subscriptionId');
+    expect(res.body.azure).toHaveProperty('resourceGroup');
+    // Security regression guard: the encrypted GitHub token must never be
+    // serialized to the client — only the derived `connected` boolean.
+    const serialized = JSON.stringify(res.body);
+    expect(serialized).not.toMatch(/githubToken/i);
+    expect(serialized).not.toMatch(/ciphertext/i);
+  });
+
+  it('reports github.connected=false when the stored token is empty', async () => {
+    mocks.userFindUnique.mockResolvedValueOnce({ githubTokenCiphertext: Buffer.alloc(0) });
+    const app = createApp();
+    const res = await supertest(app).get('/api/account');
+    expect(res.status).toBe(200);
+    expect(res.body.github.connected).toBe(false);
   });
 
   it('401 when unauthenticated', async () => {
@@ -104,6 +138,23 @@ describe('GET /api/account', () => {
     const app = createApp();
     const res = await supertest(app).get('/api/account');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /api/account/azure/test', () => {
+  it('returns the stub ping result (ok) with 200', async () => {
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/account/azure/test')
+      .set('X-Requested-With', 'XMLHttpRequest');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, mode: 'stub' });
+  });
+
+  it('requires X-Requested-With (CSRF gate)', async () => {
+    const app = createApp();
+    const res = await supertest(app).post('/api/account/azure/test');
+    expect(res.status).toBe(403);
   });
 });
 
@@ -143,17 +194,6 @@ describe('POST /api/account/disconnect-github', () => {
     const app = createApp();
     const res = await supertest(app).post('/api/account/disconnect-github');
     expect(res.status).toBe(403);
-  });
-});
-
-describe('PUT /api/account/azure-credentials', () => {
-  it('returns the global-SP stub status', async () => {
-    const app = createApp();
-    const res = await supertest(app)
-      .put('/api/account/azure-credentials')
-      .set('X-Requested-With', 'XMLHttpRequest');
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ mode: 'global-sp' });
   });
 });
 

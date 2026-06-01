@@ -10,17 +10,21 @@ import {
 } from 'lucide-react';
 import {
   Badge,
+  Button,
   Card,
   CommitRef,
+  ConfirmDialog,
   ErrorState,
   Spinner,
   StatusPill,
+  useToast,
 } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { usePageTitle } from '@/hooks/usePageTitle';
 import { useBuild } from '@/hooks/useBuild';
 import { useBuildLogs } from '@/hooks/useBuildLogs';
-import { toBuildStatus, type BuildStatus } from '@/lib/status';
+import { useCancelBuild } from '@/hooks/useCancelBuild';
+import { isInFlight, toBuildStatus, type BuildStatus } from '@/lib/status';
 import type { LogLevel } from '@/types/api';
 
 // Ordered build phases for the stepper. CANCELLED/FAILED are terminal off-ramps
@@ -42,16 +46,39 @@ export default function BuildLogs() {
   const { id: projectId, buildId } = useParams<{ id: string; buildId: string }>();
   const buildQuery = useBuild(buildId);
   const { lines, status: streamStatus, phase } = useBuildLogs(buildId);
+  const { toast } = useToast();
+  const cancelBuild = useCancelBuild();
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   // The stream's status is the most live; fall back to the fetched build.
   const status = streamStatus ?? buildQuery.data?.status ?? 'queued';
   const normalized = toBuildStatus(status);
+  const inFlight = isInFlight(status);
 
   usePageTitle(
     buildQuery.data
       ? `Build ${buildQuery.data.commitSha.slice(0, 7)} — ${buildQuery.data.project.name}`
       : 'Build logs — ProdStack',
   );
+
+  const handleCancel = async () => {
+    if (!buildId) return;
+    try {
+      const result = await cancelBuild.mutateAsync({ buildId, ...(projectId ? { projectId } : {}) });
+      toast({
+        title: result.cancelRequested ? 'Cancelling build…' : 'Build cancelled',
+        variant: 'success',
+      });
+      setConfirmOpen(false);
+    } catch (err) {
+      const description = err instanceof Error ? err.message : '';
+      toast({
+        title: 'Could not cancel build',
+        variant: 'error',
+        ...(description ? { description } : {}),
+      });
+    }
+  };
 
   if (buildQuery.isError) {
     return (
@@ -106,6 +133,17 @@ export default function BuildLogs() {
               </Badge>
             )}
             <StatusPill status={status} />
+            {inFlight && (
+              <Button
+                variant="danger"
+                size="sm"
+                leadingIcon={<XCircle size={14} />}
+                onClick={() => setConfirmOpen(true)}
+                title="Stop this running build"
+              >
+                Cancel
+              </Button>
+            )}
           </div>
         </div>
 
@@ -131,6 +169,18 @@ export default function BuildLogs() {
       </Card>
 
       <LogViewport lines={lines} phase={phase} />
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title="Cancel this build?"
+        description="The build will stop and be marked as cancelled."
+        confirmLabel="Cancel build"
+        cancelLabel="Keep building"
+        variant="danger"
+        loading={cancelBuild.isPending}
+        onConfirm={() => void handleCancel()}
+      />
     </div>
   );
 }

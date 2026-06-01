@@ -18,17 +18,27 @@
  * The two branches share the public shape so callers (e.g. the Project
  * service) never need to know which is active beyond `isStub()`.
  */
-import { ContainerAppsAPIClient, type ContainerApp } from '@azure/arm-appcontainers';
+import { createHash } from 'node:crypto';
+
+import {
+  ContainerAppsAPIClient,
+  type ContainerApp,
+  type EnvironmentVar,
+  type Secret,
+} from '@azure/arm-appcontainers';
 import { DefaultAzureCredential } from '@azure/identity';
 import pino from 'pino';
 
 import { env } from '../../env.js';
+import { logger } from '../../lib/logger.js';
 
 // --- Public contract -------------------------------------------------------
 
 export interface ContainerAppRef {
   name: string;
   liveUrl: string;
+  /** Latest revision name after the create/update, when the SDK reports one. */
+  revisionName?: string;
 }
 
 export interface EnvVarInput {
@@ -79,6 +89,58 @@ function envVarKeys(envVars: EnvVarInput[] | undefined): string[] {
   return (envVars ?? []).map((e) => e.name);
 }
 
+/**
+ * Derive a Container App secret name from a user env-var key.
+ *
+ * Container Apps secret names are RFC-1123-ish: lowercase alphanumeric +
+ * hyphens, must start with a letter, no consecutive/trailing hyphens, ≤253
+ * chars. User env keys match `^[A-Z_][A-Z0-9_]*$`, so a naive lowercase
+ * would still trip on leading underscores. We sanitize to a safe base and
+ * append a short hash of the original key so distinct keys never collide
+ * after sanitization.
+ *
+ * Layout is `env-<base>-<hash>` with the **bounded `base` first and the
+ * 8-hex `hash` last**. This matters because env keys can be up to 128 chars
+ * (`patchBodySchema`): the old `\`env-${base}-${hash}\`.slice(0, 60)` truncated
+ * the hash off the end for long keys, so two keys sharing a long prefix
+ * collided to the same secret name (Azure rejects duplicate secret names →
+ * the whole deploy 400s, and both `secretRef`s point at one value). Bounding
+ * `base` to 40 chars before appending the never-sliced hex hash makes
+ * collisions impossible and guarantees an alphanumeric final char (no
+ * trailing-hyphen names, which Azure also rejects).
+ */
+function secretNameFor(key: string): string {
+  const hash = createHash('sha1').update(key).digest('hex').slice(0, 8);
+  const base = key
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/g, '');
+  return `env-${base || 'v'}-${hash}`;
+}
+
+/**
+ * Turn the project's env vars into a Container App `secrets` list plus the
+ * matching `env` entries that reference them via `secretRef`. Every user env
+ * value lands in Azure as a secret (encrypted at rest by the platform) rather
+ * than a plaintext `env.value`, mirroring how we store it encrypted in the DB.
+ * Returns `undefined` for both when no env vars are supplied so callers can
+ * leave the existing template untouched (vs. wiping it with empties).
+ */
+function envToSecrets(envVars: EnvVarInput[] | undefined): {
+  env: EnvironmentVar[] | undefined;
+  secrets: Secret[] | undefined;
+} {
+  if (envVars === undefined) return { env: undefined, secrets: undefined };
+  const secrets: Secret[] = envVars.map((e) => ({ name: secretNameFor(e.name), value: e.value }));
+  const containerEnv: EnvironmentVar[] = envVars.map((e) => ({
+    name: e.name,
+    secretRef: secretNameFor(e.name),
+  }));
+  return { env: containerEnv, secrets };
+}
+
 // --- Stub branch -----------------------------------------------------------
 
 const stubLog = pino({ name: 'azure-stub' });
@@ -103,7 +165,7 @@ async function stubCreate(opts: CreateContainerAppOpts): Promise<ContainerAppRef
     'stub: create Container App',
   );
   await stubDelay();
-  return { name: opts.name, liveUrl: STUB_LIVE_URL(opts.name) };
+  return { name: opts.name, liveUrl: STUB_LIVE_URL(opts.name), revisionName: `${opts.name}--stub` };
 }
 
 async function stubUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef> {
@@ -117,7 +179,7 @@ async function stubUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
     'stub: update Container App',
   );
   await stubDelay();
-  return { name: opts.name, liveUrl: STUB_LIVE_URL(opts.name) };
+  return { name: opts.name, liveUrl: STUB_LIVE_URL(opts.name), revisionName: `${opts.name}--stub` };
 }
 
 async function stubDelete(name: string): Promise<void> {
@@ -169,6 +231,7 @@ function fqdnToLiveUrl(name: string, fqdn: string | undefined): string {
 }
 
 function buildEnvelope(opts: CreateContainerAppOpts, environmentId: string): ContainerApp {
+  const { env: containerEnv, secrets } = envToSecrets(opts.envVars);
   return {
     location: env.AZURE_REGION,
     environmentId,
@@ -178,14 +241,14 @@ function buildEnvelope(opts: CreateContainerAppOpts, environmentId: string): Con
         targetPort: opts.targetPort ?? DEFAULT_TARGET_PORT,
         transport: 'auto',
       },
-      secrets: [],
+      secrets: secrets ?? [],
     },
     template: {
       containers: [
         {
           name: opts.name,
           image: opts.image ?? DEFAULT_IMAGE,
-          env: opts.envVars,
+          env: containerEnv,
         },
       ],
       scale: {
@@ -207,22 +270,51 @@ async function realCreate(opts: CreateContainerAppOpts): Promise<ContainerAppRef
     envelope,
   );
 
-  return { name: opts.name, liveUrl: fqdnToLiveUrl(opts.name, result.configuration?.ingress?.fqdn) };
+  return {
+    name: opts.name,
+    liveUrl: fqdnToLiveUrl(opts.name, result.configuration?.ingress?.fqdn),
+    ...(result.latestRevisionName ? { revisionName: result.latestRevisionName } : {}),
+  };
 }
 
 async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef> {
-  // TODO M3/M5: fetch the existing Container App, merge `template`
-  // (image + env), and re-PUT via `beginCreateOrUpdateAndWait`. The
-  // dedicated `beginUpdateAndWait` is intentionally avoided — its PATCH
-  // semantics don't carry over the immutable `environmentId` / `location`
-  // and quietly drop fields we don't echo back.
+  // Fetch the existing Container App, merge `template` (image + env) and, when
+  // env vars are supplied, the matching `configuration.secrets`, then re-PUT
+  // via `beginCreateOrUpdateAndWait`. The dedicated `beginUpdateAndWait` is
+  // intentionally avoided — its PATCH semantics don't carry over the immutable
+  // `environmentId` / `location` and quietly drop fields we don't echo back.
+  //
+  // Env vars are applied as secrets + `secretRef` (see `envToSecrets`), never
+  // plaintext `env.value`. When `opts.envVars` is undefined we leave the
+  // existing env + secrets untouched (a plain image roll), so a build deploy
+  // that doesn't pass env vars never wipes them.
   const client = getClient();
   const resourceGroup = requireResourceGroup();
 
   const existing = await client.containerApps.get(resourceGroup, opts.name);
   const containers = existing.template?.containers ?? [];
+  const { env: containerEnv, secrets } = envToSecrets(opts.envVars);
+
+  // Reconcile only the `env-`-prefixed secrets we manage; preserve everything
+  // else (e.g. a registry-password secret referenced by `registries[]`). A re-
+  // PUT replaces the whole `secrets` array, and `get()` returns secret *names*
+  // without their values, so we must pull the real values from `listSecrets`
+  // first — otherwise preserved secrets round-trip as `value: undefined` and
+  // get blanked. Without this, saving an env var wipes any non-env secret.
+  let mergedSecrets: Secret[] | undefined;
+  if (secrets !== undefined) {
+    const live = await client.containerApps.listSecrets(resourceGroup, opts.name);
+    const preserved = (live.value ?? []).filter(
+      (s): s is Secret => typeof s.name === 'string' && !s.name.startsWith('env-'),
+    );
+    mergedSecrets = [...preserved, ...secrets];
+  }
+
   const merged: ContainerApp = {
     ...existing,
+    ...(mergedSecrets !== undefined
+      ? { configuration: { ...existing.configuration, secrets: mergedSecrets } }
+      : {}),
     template: {
       ...existing.template,
       containers: containers.length > 0
@@ -230,7 +322,7 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
             {
               ...containers[0],
               ...(opts.image ? { image: opts.image } : {}),
-              ...(opts.envVars ? { env: opts.envVars } : {}),
+              ...(containerEnv ? { env: containerEnv } : {}),
             },
             ...containers.slice(1),
           ]
@@ -238,7 +330,7 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
             {
               name: opts.name,
               ...(opts.image ? { image: opts.image } : {}),
-              ...(opts.envVars ? { env: opts.envVars } : {}),
+              ...(containerEnv ? { env: containerEnv } : {}),
             },
           ],
     },
@@ -249,7 +341,11 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
     opts.name,
     merged,
   );
-  return { name: opts.name, liveUrl: fqdnToLiveUrl(opts.name, result.configuration?.ingress?.fqdn) };
+  return {
+    name: opts.name,
+    liveUrl: fqdnToLiveUrl(opts.name, result.configuration?.ingress?.fqdn),
+    ...(result.latestRevisionName ? { revisionName: result.latestRevisionName } : {}),
+  };
 }
 
 async function realDelete(name: string): Promise<void> {
@@ -281,4 +377,75 @@ export async function updateContainerApp(
 export async function deleteContainerApp(name: string): Promise<void> {
   assertValidName(name);
   return isStub() ? stubDelete(name) : realDelete(name);
+}
+
+/**
+ * Map an Azure/credential error to a coarse, non-sensitive category for the
+ * Settings UI. Deliberately does NOT echo `err.message` (which can leak
+ * subscription/tenant/identity IDs and endpoints). Branches on the HTTP status
+ * / SDK error code commonly attached by `@azure/core-rest-pipeline` RestError
+ * and `@azure/identity`.
+ */
+function pingErrorDetail(err: unknown): string {
+  const e = err as { statusCode?: number; code?: string; name?: string };
+  const status = typeof e?.statusCode === 'number' ? e.statusCode : undefined;
+  const code = e?.code ?? e?.name ?? '';
+
+  if (status === 401 || /CredentialUnavailable|AuthenticationError|AADSTS/i.test(code)) {
+    return 'Authentication failed — the managed identity could not obtain a token.';
+  }
+  if (status === 403 || /Authorization|Forbidden/i.test(code)) {
+    return 'Authorization failed — the identity lacks the required RBAC role on the resource group.';
+  }
+  if (status === 404) {
+    return 'Resource group not found at the configured subscription.';
+  }
+  if (status === 429 || /Throttle|TooManyRequests/i.test(code)) {
+    return 'Request throttled by Azure — try again shortly.';
+  }
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|network/i.test(code)) {
+    return 'Network error reaching Azure.';
+  }
+  return 'Azure connectivity check failed.';
+}
+
+/**
+ * Connectivity probe for the Settings page. Proves the managed identity +
+ * subscription actually authenticate against Azure without mutating anything.
+ *
+ * Never throws: a failed ping is a normal, displayable result (the frontend
+ * renders it inline), not an HTTP error. In stub mode it short-circuits to a
+ * deterministic `ok` after a tiny delay so local dev / tests exercise the
+ * same code path the UI hits.
+ */
+export async function pingAzure(): Promise<{
+  ok: boolean;
+  mode: 'managed-identity' | 'stub';
+  detail?: string;
+  latencyMs?: number;
+}> {
+  if (isStub()) {
+    await stubDelay();
+    return { ok: true, mode: 'stub', detail: 'Azure stub mode (local dev).' };
+  }
+
+  const startedAt = Date.now();
+  try {
+    const client = getClient();
+    // Pull just the first item to force an authenticated round-trip without
+    // paging the whole list. An empty resource group still completes the
+    // iterator (the loop body simply never runs), which is a successful ping.
+    for await (const _ of client.containerApps.listByResourceGroup(requireResourceGroup())) {
+      break;
+    }
+    return { ok: true, mode: 'managed-identity', latencyMs: Date.now() - startedAt };
+  } catch (err) {
+    // Log the full error server-side (the `err` serializer in logger.ts strips
+    // request/response bodies), but return only a coarse, non-sensitive
+    // category to the browser. Raw Azure / DefaultAzureCredential messages
+    // routinely embed the subscription, tenant, and managed-identity client/
+    // object IDs and the token endpoint — none of which belongs in the DOM.
+    logger.warn({ err }, 'pingAzure connectivity check failed');
+    return { ok: false, mode: 'managed-identity', detail: pingErrorDetail(err) };
+  }
 }

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
+import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 
 /**
  * Builds router — mounted under `/api/builds` (behind requireAuth). M4 of
@@ -35,7 +36,8 @@ const logsQuery = z.object({
 });
 
 /** Statuses past which no further logs or transitions will ever arrive. */
-const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['READY', 'FAILED', 'CANCELLED']);
+const TERMINAL_BUILD_STATUSES = ['READY', 'FAILED', 'CANCELLED'] as const;
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(TERMINAL_BUILD_STATUSES);
 
 const STREAM_POLL_MS = 1000;
 const STREAM_HEARTBEAT_MS = 15_000;
@@ -152,6 +154,67 @@ router.get('/:id/logs', async (req: Request, res: Response, next: NextFunction) 
       lines: lines.map(serializeLine),
       nextSeq: lines.length > 0 ? lines[lines.length - 1]!.seq : afterSeq,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- POST /api/builds/:id/cancel -------------------------------------------
+
+/**
+ * Cancel a build. Two paths, depending on whether a worker has claimed it:
+ *
+ *  - Fast path (unclaimed QUEUED): flip it straight to CANCELLED with a
+ *    conditional `updateMany` (`status='QUEUED' AND claimedAt IS NULL`). If
+ *    that wins the race the worker's claim query — which also filters on
+ *    `status='QUEUED' AND claimedAt IS NULL` — will simply never pick it up.
+ *  - Cooperative path (claimed / in-flight): we can't stop the worker from the
+ *    API, so set `cancelRequested=true`. The worker's `runBuild` polls this
+ *    flag, aborts its child process, and transitions the build to CANCELLED.
+ *    Responds 202 (accepted, not yet terminal).
+ */
+router.post('/:id/cancel', requireXRequestedWith, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = idParam.parse(req.params);
+    const userId = getUserId(req);
+
+    const build = await findOwnedBuild(id, userId);
+    if (build === null) {
+      throw new HttpError(404, 'BUILD_NOT_FOUND');
+    }
+
+    if (TERMINAL_STATUSES.has(build.status)) {
+      throw new HttpError(409, 'BUILD_NOT_CANCELLABLE', 'This build has already finished.');
+    }
+
+    // Fast path: cancel before any worker claims it. The claim query filters
+    // on the same `status='QUEUED' AND claimedAt IS NULL`, so this is an
+    // atomic race we either win (count===1) or lose (count===0 → cooperative).
+    const fast = await prisma.build.updateMany({
+      where: { id, status: 'QUEUED', claimedAt: null },
+      data: { status: 'CANCELLED', finishedAt: new Date(), errorMessage: 'cancelled by user' },
+    });
+    if (fast.count === 1) {
+      logger.info({ buildId: id, userId, path: 'fast' }, 'build cancelled (unclaimed)');
+      res.json({ id, status: 'CANCELLED', cancelRequested: false });
+      return;
+    }
+
+    // Cooperative path: the worker owns it; ask it to abort. Scope the write to
+    // a still-cancellable status — the build may have reached a terminal state
+    // (or been deleted by a project cascade) in the window between the read
+    // above and here. A plain `update` would either flip the flag on an
+    // already-finished build (misleading 202) or throw P2025 → 500 on a deleted
+    // row. `count===0` means there's nothing left to cancel.
+    const coop = await prisma.build.updateMany({
+      where: { id, status: { notIn: [...TERMINAL_BUILD_STATUSES] } },
+      data: { cancelRequested: true },
+    });
+    if (coop.count === 0) {
+      throw new HttpError(409, 'BUILD_NOT_CANCELLABLE', 'This build has already finished.');
+    }
+    logger.info({ buildId: id, userId, path: 'cooperative', status: build.status }, 'build cancellation requested');
+    res.status(202).json({ id, status: build.status, cancelRequested: true });
   } catch (err) {
     next(err);
   }

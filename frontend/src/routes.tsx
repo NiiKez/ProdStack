@@ -6,11 +6,14 @@ import { RequireAuth } from '@/components/RequireAuth';
 import Landing from '@/pages/Landing';
 import AuthCallback from '@/pages/AuthCallback';
 import NotFound from '@/pages/NotFound';
-import Placeholder from '@/pages/Placeholder';
 
 const Dashboard = lazy(() => import('@/pages/Dashboard'));
 const ProjectDetail = lazy(() => import('@/pages/ProjectDetail'));
 const BuildLogs = lazy(() => import('@/pages/BuildLogs'));
+const Deployments = lazy(() => import('@/pages/Deployments'));
+const Activity = lazy(() => import('@/pages/Activity'));
+const Settings = lazy(() => import('@/pages/Settings'));
+const Integrations = lazy(() => import('@/pages/Integrations'));
 
 function PageSpinner() {
   return (
@@ -62,19 +65,35 @@ export function AppRoutes() {
           />
           <Route
             path="/deployments"
-            element={<Placeholder title="Deployments" subtitle="All deployments in M5." />}
+            element={
+              <Suspense fallback={<PageSpinner />}>
+                <Deployments />
+              </Suspense>
+            }
           />
           <Route
             path="/activity"
-            element={<Placeholder title="Activity" subtitle="Activity feed in M5." />}
+            element={
+              <Suspense fallback={<PageSpinner />}>
+                <Activity />
+              </Suspense>
+            }
           />
           <Route
             path="/settings"
-            element={<Placeholder title="Settings" subtitle="Account settings in M5." />}
+            element={
+              <Suspense fallback={<PageSpinner />}>
+                <Settings />
+              </Suspense>
+            }
           />
           <Route
             path="/integrations"
-            element={<Placeholder title="Integrations" subtitle="Integrations in M5." />}
+            element={
+              <Suspense fallback={<PageSpinner />}>
+                <Integrations />
+              </Suspense>
+            }
           />
         </Route>
       </Route>
