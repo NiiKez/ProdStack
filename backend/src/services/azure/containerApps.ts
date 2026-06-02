@@ -13,7 +13,7 @@
  *    come from `DefaultAzureCredential` so the API picks up its system-
  *    assigned managed identity in production and falls through to az-CLI /
  *    env vars for local debugging — Service Principals aren't usable in the
- *    deployment tenant (see `CLAUDE.md`).
+ *    deployment tenant.
  *
  * The two branches share the public shape so callers (e.g. the Project
  * service) never need to know which is active beyond `isStub()`.
@@ -65,7 +65,7 @@ export interface UpdateContainerAppOpts {
 
 const DEFAULT_IMAGE = 'mcr.microsoft.com/k8se/quickstart:latest';
 const DEFAULT_TARGET_PORT = 80;
-const DEFAULT_MIN_REPLICAS = 0; // scale-to-zero per SPEC §13
+const DEFAULT_MIN_REPLICAS = 0; // scale-to-zero
 const DEFAULT_MAX_REPLICAS = 2;
 
 /**
@@ -377,6 +377,114 @@ export async function updateContainerApp(
 export async function deleteContainerApp(name: string): Promise<void> {
   assertValidName(name);
   return isStub() ? stubDelete(name) : realDelete(name);
+}
+
+// --- Platform self-deploy (M6 "Option B") ----------------------------------
+
+/**
+ * The only Container Apps the CI/CD self-deploy endpoint is allowed to roll.
+ * A hard allow-list so a leaked/misused `DEPLOY_TOKEN` can never aim
+ * `rollPlatformApp` at a user's Container App (or anything else in the RG) —
+ * the worst it can do is point one of these two at a different image in our
+ * own ACR (the route also pins the registry).
+ */
+export const PLATFORM_APPS = {
+  api: 'prodstack-api',
+  web: 'prodstack-web',
+} as const;
+export type PlatformAppKey = keyof typeof PLATFORM_APPS;
+
+export interface RollPlatformAppOpts {
+  /** Resolved Container App name — must be one of `PLATFORM_APPS`' values. */
+  name: string;
+  /** Fully-qualified image ref in our ACR (validated by the caller). */
+  image: string;
+}
+
+async function stubRollPlatformApp(opts: RollPlatformAppOpts): Promise<ContainerAppRef> {
+  stubLog.info(
+    { op: 'rollPlatformApp', name: opts.name, image: opts.image },
+    'stub: roll platform Container App',
+  );
+  await stubDelay();
+  return { name: opts.name, liveUrl: STUB_LIVE_URL(opts.name), revisionName: `${opts.name}--stub` };
+}
+
+async function realRollPlatformApp(opts: RollPlatformAppOpts): Promise<ContainerAppRef> {
+  const client = getClient();
+  const resourceGroup = requireResourceGroup();
+
+  // Get-modify-PUT, swapping ONLY the container image. Re-PUTting the whole
+  // `existing` envelope preserves the container's env (secretRefs) and the
+  // app's `configuration.secrets` — which on the platform apps are all Key
+  // Vault references (`{name, keyVaultUrl, identity}`), so `get()` returns them
+  // in full and they round-trip without blanking. (Contrast `realUpdate`, which
+  // must `listSecrets` only because it rewrites literal `env-*` secrets.)
+  const existing = await client.containerApps.get(resourceGroup, opts.name);
+  const containers = existing.template?.containers ?? [];
+  const merged: ContainerApp = {
+    ...existing,
+    template: {
+      ...existing.template,
+      containers:
+        containers.length > 0
+          ? [{ ...containers[0], image: opts.image }, ...containers.slice(1)]
+          : [{ name: opts.name, image: opts.image }],
+    },
+  };
+
+  // Kick off the rollout but DON'T `pollUntilDone()`. When the API rolls
+  // *itself* (app=api), ACA shifts traffic to the new revision and tears down
+  // the old one (this process) once it's healthy — awaiting completion would
+  // risk dropping the very request that triggered the deploy. `beginCreate-
+  // OrUpdate` resolves once ARM has accepted the initial PUT, after which Azure
+  // owns the rollout; we return 202 and let it finish asynchronously. ACA keeps
+  // the old revision serving until the new one passes health probes, so the
+  // 202 reaches the GitHub runner before any traffic shift.
+  await client.containerApps.beginCreateOrUpdate(resourceGroup, opts.name, merged);
+
+  return {
+    name: opts.name,
+    liveUrl: fqdnToLiveUrl(opts.name, existing.configuration?.ingress?.fqdn),
+  };
+}
+
+/**
+ * Roll one of the two platform Container Apps (`prodstack-api` /
+ * `prodstack-web`) to a new image. Used by the CI/CD self-deploy endpoint so
+ * the GitHub runner never needs Azure RBAC (it builds + pushes the image; the
+ * API — which holds `Contributor` on the RG via its managed identity — does the
+ * roll). Refuses any name outside `PLATFORM_APPS` as defence-in-depth on top of
+ * the route's own validation.
+ */
+export async function rollPlatformApp(opts: RollPlatformAppOpts): Promise<ContainerAppRef> {
+  assertValidName(opts.name);
+  const isPlatform = (Object.values(PLATFORM_APPS) as string[]).includes(opts.name);
+  if (!isPlatform) {
+    throw new Error(
+      `rollPlatformApp refused: ${JSON.stringify(opts.name)} is not a platform Container App`,
+    );
+  }
+  return isStub() ? stubRollPlatformApp(opts) : realRollPlatformApp(opts);
+}
+
+/**
+ * Read the current container image of a Container App by name (M6 image GC).
+ *
+ * The image cleanup job calls this for the three platform apps
+ * (`prodstack-api` / `prodstack-web` / `prodstack-builder`) to add their LIVE
+ * image tags to the keep-set — authoritative protection so GC never deletes an
+ * image that's actually deployed, even if it's older than the retention window.
+ *
+ * Returns `null` in stub mode (local dev / tests never hit a real registry, so
+ * there's nothing live to protect) and `null` when the app has no container.
+ */
+export async function getContainerAppImage(name: string): Promise<string | null> {
+  if (isStub()) return null;
+  const client = getClient();
+  const resourceGroup = requireResourceGroup();
+  const app = await client.containerApps.get(resourceGroup, name);
+  return app.template?.containers?.[0]?.image ?? null;
 }
 
 /**

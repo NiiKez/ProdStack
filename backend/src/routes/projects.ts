@@ -554,6 +554,15 @@ router.post(
       const user = getUser(req);
       const project = await requireOwnedProject(id, user.id);
 
+      // Kill switch (degrade mode): refuse to enqueue new builds while the
+      // platform is paused for cost reasons. Existing deployed apps keep
+      // serving; only new build creation is blocked. `Retry-After` mirrors the
+      // webhook path (webhooks.ts) so both 503s carry the same machine retry hint.
+      if (env.KILL_SWITCH) {
+        res.set('Retry-After', '86400');
+        throw new HttpError(503, 'BUILDS_PAUSED', 'Builds are temporarily paused (usage limit).');
+      }
+
       // One build at a time per project: a concurrent in-flight build already
       // owns the deploy, so a second one would race it. This check + insert is
       // not atomic (no serializable tx / unique index), so two near-simultaneous

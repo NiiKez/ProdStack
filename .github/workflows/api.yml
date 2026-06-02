@@ -1,0 +1,171 @@
+name: Deploy API
+
+# Build + test the backend, push the image to ACR, then trigger the Container App
+# revision roll via a protected self-deploy endpoint on the already-running API.
+#
+# Why no `azure/login` step: the university Entra tenant blocks App Registrations
+# and OIDC federated credentials, so a GitHub runner can never obtain Azure RBAC.
+# Instead we push with ACR ADMIN creds (docker login) and let the API roll the
+# revision from inside Azure using its own managed identity ("Option B").
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.dockerignore'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.base.json'
+      - 'eslint.config.mjs'
+      - '.github/workflows/api.yml'
+  workflow_dispatch:
+
+# Least privilege: this job only checks out code and talks to ACR / the API via
+# their own secrets — it never uses GITHUB_TOKEN to touch the repo, PRs, or
+# packages. Drop the inherited (often read/write) default to read-only.
+permissions:
+  contents: read
+
+# Never cancel an in-flight deploy: a half-applied revision roll is worse than a
+# queued one, so serialize deploys instead of cancelling them mid-flight. The
+# group is shared with web.yml (`deploy-platform`) on purpose: BOTH deploys POST
+# to the same self-deploy endpoint, and `rollPlatformApp` is a get-modify-PUT on
+# the target Container App — serializing all platform rolls removes any chance of
+# two concurrent rolls interleaving their read-modify-write.
+concurrency:
+  group: deploy-platform
+  cancel-in-progress: false
+
+env:
+  # GitHub Actions repository variable (Settings → Secrets and variables → Actions
+  # → Variables). Set with: gh variable set DEPLOY_API_ORIGIN --body https://<your-api-fqdn>
+  DEPLOY_API_ORIGIN: ${{ vars.DEPLOY_API_ORIGIN }}
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    # Cap a hung npm ci / docker build / push so it can't burn the runner
+    # allotment or hold the deploy concurrency group for the 6h default.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The backend imports the generated Prisma client, so the client must exist
+      # before typecheck / build / test compile or load anything from backend/src.
+      - name: Generate Prisma client
+        run: npm run prisma:generate --workspace=@prodstack/api
+
+      - name: Typecheck
+        run: npm run typecheck --workspace=@prodstack/api
+
+      - name: Lint
+        run: npm run lint --workspace=@prodstack/api
+
+      # Backend tests need no DB and no Azure: vitest setup injects fake env vars,
+      # tests mock the DB and set AZURE_STUB=true. So `npm ci` + vitest is enough.
+      - name: Test
+        run: npm run test --workspace=@prodstack/api
+
+      - name: Build
+        run: npm run build --workspace=@prodstack/api
+
+      # ACR admin creds (repo secrets) — never OIDC/SP (blocked by the uni tenant).
+      # Password is fed via stdin from a step-level env var so it never appears in
+      # the rendered `run:` string or the command line.
+      - name: Log in to ACR
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          docker login prodstack.azurecr.io -u "$ACR_USERNAME" --password-stdin <<< "$ACR_PASSWORD"
+
+      # Build context is the repo ROOT (npm workspaces hoist deps to root
+      # node_modules), with the Dockerfile pointed at via -f.
+      - name: Build and push image
+        run: |
+          docker build -f backend/Dockerfile \
+            -t prodstack.azurecr.io/prodstack-api:${{ github.sha }} \
+            -t prodstack.azurecr.io/prodstack-api:latest \
+            .
+          # Push the two explicit tags (not `--all-tags`, which would also push
+          # any stale local tag of this repo on a non-ephemeral runner). The
+          # deploy below pins the immutable :<sha>; :latest is a human convenience
+          # only and is NOT authoritative.
+          docker push prodstack.azurecr.io/prodstack-api:${{ github.sha }}
+          docker push prodstack.azurecr.io/prodstack-api:latest
+
+      # Trigger the revision roll by POSTing to the protected self-deploy endpoint
+      # on the running API. The API holds Azure RBAC via its managed identity and
+      # rolls BOTH container apps, so this endpoint lives on the API origin.
+      #
+      # No `prisma migrate deploy` step here ON PURPOSE: the GitHub runner cannot
+      # reach the firewalled Postgres (only the home IP + the Container Apps Env
+      # outbound IP are allowlisted). Migrations run automatically inside the API
+      # container on boot — the new revision's entrypoint runs `prisma migrate
+      # deploy` before the server starts.
+      - name: Trigger deploy (revision roll)
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="prodstack.azurecr.io/prodstack-api:${{ github.sha }}"
+          echo "Requesting roll of prodstack-api to $IMAGE"
+          # SINGLE attempt — deliberately NO `--retry`. POST /api/admin/deploy is
+          # non-idempotent (it kicks off a revision roll), and curl's --retry
+          # resubmits on a timeout or a transient 5xx/429 *after* the request may
+          # already have been accepted — for app=api the API tears down its own
+          # old revision right after responding, so a post-send drop + retry would
+          # fire a SECOND roll. A generous --max-time absorbs a cold start instead.
+          # `|| echo 000` keeps the explicit != 202 check meaningful even if curl
+          # fails at the transport level (otherwise `set -e` aborts inside $(...)
+          # with no diagnostic). A transient failure here just fails the job —
+          # re-run it (workflow_dispatch); a failed deploy is safer than a double.
+          STATUS=$(curl -sS \
+            --max-time 90 \
+            -o /tmp/resp.json \
+            -w '%{http_code}' \
+            -X POST "${DEPLOY_API_ORIGIN}/api/admin/deploy" \
+            -H "X-Deploy-Token: ${DEPLOY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"app\":\"api\",\"image\":\"${IMAGE}\"}" || echo "000")
+          echo "Deploy endpoint responded with HTTP $STATUS"
+          echo "Response body:"
+          cat /tmp/resp.json || true
+          echo
+          if [ "$STATUS" != "202" ]; then
+            echo "::error::Deploy POST did not return 202 (got $STATUS) — failing the job."
+            exit 1
+          fi
+          echo "Revision roll accepted (202)."
+
+      # Liveness sanity check ONLY — this does NOT confirm the new revision is
+      # live. The authoritative success signal is the 202 above (ARM accepted the
+      # roll). The roll is async and ACA keeps the OLD revision serving 200 until
+      # the new one passes health probes (and would keep serving it if the new
+      # image crash-looped), so a 200 here proves "the API is up", not "the new
+      # build is the one answering". A timeout is a warning, not a failure.
+      - name: Verify API is reachable (liveness, best-effort)
+        run: |
+          set -uo pipefail
+          echo "Polling ${DEPLOY_API_ORIGIN}/healthz for a 200 (liveness only)..."
+          for i in $(seq 1 10); do
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' "${DEPLOY_API_ORIGIN}/healthz" || echo "000")
+            echo "Attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "API is serving 200. NOTE: confirm the new revision in Azure (az containerapp revision list) — this check can't tell old from new."
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::warning::Liveness poll timed out — the revision roll is async and may still be in progress. Check the Container App in Azure."

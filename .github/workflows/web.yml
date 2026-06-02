@@ -1,0 +1,156 @@
+name: Deploy Web
+
+# Build the Vite SPA, push the nginx image to ACR, then trigger the Container App
+# revision roll via the SAME protected self-deploy endpoint on the running API.
+#
+# Why the deploy endpoint is on the API origin (not the web origin): the web app
+# is just nginx serving static assets + reverse-proxying /api — it has no backend
+# of its own. The API holds Azure RBAC via its managed identity and rolls BOTH
+# container apps, so web deploys also POST to the API ("Option B").
+#
+# Why no `azure/login`: the university Entra tenant blocks App Registrations and
+# OIDC, so a GitHub runner can never obtain Azure RBAC. We push with ACR admin
+# creds and let the API perform the roll from inside Azure.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.dockerignore'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.base.json'
+      - 'eslint.config.mjs'
+      - '.github/workflows/web.yml'
+  workflow_dispatch:
+
+# Least privilege: this job only checks out code and talks to ACR / the API via
+# their own secrets — it never uses GITHUB_TOKEN to touch the repo, PRs, or
+# packages. Drop the inherited (often read/write) default to read-only.
+permissions:
+  contents: read
+
+# Never cancel an in-flight deploy: serialize rather than cancelling a half-done
+# revision roll. Shares the `deploy-platform` group with api.yml on purpose —
+# both POST to the same self-deploy endpoint and `rollPlatformApp` is a
+# get-modify-PUT, so all platform rolls (api or web) run one at a time.
+concurrency:
+  group: deploy-platform
+  cancel-in-progress: false
+
+env:
+  # GitHub Actions repository variables (Settings → Secrets and variables → Actions
+  # → Variables). Set with:
+  #   gh variable set DEPLOY_API_ORIGIN --body https://<your-api-fqdn>
+  #   gh variable set WEB_ORIGIN        --body https://<your-web-fqdn>
+  DEPLOY_API_ORIGIN: ${{ vars.DEPLOY_API_ORIGIN }}
+  WEB_ORIGIN: ${{ vars.WEB_ORIGIN }}
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    # Cap a hung npm ci / docker build / push so it can't burn the runner
+    # allotment or hold the deploy concurrency group for the 6h default.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # No `prisma:generate` here — that's a backend concern; the frontend build
+      # has no dependency on the generated Prisma client.
+
+      - name: Typecheck
+        run: npm run typecheck --workspace=@prodstack/web
+
+      - name: Lint
+        run: npm run lint --workspace=@prodstack/web
+
+      - name: Build
+        run: npm run build --workspace=@prodstack/web
+
+      # ACR admin creds (repo secrets), password via stdin from a step-level env
+      # var so it never lands in the rendered `run:` string or the command line.
+      - name: Log in to ACR
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          docker login prodstack.azurecr.io -u "$ACR_USERNAME" --password-stdin <<< "$ACR_PASSWORD"
+
+      # Build context is the repo ROOT (npm workspaces hoist deps to root
+      # node_modules); the multi-stage frontend/Dockerfile builds dist/ then
+      # serves it from nginx. No API URL is baked in (same-origin via the proxy).
+      - name: Build and push image
+        run: |
+          docker build -f frontend/Dockerfile \
+            -t prodstack.azurecr.io/prodstack-web:${{ github.sha }} \
+            -t prodstack.azurecr.io/prodstack-web:latest \
+            .
+          # Explicit tags, not `--all-tags` (see api.yml). Deploy pins :<sha>.
+          docker push prodstack.azurecr.io/prodstack-web:${{ github.sha }}
+          docker push prodstack.azurecr.io/prodstack-web:latest
+
+      # Roll the web revision via the API's self-deploy endpoint. Note app="web";
+      # the immutable ${{ github.sha }} tag is sent (never `latest`).
+      - name: Trigger deploy (revision roll)
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="prodstack.azurecr.io/prodstack-web:${{ github.sha }}"
+          echo "Requesting roll of prodstack-web to $IMAGE"
+          # SINGLE attempt — deliberately NO `--retry`. POST /api/admin/deploy is
+          # non-idempotent (kicks off a revision roll); curl's --retry resubmits on
+          # a timeout / transient 5xx *after* the roll may already be accepted,
+          # firing a second roll. A generous --max-time absorbs a cold start of the
+          # always-on API receiving the POST instead. `|| echo 000` keeps the != 202
+          # check meaningful on a transport failure. Transient fail → re-run the job
+          # (workflow_dispatch); a failed deploy is safer than a double-roll.
+          STATUS=$(curl -sS \
+            --max-time 90 \
+            -o /tmp/resp.json \
+            -w '%{http_code}' \
+            -X POST "${DEPLOY_API_ORIGIN}/api/admin/deploy" \
+            -H "X-Deploy-Token: ${DEPLOY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"app\":\"web\",\"image\":\"${IMAGE}\"}" || echo "000")
+          echo "Deploy endpoint responded with HTTP $STATUS"
+          echo "Response body:"
+          cat /tmp/resp.json || true
+          echo
+          if [ "$STATUS" != "202" ]; then
+            echo "::error::Deploy POST did not return 202 (got $STATUS) — failing the job."
+            exit 1
+          fi
+          echo "Revision roll accepted (202)."
+
+      # Liveness sanity check ONLY — does NOT confirm the new revision is live.
+      # prodstack-web is scale-to-zero (minReplicas=0): the first poll cold-starts
+      # whatever revision is active, and ACA keeps the OLD revision serving 200
+      # until the new one is healthy (and would keep serving it if the new image
+      # crash-looped). So a 200 here means "web is up", not "the new build shipped".
+      # Authoritative signal is the 202 from the deploy POST. Timeout = warning.
+      - name: Verify web is reachable (liveness, best-effort)
+        run: |
+          set -uo pipefail
+          echo "Polling ${WEB_ORIGIN}/ for a 200 (liveness only; cold start from zero is normal)..."
+          for i in $(seq 1 10); do
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' "${WEB_ORIGIN}/" || echo "000")
+            echo "Attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "Web is serving 200. NOTE: confirm the new revision in Azure — this check can't tell old from new."
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::warning::Liveness poll timed out — the revision roll is async and may still be in progress (web scales from zero, so a cold start is normal). Check the Container App in Azure."

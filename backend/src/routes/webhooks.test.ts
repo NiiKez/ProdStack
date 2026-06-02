@@ -275,6 +275,35 @@ describe('POST /api/webhooks/github', () => {
     expect(state.webhookEvents.size).toBe(0);
   });
 
+  it('refuses a valid signed push with 503 + Retry-After when KILL_SWITCH is on, creating no build', async () => {
+    // `env` is read at import, so re-import the app with the switch flipped on.
+    // The hoisted `vi.mock` factories re-apply to the freshly-imported modules.
+    const prev = process.env.KILL_SWITCH;
+    process.env.KILL_SWITCH = 'true';
+    vi.resetModules();
+    try {
+      const { createApp: createKilledApp } = await import('../app.js');
+      const body = pushPayload();
+      const res = await supertest(createKilledApp())
+        .post('/api/webhooks/github')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Event', 'push')
+        .set('X-GitHub-Delivery', 'delivery-killed')
+        .set('X-Hub-Signature-256', sign(body))
+        .send(body);
+
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('86400');
+      expect(res.body).toMatchObject({ error: 'BUILDS_PAUSED' });
+      expect(state.builds).toHaveLength(0);
+      expect(state.webhookEvents.size).toBe(0);
+    } finally {
+      if (prev === undefined) delete process.env.KILL_SWITCH;
+      else process.env.KILL_SWITCH = prev;
+      vi.resetModules();
+    }
+  });
+
   it('returns 204 for an unrecognized event type', async () => {
     const body = JSON.stringify({ repository: { id: 12345 } });
     const app = createApp();

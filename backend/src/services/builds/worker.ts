@@ -2,7 +2,7 @@
  * Worker poll loop.
  *
  * Single-concurrency by design (`maxReplicas=1` on prodstack-builder per
- * the operational policy in CLAUDE.md): grab one job, run it to completion,
+ * the operational policy): grab one job, run it to completion,
  * grab the next. No internal parallelism, no per-build child processes for
  * the orchestration code — only the kaniko/git spawns actually escape the
  * Node process.
@@ -52,7 +52,24 @@ export function startWorker(): WorkerHandle {
       log.error({ err }, 'claim recovery failed');
     }
 
+    let killSwitchLogged = false;
     while (!controller.signal.aborted) {
+      // Kill switch (degrade mode): stop claiming NEW builds while the platform
+      // is paused for cost reasons. We deliberately keep the replica alive and
+      // idle rather than exiting — exiting would make ACA respawn it in a tight
+      // restart loop, the opposite of what a cost kill switch wants. Any build
+      // already claimed before the switch flipped on finishes naturally (the
+      // switch is read at boot, so in practice the loop simply never starts a
+      // new claim once it's set).
+      if (env.KILL_SWITCH) {
+        if (!killSwitchLogged) {
+          log.warn('kill switch active — worker idling, not claiming new builds');
+          killSwitchLogged = true;
+        }
+        await sleepInterruptible(env.WORKER_POLL_INTERVAL_MS, controller.signal);
+        continue;
+      }
+
       let claimed: Awaited<ReturnType<typeof claimNextBuild>> = null;
       try {
         claimed = await claimNextBuild(env.WORKER_ID);
