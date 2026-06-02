@@ -75,6 +75,13 @@ jobs:
       - name: Lint
         run: npm run lint --workspace=@prodstack/web
 
+      # Gate the deploy on the unit suite — a red frontend must not self-deploy.
+      # (E2E runs in the PR gate ci.yml, not here, to avoid a Playwright browser
+      # install on every prod roll. With branch protection on main, every change
+      # passes ci.yml's E2E before it can reach this push-triggered deploy.)
+      - name: Test (unit)
+        run: npm run test --workspace=@prodstack/web
+
       - name: Build
         run: npm run build --workspace=@prodstack/web
 

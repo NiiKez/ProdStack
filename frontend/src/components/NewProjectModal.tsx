@@ -4,14 +4,9 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Button, Input, Modal, useToast } from '@/components/ui';
 import { ApiError } from '@/lib/api';
+import { REPO_URL_PATTERN, slugify, deriveNameFromRepoUrl, mapApiError } from '@/lib/repo';
 import { useCreateProject } from '@/hooks/useCreateProject';
 import type { ProjectSummary } from '@/types/api';
-
-// Mirrors the backend regex in `routes/projects.ts` — https only, no trailing
-// slash other than the optional `.git`. Keeping them aligned avoids the case
-// where the client accepts a URL that the API immediately rejects.
-const REPO_URL_PATTERN =
-  /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?(?:\.git)?\/?$/;
 
 const schema = z.object({
   repoUrl: z.string().regex(REPO_URL_PATTERN, 'Must be a GitHub repo URL'),
@@ -25,42 +20,6 @@ export interface NewProjectModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated?: (project: ProjectSummary) => void;
-}
-
-function slugify(input: string): string {
-  return input
-    .toLowerCase()
-    .trim()
-    .replace(/\.git$/, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function deriveNameFromRepoUrl(url: string): string {
-  const trimmed = url.trim().replace(/\/+$/, '');
-  if (!trimmed) return '';
-  const lastSegment = trimmed.split('/').pop() ?? '';
-  const withoutGit = lastSegment.replace(/\.git$/, '');
-  return withoutGit;
-}
-
-function mapApiError(err: unknown): string {
-  if (err instanceof ApiError) {
-    switch (err.code) {
-      case 'INVALID_REPO_URL':
-        return "That doesn't look like a GitHub repo URL.";
-      case 'REPO_NOT_ACCESSIBLE':
-        return "ProdStack can't see that repo. Check the URL or your GitHub scopes.";
-      case 'WEBHOOK_REGISTRATION_FAILED':
-        return "Couldn't register the GitHub webhook.";
-      case 'DOCKERFILE_NOT_FOUND':
-        return 'No Dockerfile at the repo root.';
-      default:
-        return err.message;
-    }
-  }
-  if (err instanceof Error) return err.message;
-  return 'Something went wrong.';
 }
 
 export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectModalProps) {

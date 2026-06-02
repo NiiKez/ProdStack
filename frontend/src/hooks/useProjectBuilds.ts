@@ -13,9 +13,9 @@ export interface BuildFilters {
   since?: string;
 }
 
-const PAGE_SIZE = 20;
+export const PAGE_SIZE = 20;
 
-function buildQuery(filters: BuildFilters, cursor?: string): string {
+export function buildQuery(filters: BuildFilters, cursor?: string): string {
   const qs = new URLSearchParams();
   if (filters.status && filters.status.length > 0) qs.set('status', filters.status.join(','));
   if (filters.branch) qs.set('branch', filters.branch);
