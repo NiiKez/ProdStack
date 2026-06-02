@@ -24,6 +24,7 @@ import {
   ContainerAppsAPIClient,
   type ContainerApp,
   type EnvironmentVar,
+  type RegistryCredentials,
   type Secret,
 } from '@azure/arm-appcontainers';
 import { DefaultAzureCredential } from '@azure/identity';
@@ -67,6 +68,37 @@ const DEFAULT_IMAGE = 'mcr.microsoft.com/k8se/quickstart:latest';
 const DEFAULT_TARGET_PORT = 80;
 const DEFAULT_MIN_REPLICAS = 0; // scale-to-zero
 const DEFAULT_MAX_REPLICAS = 2;
+
+// User Container Apps pull their built image from our PRIVATE ACR. Without a
+// `registries` credential, ACA attempts an anonymous pull and the revision
+// fails to provision with `UNAUTHORIZED: authentication required`. We reuse the
+// ACR admin creds the rest of the platform already uses (push + image GC),
+// stored on each user app as a Container App secret referenced by `registries`.
+const ACR_PULL_SECRET_NAME = 'acr-pull-password';
+
+interface AcrPullAuth {
+  /** ACR login server, e.g. `prodstack.azurecr.io`. */
+  server: string;
+  registry: RegistryCredentials;
+  secret: Secret;
+}
+
+/**
+ * Build the ACR pull credential (registry entry + its password secret) from the
+ * ACR admin creds in the environment. Returns `undefined` when any of
+ * `ACR_NAME`/`ACR_USERNAME`/`ACR_PASSWORD` is unset — i.e. local/stub setups or
+ * a misconfigured deploy — so callers simply skip wiring registry auth rather
+ * than emitting a half-formed `registries` block that ARM would reject.
+ */
+function acrPullAuth(): AcrPullAuth | undefined {
+  if (!env.ACR_NAME || !env.ACR_USERNAME || !env.ACR_PASSWORD) return undefined;
+  const server = `${env.ACR_NAME}.azurecr.io`;
+  return {
+    server,
+    registry: { server, username: env.ACR_USERNAME, passwordSecretRef: ACR_PULL_SECRET_NAME },
+    secret: { name: ACR_PULL_SECRET_NAME, value: env.ACR_PASSWORD },
+  };
+}
 
 /**
  * Azure Container Apps naming rules: 2–32 chars, lowercase alphanumeric
@@ -232,6 +264,7 @@ function fqdnToLiveUrl(name: string, fqdn: string | undefined): string {
 
 function buildEnvelope(opts: CreateContainerAppOpts, environmentId: string): ContainerApp {
   const { env: containerEnv, secrets } = envToSecrets(opts.envVars);
+  const acr = acrPullAuth();
   return {
     location: env.AZURE_REGION,
     environmentId,
@@ -241,7 +274,10 @@ function buildEnvelope(opts: CreateContainerAppOpts, environmentId: string): Con
         targetPort: opts.targetPort ?? DEFAULT_TARGET_PORT,
         transport: 'auto',
       },
-      secrets: secrets ?? [],
+      // Surface the ACR pull secret alongside any env-var secrets so the new
+      // app can authenticate to the private registry from its first roll.
+      secrets: [...(secrets ?? []), ...(acr ? [acr.secret] : [])],
+      ...(acr ? { registries: [acr.registry] } : {}),
     },
     template: {
       containers: [
@@ -301,19 +337,50 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
   // without their values, so we must pull the real values from `listSecrets`
   // first — otherwise preserved secrets round-trip as `value: undefined` and
   // get blanked. Without this, saving an env var wipes any non-env secret.
+  // Ensure the private-ACR pull credential is present. Apps created before
+  // pull-auth wiring have no `registries` entry, so a roll to an ACR image
+  // would 401 on the pull; we repair them here (idempotent for apps that
+  // already have it).
+  const acr = acrPullAuth();
+  const existingRegistries = existing.configuration?.registries ?? [];
+  const registriesNeedRepair =
+    acr !== undefined && !existingRegistries.some((r) => r.server === acr.server);
+
   let mergedSecrets: Secret[] | undefined;
-  if (secrets !== undefined) {
+  let mergedRegistries: RegistryCredentials[] | undefined;
+  // Rewrite the secrets array when applying env vars OR when repairing the ACR
+  // registry (the pull secret must exist for `passwordSecretRef` to resolve).
+  // Either way we must read live secret *values* via `listSecrets` first —
+  // `get()` returns names with `value: undefined`, so any preserved plain-value
+  // secret would otherwise round-trip blanked and ARM would reject the PUT.
+  if (secrets !== undefined || registriesNeedRepair) {
     const live = await client.containerApps.listSecrets(resourceGroup, opts.name);
-    const preserved = (live.value ?? []).filter(
-      (s): s is Secret => typeof s.name === 'string' && !s.name.startsWith('env-'),
+    const liveSecrets = (live.value ?? []).filter(
+      (s): s is Secret => typeof s.name === 'string',
     );
-    mergedSecrets = [...preserved, ...secrets];
+    // When (re)applying env vars, drop the `env-` set we manage so it's replaced
+    // by `secrets`; otherwise keep every live secret as-is.
+    const base =
+      secrets !== undefined ? liveSecrets.filter((s) => !s.name!.startsWith('env-')) : liveSecrets;
+    mergedSecrets = secrets !== undefined ? [...base, ...secrets] : [...base];
+    if (acr && !mergedSecrets.some((s) => s.name === acr.secret.name)) {
+      mergedSecrets = [...mergedSecrets, acr.secret];
+    }
+    if (registriesNeedRepair) {
+      mergedRegistries = [...existingRegistries, acr!.registry];
+    }
   }
 
   const merged: ContainerApp = {
     ...existing,
-    ...(mergedSecrets !== undefined
-      ? { configuration: { ...existing.configuration, secrets: mergedSecrets } }
+    ...(mergedSecrets !== undefined || mergedRegistries !== undefined
+      ? {
+          configuration: {
+            ...existing.configuration,
+            ...(mergedSecrets !== undefined ? { secrets: mergedSecrets } : {}),
+            ...(mergedRegistries !== undefined ? { registries: mergedRegistries } : {}),
+          },
+        }
       : {}),
     template: {
       ...existing.template,

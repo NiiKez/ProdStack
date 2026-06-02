@@ -16,7 +16,7 @@ process.env.AZURE_REGION = 'francecentral';
 process.env.CONTAINER_APPS_ENV_ID =
   '/subscriptions/sub-test/resourceGroups/prodstack/providers/Microsoft.App/managedEnvironments/prodstack-env';
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   beginCreateOrUpdateAndWait: vi.fn(),
@@ -254,6 +254,103 @@ describe('env vars surfaced as Container App secrets', () => {
     expect(envelope.template.containers[0].env).toEqual([
       { name: 'KEEP', secretRef: 'env-keep-1234abcd' },
     ]);
+  });
+});
+
+describe('ACR pull auth (private-registry credentials on user apps)', () => {
+  // env is parsed once per module load; `vi.resetModules()` in the top-level
+  // beforeEach lets us re-import with these set so `acrPullAuth()` activates.
+  beforeEach(() => {
+    process.env.ACR_NAME = 'prodstack';
+    process.env.ACR_USERNAME = 'prodstack';
+    process.env.ACR_PASSWORD = 'acr-pw';
+  });
+  afterEach(() => {
+    delete process.env.ACR_NAME;
+    delete process.env.ACR_USERNAME;
+    delete process.env.ACR_PASSWORD;
+  });
+
+  const EXPECTED_REGISTRY = {
+    server: 'prodstack.azurecr.io',
+    username: 'prodstack',
+    passwordSecretRef: 'acr-pull-password',
+  };
+
+  it('createContainerApp wires the ACR registry + pull secret so the first roll can pull', async () => {
+    mocks.beginCreateOrUpdateAndWait.mockResolvedValue({
+      configuration: { ingress: { fqdn: 'demo.example.azurecontainerapps.io' } },
+    });
+
+    const { createContainerApp } = await import('./containerApps.js');
+    await createContainerApp({ name: 'octocat-demo' });
+
+    const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    expect(envelope.configuration.registries).toEqual([EXPECTED_REGISTRY]);
+    expect(envelope.configuration.secrets).toContainEqual({
+      name: 'acr-pull-password',
+      value: 'acr-pw',
+    });
+  });
+
+  it('updateContainerApp repairs a missing registry on roll and preserves live secret values', async () => {
+    // App provisioned before pull-auth wiring: no registries, plus a non-env secret.
+    mocks.get.mockResolvedValue({
+      location: 'francecentral',
+      environmentId: process.env.CONTAINER_APPS_ENV_ID,
+      configuration: { ingress: { external: true, targetPort: 80 }, secrets: [{ name: 'other' }] },
+      template: { containers: [{ name: 'octocat-demo', image: 'old' }], scale: {} },
+    });
+    mocks.listSecrets.mockResolvedValue({ value: [{ name: 'other', value: 'keep' }] });
+    mocks.beginCreateOrUpdateAndWait.mockResolvedValue({
+      configuration: { ingress: { fqdn: 'demo.example.azurecontainerapps.io' } },
+      latestRevisionName: 'demo--rev2',
+    });
+
+    const { updateContainerApp } = await import('./containerApps.js');
+    await updateContainerApp({
+      name: 'octocat-demo',
+      image: 'prodstack.azurecr.io/octocat-demo:sha',
+      envVars: [],
+    });
+
+    const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    const secrets = envelope.configuration.secrets as Array<{ name: string; value?: string }>;
+    expect(envelope.configuration.registries).toEqual([EXPECTED_REGISTRY]);
+    // Existing secret round-trips with its real value (not blanked), acr secret added.
+    expect(secrets).toContainEqual({ name: 'other', value: 'keep' });
+    expect(secrets).toContainEqual({ name: 'acr-pull-password', value: 'acr-pw' });
+    expect(envelope.template.containers[0].image).toBe('prodstack.azurecr.io/octocat-demo:sha');
+  });
+
+  it('updateContainerApp does not duplicate a registry/secret that already exists', async () => {
+    mocks.get.mockResolvedValue({
+      location: 'francecentral',
+      environmentId: process.env.CONTAINER_APPS_ENV_ID,
+      configuration: {
+        ingress: { external: true, targetPort: 80 },
+        secrets: [{ name: 'acr-pull-password' }],
+        registries: [EXPECTED_REGISTRY],
+      },
+      template: { containers: [{ name: 'octocat-demo', image: 'old' }], scale: {} },
+    });
+    mocks.listSecrets.mockResolvedValue({ value: [{ name: 'acr-pull-password', value: 'acr-pw' }] });
+    mocks.beginCreateOrUpdateAndWait.mockResolvedValue({
+      configuration: { ingress: { fqdn: 'demo.example.azurecontainerapps.io' } },
+      latestRevisionName: 'demo--rev3',
+    });
+
+    const { updateContainerApp } = await import('./containerApps.js');
+    await updateContainerApp({
+      name: 'octocat-demo',
+      image: 'prodstack.azurecr.io/octocat-demo:sha',
+      envVars: [],
+    });
+
+    const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    const secrets = envelope.configuration.secrets as Array<{ name: string }>;
+    expect(envelope.configuration.registries).toHaveLength(1);
+    expect(secrets.filter((s) => s.name === 'acr-pull-password')).toHaveLength(1);
   });
 });
 
