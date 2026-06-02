@@ -414,16 +414,29 @@ async function realRollPlatformApp(opts: RollPlatformAppOpts): Promise<Container
   const client = getClient();
   const resourceGroup = requireResourceGroup();
 
-  // Get-modify-PUT, swapping ONLY the container image. Re-PUTting the whole
-  // `existing` envelope preserves the container's env (secretRefs) and the
-  // app's `configuration.secrets` — which on the platform apps are all Key
-  // Vault references (`{name, keyVaultUrl, identity}`), so `get()` returns them
-  // in full and they round-trip without blanking. (Contrast `realUpdate`, which
-  // must `listSecrets` only because it rewrites literal `env-*` secrets.)
+  // Get-modify-PUT, swapping ONLY the container image. A re-PUT replaces the
+  // whole `configuration.secrets` array, and `get()` returns each secret's
+  // *name* (plus `keyVaultUrl`/`identity` for Key Vault refs) but BLANKS the
+  // value of literal secrets. So echoing `existing`'s secrets back verbatim is
+  // rejected by ARM — `ContainerAppSecretInvalid: value or keyVaultUrl and
+  // identity should be provided` — for any plain-value secret, e.g. the ACR
+  // admin creds `acr-username`/`acr-password` that `wire-prodstack-api.sh` sets
+  // for the M6 image-GC. Pull the live secret set from `listSecrets` (which
+  // returns Key Vault refs with their `keyVaultUrl`+`identity` AND literal
+  // secrets with their value) and re-supply it, the same way `realUpdate` does.
+  // This keeps the roll correct regardless of how each secret is stored — it
+  // never blanks a literal secret and never converts a Key Vault ref into one.
   const existing = await client.containerApps.get(resourceGroup, opts.name);
+  const live = await client.containerApps.listSecrets(resourceGroup, opts.name);
+  const secrets = (live.value ?? []).filter(
+    (s): s is Secret => typeof s.name === 'string',
+  );
   const containers = existing.template?.containers ?? [];
   const merged: ContainerApp = {
     ...existing,
+    ...(secrets.length > 0
+      ? { configuration: { ...existing.configuration, secrets } }
+      : {}),
     template: {
       ...existing.template,
       containers:
