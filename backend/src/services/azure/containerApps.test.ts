@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   beginCreateOrUpdateAndWait: vi.fn(),
+  beginCreateOrUpdate: vi.fn(),
   beginDeleteAndWait: vi.fn(),
   get: vi.fn(),
   listSecrets: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock('@azure/arm-appcontainers', () => ({
 beforeEach(() => {
   vi.resetModules();
   mocks.beginCreateOrUpdateAndWait.mockReset();
+  mocks.beginCreateOrUpdate.mockReset();
   mocks.beginDeleteAndWait.mockReset();
   mocks.get.mockReset();
   mocks.listSecrets.mockReset();
@@ -50,6 +52,7 @@ beforeEach(() => {
   mocks.ContainerAppsAPIClient.mockImplementation(() => ({
     containerApps: {
       beginCreateOrUpdateAndWait: mocks.beginCreateOrUpdateAndWait,
+      beginCreateOrUpdate: mocks.beginCreateOrUpdate,
       beginDeleteAndWait: mocks.beginDeleteAndWait,
       get: mocks.get,
       listSecrets: mocks.listSecrets,
@@ -251,5 +254,89 @@ describe('env vars surfaced as Container App secrets', () => {
     expect(envelope.template.containers[0].env).toEqual([
       { name: 'KEEP', secretRef: 'env-keep-1234abcd' },
     ]);
+  });
+});
+
+describe('rollPlatformApp (real branch — M6 CI/CD self-deploy)', () => {
+  it('re-supplies live secret values so a plain-value secret is not blanked on roll', async () => {
+    // `get` returns secret names with KV-ref metadata but NO value for literal
+    // secrets (acr-username/-password) — replaying these verbatim is exactly
+    // what triggered the ContainerAppSecretInvalid 400 in prod on app=api.
+    mocks.get.mockResolvedValue({
+      location: 'francecentral',
+      environmentId: process.env.CONTAINER_APPS_ENV_ID,
+      configuration: {
+        ingress: {
+          external: true,
+          targetPort: 3000,
+          fqdn: 'prodstack-api.example.azurecontainerapps.io',
+        },
+        secrets: [
+          {
+            name: 'database-url',
+            keyVaultUrl: 'https://kv.vault.azure.net/secrets/database-url',
+            identity: 'system',
+          },
+          { name: 'acr-username' },
+          { name: 'acr-password' },
+        ],
+      },
+      template: {
+        containers: [{ name: 'prodstack-api', image: 'prodstack.azurecr.io/prodstack-api:old' }],
+        scale: { minReplicas: 1, maxReplicas: 1 },
+      },
+    });
+    // `listSecrets` returns the real values; Key Vault refs keep their
+    // keyVaultUrl+identity so they round-trip as refs, not literals.
+    mocks.listSecrets.mockResolvedValue({
+      value: [
+        {
+          name: 'database-url',
+          keyVaultUrl: 'https://kv.vault.azure.net/secrets/database-url',
+          identity: 'system',
+        },
+        { name: 'acr-username', value: 'prodstack' },
+        { name: 'acr-password', value: 'pw-123' },
+      ],
+    });
+    mocks.beginCreateOrUpdate.mockResolvedValue({});
+
+    const { rollPlatformApp } = await import('./containerApps.js');
+    const ref = await rollPlatformApp({
+      name: 'prodstack-api',
+      image: 'prodstack.azurecr.io/prodstack-api:newsha',
+    });
+
+    expect(mocks.beginCreateOrUpdate).toHaveBeenCalledTimes(1);
+    const [rg, name, envelope] = mocks.beginCreateOrUpdate.mock.calls[0]!;
+    expect(rg).toBe('prodstack');
+    expect(name).toBe('prodstack-api');
+    expect(envelope.template.containers[0].image).toBe(
+      'prodstack.azurecr.io/prodstack-api:newsha',
+    );
+    const secrets = envelope.configuration.secrets as Array<{
+      name: string;
+      value?: string;
+      keyVaultUrl?: string;
+      identity?: string;
+    }>;
+    // Plain secrets carry their real value (NOT blanked) → no 400.
+    expect(secrets).toContainEqual({ name: 'acr-username', value: 'prodstack' });
+    expect(secrets).toContainEqual({ name: 'acr-password', value: 'pw-123' });
+    // KV ref preserved as a reference (never converted to a literal value).
+    expect(secrets).toContainEqual({
+      name: 'database-url',
+      keyVaultUrl: 'https://kv.vault.azure.net/secrets/database-url',
+      identity: 'system',
+    });
+    expect(ref.liveUrl).toBe('https://prodstack-api.example.azurecontainerapps.io');
+  });
+
+  it('refuses to roll a Container App outside the platform allow-list', async () => {
+    const { rollPlatformApp } = await import('./containerApps.js');
+    await expect(
+      rollPlatformApp({ name: 'octocat-demo', image: 'prodstack.azurecr.io/x:y' }),
+    ).rejects.toThrow(/not a platform Container App/);
+    expect(mocks.beginCreateOrUpdate).not.toHaveBeenCalled();
   });
 });
