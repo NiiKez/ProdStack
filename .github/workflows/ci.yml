@@ -1,0 +1,95 @@
+name: CI
+
+# Pull-request gate: build + test both workspaces in parallel. No Docker, no
+# ACR, no deploy — this only proves the code is green before it can merge to main.
+# (The Deploy API / Deploy Web workflows handle image build + roll on push to main.)
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only: the PR gate only needs to check out and build. No deploy, no token.
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The backend imports the generated Prisma client, so generate it before
+      # typecheck / build / test load anything from backend/src.
+      - name: Generate Prisma client
+        run: npm run prisma:generate --workspace=@prodstack/api
+
+      - name: Typecheck
+        run: npm run typecheck --workspace=@prodstack/api
+
+      - name: Lint
+        run: npm run lint --workspace=@prodstack/api
+
+      # No DB / Azure needed: vitest setup injects fake env, tests mock the DB and
+      # set AZURE_STUB=true.
+      - name: Test
+        run: npm run test --workspace=@prodstack/api
+
+      - name: Build
+        run: npm run build --workspace=@prodstack/api
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck --workspace=@prodstack/web
+
+      - name: Lint
+        run: npm run lint --workspace=@prodstack/web
+
+      - name: Build
+        run: npm run build --workspace=@prodstack/web
+
+  # The TS builds above do NOT validate the Docker images — yet api.yml/web.yml
+  # build them straight on push to main (post-merge). Without this, a Dockerfile
+  # bug, a broken multi-stage COPY, or a root-context regression is caught only
+  # mid-deploy. Build both images here (NO push) so PRs fail fast on it. Build
+  # context is the repo ROOT for both (npm workspaces hoist deps), same as the
+  # deploy workflows. This does NOT exercise the migrate-on-boot entrypoint (that
+  # needs a live Postgres) — it validates the image build only.
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build API image (no push)
+        run: docker build -f backend/Dockerfile -t prodstack-api:ci .
+
+      - name: Build Web image (no push)
+        run: docker build -f frontend/Dockerfile -t prodstack-web:ci .

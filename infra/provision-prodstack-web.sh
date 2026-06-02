@@ -12,8 +12,10 @@
 # IMPORTANT: prodstack-web ALREADY EXISTS (the hello-world placeholder created
 # in M2), so this script UPDATES it — it does not create from scratch. The app
 # serves static files + reverse-proxies the API, so its system-assigned identity
-# only needs AcrPull (already granted in M2); no Key Vault / RG roles, and no
-# app env vars or secrets are required (the API FQDN is hardcoded in nginx.conf).
+# only needs AcrPull (already granted in M2); no Key Vault / RG roles. The one
+# required env var is BACKEND_FQDN: nginx.conf is an envsubst template whose
+# upstream is the backend API's FQDN, so this script sets BACKEND_FQDN on the
+# web app (derived from Azure at runtime — see step 2b).
 set -euo pipefail
 
 RG=prodstack
@@ -43,6 +45,17 @@ az containerapp registry set \
 # --- 2. Roll the image ------------------------------------------------------
 echo "==> Updating image to $IMAGE"
 az containerapp update -n $APP -g $RG --image "$IMAGE" >/dev/null
+
+# --- 2b. Wire BACKEND_FQDN for the nginx reverse proxy ----------------------
+# nginx.conf is an envsubst template: its API upstream is ${BACKEND_FQDN} and
+# the container's entrypoint renders it at boot. nginx therefore REQUIRES
+# BACKEND_FQDN to be set on the app. Derive the API's FQDN from Azure (no
+# hardcoded live host) and set it as an env var. Without this the proxy has no
+# upstream and /api + /builds 502.
+echo "==> Setting BACKEND_FQDN (nginx API upstream) from prodstack-api ingress"
+BACKEND_FQDN=$(az containerapp ingress show -n prodstack-api -g $RG --query fqdn -o tsv)
+az containerapp update -n $APP -g $RG \
+  --set-env-vars BACKEND_FQDN=$BACKEND_FQDN >/dev/null
 
 # --- 3. Ensure ingress targets port 80 -------------------------------------
 # nginx listens on 80. The placeholder was likely created with target-port 80
@@ -76,7 +89,7 @@ az containerapp ingress show -n $APP -g $RG \
 
 echo ""
 echo "==> Done. Verify the SPA + API proxy with:"
-SFX=agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io
-echo "    curl -sS -i https://$APP.$SFX/             # SPA shell"
-echo "    curl -sS -i https://$APP.$SFX/api/health   # proxied to prodstack-api"
+WEB_FQDN=$(az containerapp ingress show -n $APP -g $RG --query fqdn -o tsv)
+echo "    curl -sS -i https://$WEB_FQDN/             # SPA shell"
+echo "    curl -sS -i https://$WEB_FQDN/api/health   # proxied to prodstack-api"
 echo "    az containerapp logs show -n $APP -g $RG --tail 100 --follow"

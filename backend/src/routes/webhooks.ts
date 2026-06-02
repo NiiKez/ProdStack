@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 
 import { prisma } from '../db.js';
+import { env } from '../env.js';
 import { decrypt } from '../lib/crypto.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
@@ -123,6 +124,26 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
     const commitSha = head.id;
     const commitMessage = head.message;
     const commitAuthor = head.author.name;
+
+    // Kill switch (degrade mode): this is a real push that would create a Build.
+    // Refuse it before writing any WebhookEvent/Build rows so the platform stops
+    // consuming build minutes / ACR storage while paused. GitHub treats a 503
+    // with Retry-After as a transient failure and will retry the delivery later,
+    // so no push is permanently lost once the switch is turned off.
+    if (env.KILL_SWITCH) {
+      logger.warn(
+        { projectId: project.id, deliveryId, commitSha },
+        'webhook push refused: kill switch active (builds paused)',
+      );
+      res
+        .status(503)
+        .set('Retry-After', '86400')
+        .json({
+          error: 'BUILDS_PAUSED',
+          message: 'Builds are temporarily paused (usage limit).',
+        });
+      return;
+    }
 
     // Insert the idempotency marker first; if a concurrent retry of the same
     // delivery races us here, exactly one transaction will create the Build.

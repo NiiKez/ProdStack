@@ -1,28 +1,58 @@
 #!/usr/bin/env bash
-# One-shot wiring of prodstack-api Container App: pulls 6 secrets from Key
+# One-shot wiring of prodstack-api Container App: pulls 8 secrets from Key
 # Vault via managed identity and sets the env vars the backend's Zod schema
-# requires (incl. OWNER_GITHUB_ID for the single-user gate). Run in Azure
-# Cloud Shell after uploading this file:
+# requires (incl. OWNER_GITHUB_ID for the single-user gate, DEPLOY_TOKEN for
+# the M6 CI/CD self-deploy endpoint, and the M6 cost-safeguard vars below).
+# Run in Azure Cloud Shell after uploading this file:
 #   bash wire-prodstack-api.sh
+#
+# M6 cost safeguards (§2.14): ENABLE_CLEANUP_JOBS=true starts the in-process
+# node-cron scheduler that runs the ACR image GC + Postgres build/log pruning
+# daily; RETENTION_DAYS_* are the windows; ADMIN_TOKEN (KV secret `admin-token`)
+# gates the manual POST /api/admin/cleanup/* triggers; ACR_USERNAME/ACR_PASSWORD
+# (ACR admin creds) authenticate the image GC to the registry data-plane API.
+# Cleanup is gated by ENABLE_CLEANUP_JOBS — NOT ENABLE_WORKER — so it runs on the
+# API (ENABLE_WORKER stays false here) and not the dedicated builder.
 set -euo pipefail
 
 APP="--name prodstack-api --resource-group prodstack"
 KV=https://prodstack-kv.vault.azure.net/secrets
 IDR=identityref:system
 
-echo "==> Setting 6 Key Vault secret references on the Container App..."
+echo "==> Setting 8 Key Vault secret references on the Container App..."
+# admin-token is the M6 cost-safeguard cleanup credential (POST
+# /api/admin/cleanup/*), wired the same way as deploy-token. Create the
+# `admin-token` Key Vault secret first (one-time):
+#   az keyvault secret set --vault-name prodstack-kv --name admin-token \
+#     --value "$(openssl rand -hex 32)"
 az containerapp secret set $APP --secrets \
   database-url=keyvaultref:$KV/database-url,$IDR \
   jwt-secret=keyvaultref:$KV/jwt-secret,$IDR \
   cookie-secret=keyvaultref:$KV/cookie-secret,$IDR \
   data-enc-key=keyvaultref:$KV/data-enc-key,$IDR \
   gh-client-id=keyvaultref:$KV/github-oauth-client-id,$IDR \
-  gh-client-secret=keyvaultref:$KV/github-oauth-client-secret,$IDR
+  gh-client-secret=keyvaultref:$KV/github-oauth-client-secret,$IDR \
+  deploy-token=keyvaultref:$KV/deploy-token,$IDR \
+  admin-token=keyvaultref:$KV/admin-token,$IDR
 
-SUB=ef9839d4-9a6c-4837-9afc-00ab2cd978f5
-SFX=agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io
-API=https://prodstack-api.$SFX
-WEB=https://prodstack-web.$SFX
+# ACR admin creds for M6 image GC. The cleanup job talks to the ACR data-plane
+# REST API (delete manifests) with HTTP Basic auth — the managed identity can't
+# speak the OCI registry protocol, so we use admin creds, same as the builder.
+# Stored as plain Container App secrets (not KV) so `az acr credential renew`
+# rotates them with one re-run of this script.
+echo "==> Fetching ACR admin credentials for image cleanup..."
+ACR_USER=$(az acr credential show -n prodstack --query username -o tsv)
+ACR_PASS=$(az acr credential show -n prodstack --query 'passwords[0].value' -o tsv)
+az containerapp secret set $APP --secrets \
+  acr-username="$ACR_USER" \
+  acr-password="$ACR_PASS"
+
+# Subscription id: prefer $AZURE_SUBSCRIPTION_ID, else fall back to the current
+# `az login`. API/WEB origins are derived from Azure at runtime so no live FQDN
+# is hardcoded — the env-domain hash differs per deployment.
+SUB="${AZURE_SUBSCRIPTION_ID:-$(az account show --query id -o tsv)}"
+API=https://$(az containerapp ingress show -n prodstack-api -g prodstack --query fqdn -o tsv)
+WEB=https://$(az containerapp ingress show -n prodstack-web -g prodstack --query fqdn -o tsv)
 ENV_PATH=Microsoft.App/managedEnvironments/prodstack-env
 ENV_ID=/subscriptions/$SUB/resourceGroups/prodstack/providers/$ENV_PATH
 
@@ -35,6 +65,13 @@ ENV_ID=/subscriptions/$SUB/resourceGroups/prodstack/providers/$ENV_PATH
 # GitHub *webhooks* post server-to-server straight to the backend, not via nginx.
 # The same web-origin URL must also be registered in the GitHub OAuth App (a
 # manual step — there is no API to edit OAuth App callback URLs).
+# KILL_SWITCH is intentionally NOT set here. It defaults to false in env.ts, and
+# this script uses `--set-env-vars` (additive/merge — it only touches the keys it
+# names). The switch is armed/disarmed out-of-band:
+#   az containerapp update $APP --set-env-vars KILL_SWITCH=true   # arm, then it rolls
+#   az containerapp update $APP --set-env-vars KILL_SWITCH=false  # disarm
+# Because this script is additive, re-running it to "reset config" does NOT
+# disarm a manually-armed switch — flip it explicitly with the command above.
 echo "==> Setting environment variables on the Container App..."
 az containerapp update $APP --set-env-vars \
   NODE_ENV=production \
@@ -47,13 +84,21 @@ az containerapp update $APP --set-env-vars \
   AZURE_REGION=francecentral \
   ACR_NAME=prodstack \
   CONTAINER_APPS_ENV_ID=$ENV_ID \
-  OWNER_GITHUB_ID=182921896 \
+  OWNER_GITHUB_ID="${OWNER_GITHUB_ID:?set to your GitHub numeric user id (curl -s https://api.github.com/users/<login> | jq .id)}" \
+  ENABLE_CLEANUP_JOBS=true \
+  RETENTION_DAYS_IMAGES=30 \
+  RETENTION_DAYS_LOGS=30 \
+  RETENTION_DAYS_BUILDS=90 \
   DATABASE_URL=secretref:database-url \
   JWT_SECRET=secretref:jwt-secret \
   COOKIE_SECRET=secretref:cookie-secret \
   DATA_ENC_KEY=secretref:data-enc-key \
   GITHUB_OAUTH_CLIENT_ID=secretref:gh-client-id \
-  GITHUB_OAUTH_CLIENT_SECRET=secretref:gh-client-secret
+  GITHUB_OAUTH_CLIENT_SECRET=secretref:gh-client-secret \
+  DEPLOY_TOKEN=secretref:deploy-token \
+  ADMIN_TOKEN=secretref:admin-token \
+  ACR_USERNAME=secretref:acr-username \
+  ACR_PASSWORD=secretref:acr-password
 
 echo "==> Current revisions:"
 az containerapp revision list $APP --output table

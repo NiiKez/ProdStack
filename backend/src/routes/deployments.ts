@@ -6,8 +6,8 @@ import { prisma } from '../db.js';
 import { HttpError } from '../lib/errors.js';
 
 /**
- * Cross-project deployments feed — mounted at `/api/deployments` (PLAN.md
- * M5 §3.10). Aggregates every deployment across the caller's live projects so
+ * Cross-project deployments feed — mounted at `/api/deployments`.
+ * Aggregates every deployment across the caller's live projects so
  * the Deployments page renders one table instead of fan-out-per-project. Scoped
  * by `project.userId` so it never leaks another user's deployments.
  */

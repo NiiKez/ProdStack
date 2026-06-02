@@ -7,8 +7,8 @@ import { logger } from '../lib/logger.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 
 /**
- * Builds router — mounted under `/api/builds` (behind requireAuth). M4 of
- * PLAN.md (§2.8 + §2.9 read paths):
+ * Builds router — mounted under `/api/builds` (behind requireAuth). The
+ * build read paths:
  *
  *   GET /:id              build detail (ownership-checked)
  *   GET /:id/logs         paginated log lines for non-live viewing
@@ -16,8 +16,8 @@ import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
  *
  * ## Why the SSE endpoint tails Postgres instead of an in-process EventEmitter
  *
- * PLAN.md §2.8 assumed a single API replica that both runs the build and
- * serves the stream, so an in-process pub/sub would do. That assumption is
+ * The original design assumed a single API replica that both runs the build
+ * and serves the stream, so an in-process pub/sub would do. That assumption is
  * gone: the build runs in the dedicated `prodstack-builder` Container App
  * (a *different* process from the API in prod). The only thing both
  * processes share is Postgres, so Postgres IS the bus. The handler polls

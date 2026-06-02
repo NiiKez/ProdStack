@@ -6,6 +6,7 @@ import { Avatar, useToast } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { api, ApiError } from '@/lib/api';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
+import { KillSwitchBanner } from '@/components/KillSwitchBanner';
 
 interface NavItem {
   to: string;
@@ -128,6 +129,8 @@ export function AppLayout({ children }: AppLayoutProps) {
           </div>
         </div>
       </header>
+
+      <KillSwitchBanner />
 
       <main className="mx-auto w-full max-w-7xl px-6 py-8">{children}</main>
     </div>

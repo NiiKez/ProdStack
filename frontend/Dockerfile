@@ -8,7 +8,7 @@
 #
 # Runner is nginx, which serves the built SPA AND reverse-proxies /api + /builds
 # to the backend Container App so the browser only ever talks to the
-# prodstack-web origin (same-origin cookies + SSE). See frontend/nginx.conf.
+# prodstack-web origin (same-origin cookies + SSE). See frontend/nginx.conf.template.
 #
 # NOTE: the API base URL is intentionally NOT baked in. frontend/src/env.ts
 # defaults VITE_API_BASE_URL to '' (same-origin), and nginx proxies the API
@@ -34,9 +34,13 @@ RUN npm run build --workspace=@prodstack/web
 # --- Runtime --------------------------------------------------------------
 FROM nginx:alpine AS runner
 
-# Drop the stock nginx site config and install ours (static SPA + API proxy).
-RUN rm -f /etc/nginx/conf.d/default.conf
-COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+# Install our site config as an envsubst TEMPLATE. nginx:alpine's
+# /docker-entrypoint.d/20-envsubst-on-templates.sh renders every
+# /etc/nginx/templates/*.template to /etc/nginx/conf.d/<name w/o .template> at
+# container start, so this becomes /etc/nginx/conf.d/default.conf — overwriting
+# the stock default site — with ${BACKEND_FQDN} substituted from the env var of
+# the same name (set on the web Container App). See frontend/nginx.conf.template.
+COPY frontend/nginx.conf.template /etc/nginx/templates/default.conf.template
 
 # Static SPA bundle.
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html

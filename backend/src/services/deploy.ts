@@ -1,8 +1,8 @@
 /**
- * Deployment rollback (PLAN.md M5 §2.9).
+ * Deployment rollback.
  *
  * Rollback is a **re-tag/redeploy** of a previous successful build's image, not
- * an Azure revision-activation toggle. The decision (PLAN.md M5 "Decisions"):
+ * an Azure revision-activation toggle. The decision:
  * re-deploying the stored image is simpler than juggling Container App revision
  * weights, and it produces a clean new `Deployment` row referencing the
  * original `Build` — so the deployments table and activity feed read as a real

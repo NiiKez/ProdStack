@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the prodstack-builder worker image on the laptop and push to ACR.
-# Mirrors the M2 manual API push (see CLAUDE.md "Manual M2 image push").
+# Mirrors the manual API image push (build at the repo root, push with ACR creds).
 # Run from anywhere; cd's to the repo root automatically.
 #
 #   bash infra/build-and-push-builder.sh           # tag = m3-manual

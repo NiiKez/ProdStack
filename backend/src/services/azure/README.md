@@ -14,8 +14,7 @@ The active implementation is selected by `AZURE_STUB`:
 - `AZURE_STUB=false` (deployed) — real mode. Lazily constructs a singleton
   `ContainerAppsAPIClient` using `DefaultAzureCredential`, which picks up
   the API Container App's system-assigned managed identity. Service
-  Principals are not used — the deployment tenant blocks them (see
-  `CLAUDE.md`).
+  Principals are not used — the deployment tenant blocks them.
 
 ## Env knobs
 

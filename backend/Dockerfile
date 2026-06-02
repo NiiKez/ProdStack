@@ -38,17 +38,26 @@ ENV NODE_ENV=production
 ENV PORT=3000
 
 # tini reaps zombies and forwards SIGTERM cleanly so Container Apps' graceful
-# shutdown doesn't have to wait for the 30s SIGKILL fallback.
-RUN apk add --no-cache tini
+# shutdown doesn't have to wait for the 30s SIGKILL fallback. openssl is
+# required by the Prisma schema/migration engine the entrypoint invokes
+# (`prisma migrate deploy`) — the query engine already runs here, but the
+# migration engine needs libssl present on Alpine/musl.
+RUN apk add --no-cache tini openssl
 
 # npm workspaces hoist every dep to the root node_modules; there's no
 # per-workspace folder. Running from /app means Node's module resolution
-# finds @prisma/client and friends via the standard walk-up.
+# finds @prisma/client and friends via the standard walk-up. `prisma` is a
+# runtime dependency (not pruned) so `prisma migrate deploy` works here.
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/backend/dist ./backend/dist
 COPY --from=builder /app/backend/prisma ./backend/prisma
 COPY --from=builder /app/backend/package.json ./backend/package.json
 
+# Entrypoint runs `prisma migrate deploy` on boot, then execs the CMD. See the
+# script header for why migrations run here and not in the GitHub workflow.
+COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 EXPOSE 3000
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/sbin/tini", "--", "/app/docker-entrypoint.sh"]
 CMD ["node", "backend/dist/index.js"]

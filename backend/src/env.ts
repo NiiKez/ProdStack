@@ -80,7 +80,7 @@ const EnvSchema = z.object({
   GITHUB_OAUTH_CLIENT_ID: z.string().min(1, 'GITHUB_OAUTH_CLIENT_ID is required'),
   GITHUB_OAUTH_CLIENT_SECRET: z.string().min(1, 'GITHUB_OAUTH_CLIENT_SECRET is required'),
   GITHUB_OAUTH_CALLBACK_URL: z.string().url(),
-  // Single-user demo allow-list (CLAUDE.md "Operational policy"). When set,
+  // Single-user demo allow-list. When set,
   // only this numeric GitHub user id may complete sign-in; everyone else is
   // bounced with a "self-host" notice so the $100 student credit can't be
   // drained by arbitrary users deploying arbitrary Dockerfiles. Leave unset
@@ -89,7 +89,7 @@ const EnvSchema = z.object({
 
   // Azure. Required when AZURE_STUB=false. Credentials come from the API's
   // managed identity via DefaultAzureCredential — no SP env vars because the
-  // deployment tenant blocks App Registrations (see CLAUDE.md).
+  // deployment tenant blocks App Registrations.
   AZURE_STUB: boolFromString(true),
   AZURE_SUBSCRIPTION_ID: z.string().optional(),
   AZURE_RESOURCE_GROUP: z.string().optional(),
@@ -111,8 +111,37 @@ const EnvSchema = z.object({
   WORKER_ID: z.string().default(`worker-${process.pid}`),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
 
+  // CI/CD self-deploy (M6 "Option B"). The GitHub Actions pipeline builds +
+  // pushes the image with ACR admin creds, then calls POST /api/admin/deploy
+  // on the running API to roll the platform Container Apps — the API already
+  // holds `Contributor` on the RG via its managed identity, so the GitHub
+  // runner never needs Azure RBAC (App Registrations / OIDC are blocked in the
+  // deployment tenant). The endpoint
+  // is a no-op (503 DEPLOY_DISABLED) until this token is set, mirroring how
+  // OWNER_GITHUB_ID gates the OAuth allow-list. Min 16 chars so a misconfigured
+  // short/empty value can't accidentally enable a weak gate.
+  DEPLOY_TOKEN: z.string().min(16, 'DEPLOY_TOKEN must be at least 16 chars').optional(),
+
+  // Cost safeguards (M6 §2.14). Retention windows for the scheduled cleanup
+  // jobs (image GC in ACR + build/log pruning in Postgres). Days, positive ints.
+  RETENTION_DAYS_IMAGES: z.coerce.number().int().positive().default(30),
+  RETENTION_DAYS_LOGS: z.coerce.number().int().positive().default(30),
+  RETENTION_DAYS_BUILDS: z.coerce.number().int().positive().default(90),
+  // Gates the cleanup admin endpoints (POST /api/admin/cleanup/*). Inert (503
+  // CLEANUP_DISABLED) until set, exactly like DEPLOY_TOKEN gates /deploy. Min
+  // 16 chars so a misconfigured short/empty value can't enable a weak gate.
+  ADMIN_TOKEN: z.string().min(16, 'ADMIN_TOKEN must be at least 16 chars').optional(),
+
   // Feature gates
   ENABLE_WORKER: boolFromString(false),
+  // Starts the in-process node-cron cleanup scheduler (image GC + build/log
+  // pruning). DELIBERATELY a separate flag from ENABLE_WORKER: §2.14 originally
+  // said "gated by ENABLE_WORKER=true", but the M6 owner decision runs cleanup
+  // as in-process node-cron *in the API*, and in prod the API runs with
+  // ENABLE_WORKER=false (only the dedicated prodstack-builder Container App runs
+  // the build poll loop). Gating cleanup on ENABLE_WORKER would put it on the
+  // builder, not the API — so it gets its own flag, set true only on the API.
+  ENABLE_CLEANUP_JOBS: boolFromString(false),
   KILL_SWITCH: boolFromString(false),
 });
 

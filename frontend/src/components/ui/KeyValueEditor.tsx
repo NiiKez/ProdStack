@@ -27,7 +27,7 @@ const FIELD =
   'disabled:opacity-50 disabled:cursor-not-allowed';
 
 /**
- * Env-var rows editor (PLAN.md M5 §3.2/§3.7). Keys are validated against the
+ * Env-var rows editor. Keys are validated against the
  * backend's `^[A-Z_][A-Z0-9_]*$` rule with inline error styling; values are
  * masked by default with a per-row reveal toggle. "Paste .env" expands a
  * textarea that parses `KEY=VALUE` lines (ignoring blanks + `#` comments) and

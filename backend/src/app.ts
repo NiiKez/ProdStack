@@ -9,6 +9,7 @@ import { errorMiddleware } from './lib/errors.js';
 import { logger } from './lib/logger.js';
 import { requireAuth } from './middleware/requireAuth.js';
 import activityRouter from './routes/activity.js';
+import adminRouter from './routes/admin.js';
 import authRouter from './routes/auth.js';
 import buildsRouter from './routes/builds.js';
 import deploymentsRouter from './routes/deployments.js';
@@ -63,6 +64,9 @@ export function createApp(): Express {
   app.use('/healthz', healthRouter);
   app.use('/api/health', healthRouter);
   app.use('/api/auth', authRouter);
+  // Machine-to-machine CI/CD self-deploy. Token-authenticated (not the user
+  // session), so it mounts OUTSIDE requireAuth — see routes/admin.ts.
+  app.use('/api/admin', adminRouter);
   app.use('/api/projects', requireAuth, projectsRouter);
   app.use('/api/builds', requireAuth, buildsRouter);
   app.use('/api/deployments', requireAuth, deploymentsRouter);
