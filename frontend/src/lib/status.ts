@@ -51,5 +51,10 @@ export function toBuildStatus(raw: string | null | undefined): BuildStatus {
 }
 
 export function isInFlight(raw: string | null | undefined): boolean {
+  // "No status" means there is no build at all (e.g. a freshly-created project),
+  // which is NOT in-flight. `toBuildStatus` maps undefined → 'queued' so unknown
+  // values get an in-flight *display*, but treating a missing build as in-flight
+  // would wrongly disable the first "Trigger build" and keep polling idle pages.
+  if (typeof raw !== 'string' || raw === '') return false;
   return IN_FLIGHT_STATUSES.has(toBuildStatus(raw));
 }
