@@ -1,4 +1,4 @@
-// Owner allow-list gate (CLAUDE.md "Operational policy: single-user demo").
+// Owner allow-list gate (single-user demo).
 // `OWNER_GITHUB_ID` is read once at env load, so it must be set before the app
 // is imported — this file pins it to 123 and exercises both sides of the gate.
 process.env.NODE_ENV = 'test';

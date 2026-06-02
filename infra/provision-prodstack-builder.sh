@@ -13,7 +13,8 @@ set -euo pipefail
 RG=prodstack
 APP=prodstack-builder
 ENV_NAME=prodstack-env
-SUB=ef9839d4-9a6c-4837-9afc-00ab2cd978f5
+# Subscription id: prefer $AZURE_SUBSCRIPTION_ID, else fall back to current az login.
+SUB="${AZURE_SUBSCRIPTION_ID:-$(az account show --query id -o tsv)}"
 ACR=prodstack
 KV_NAME=prodstack-kv
 KV=https://$KV_NAME.vault.azure.net/secrets
@@ -108,9 +109,9 @@ az containerapp secret set -n $APP -g $RG --secrets \
 
 # --- 5. Environment variables ---------------------------------------------
 # Same 16 the API needs (env.ts is shared) plus 5 worker-specific knobs.
-SFX=agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io
-API=https://prodstack-api.$SFX
-WEB=https://prodstack-web.$SFX
+# Derive the API/WEB origins from Azure at runtime (no hardcoded live FQDN).
+API=https://$(az containerapp ingress show -n prodstack-api -g "$RG" --query fqdn -o tsv)
+WEB=https://$(az containerapp ingress show -n prodstack-web -g "$RG" --query fqdn -o tsv)
 ENV_ID=/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.App/managedEnvironments/$ENV_NAME
 
 echo "==> Setting env vars"

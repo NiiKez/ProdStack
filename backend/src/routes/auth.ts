@@ -13,7 +13,7 @@ import { exchangeCodeForToken, fetchGithubProfile } from '../services/github.js'
 
 /**
  * Auth router — mounted by `app.ts` under `/api/auth`. Implements the four
- * endpoints in PLAN.md §2.3:
+ * endpoints:
  *
  *   GET  /github/begin     start GitHub OAuth dance
  *   GET  /github/callback  finish dance, mint session cookie
@@ -75,8 +75,7 @@ router.get('/github/callback', async (req, res, next) => {
     const { accessToken } = await exchangeCodeForToken(code);
     const profile = await fetchGithubProfile(accessToken);
 
-    // Single-user demo gate (CLAUDE.md "Operational policy: single-user
-    // demo"). When `OWNER_GITHUB_ID` is configured, only the owner may sign
+    // Single-user demo gate. When `OWNER_GITHUB_ID` is configured, only the owner may sign
     // in — anyone else is bounced to the landing page with a notice pointing
     // them at the repo to self-host. We reject *before* the upsert so a
     // non-owner's OAuth token is never persisted: no DB row, no stored token.

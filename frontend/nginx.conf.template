@@ -1,4 +1,19 @@
-# nginx site config for prodstack-web.
+# nginx site config TEMPLATE for prodstack-web.
+#
+# This is an envsubst TEMPLATE, not a ready-to-use config. The stock nginx:alpine
+# image ships /docker-entrypoint.d/20-envsubst-on-templates.sh, which at container
+# START reads every /etc/nginx/templates/*.template, runs `envsubst` over it
+# (substituting ONLY tokens that match a defined environment variable), and writes
+# the result to /etc/nginx/conf.d/<name without .template>. The Dockerfile copies
+# this file to /etc/nginx/templates/default.conf.template, so it renders to
+# /etc/nginx/conf.d/default.conf at start, replacing the stock default site.
+#
+# ${BACKEND_FQDN} is the backend API Container App's public FQDN (e.g.
+# prodstack-api.<env-suffix>.francecentral.azurecontainerapps.io). It MUST be set
+# as an env var named BACKEND_FQDN on the web Container App — otherwise envsubst
+# leaves the literal `${BACKEND_FQDN}` in the rendered config and the proxy breaks.
+# Only ${BACKEND_FQDN} is substituted; all `$host`, `$request_uri`, etc. below are
+# nginx RUNTIME variables (no matching env var → envsubst leaves them untouched).
 #
 # Two jobs:
 #   1. Serve the built Vite SPA from /usr/share/nginx/html with SPA fallback.
@@ -16,7 +31,7 @@
 # proxy_pass resolves it at request time via the resolver (avoids nginx caching
 # a stale IP across the upstream's Container App revision rolls).
 map $host $backend_upstream {
-    default prodstack-api.agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io;
+    default ${BACKEND_FQDN};
 }
 
 server {
@@ -44,6 +59,16 @@ server {
         application/json
         image/svg+xml;
 
+    # --- Block the CI/CD self-deploy endpoint from the public web origin ---
+    # `POST /api/admin/deploy` (M6) rolls the platform Container Apps. It's
+    # token-gated and GitHub Actions calls the API origin DIRECTLY, so there's no
+    # reason to expose it through this same-origin proxy. Defence in depth: 404 it
+    # here so the public web FQDN isn't a second attack surface for the deploy
+    # token. `^~` wins over the regex-free `/api/` prefix below for this subtree.
+    location ^~ /api/admin {
+        return 404;
+    }
+
     # --- API reverse proxy ------------------------------------------------
     # Covers /api/* including the SSE stream at /api/builds/:id/logs/stream.
     location /api/ {
@@ -56,13 +81,13 @@ server {
 
         # Upstream is HTTPS with SNI — present the right cert name.
         proxy_ssl_server_name on;
-        proxy_ssl_name prodstack-api.agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io;
+        proxy_ssl_name ${BACKEND_FQDN};
 
         # Preserve the upstream vhost so Container Apps Envoy routes correctly,
         # and tell the backend it's behind HTTPS for secure-cookie / redirect
         # logic. Cookies are intentionally NOT rewritten (default behavior) so
         # the session cookie stays first-party on the prodstack-web origin.
-        proxy_set_header Host prodstack-api.agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io;
+        proxy_set_header Host ${BACKEND_FQDN};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
@@ -101,9 +126,9 @@ server {
         proxy_http_version 1.1;
 
         proxy_ssl_server_name on;
-        proxy_ssl_name prodstack-api.agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io;
+        proxy_ssl_name ${BACKEND_FQDN};
 
-        proxy_set_header Host prodstack-api.agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io;
+        proxy_set_header Host ${BACKEND_FQDN};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;

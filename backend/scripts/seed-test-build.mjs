@@ -2,7 +2,7 @@
 // without going through the GitHub OAuth + webhook path.
 //
 // Inserts: User (with crypto-encrypted fake GitHub token) -> Project
-// (docker/welcome-to-docker @ main, target niikez-stub-test) -> Build
+// (docker/welcome-to-docker @ main, target demo-stub-test) -> Build
 // (status QUEUED, head SHA). The prodstack-builder worker should claim
 // the Build row within ~2 seconds and drive it to READY.
 //
@@ -14,7 +14,7 @@ import { PrismaClient } from '@prisma/client';
 const REPO_FULL_NAME = 'GoogleCloudPlatform/cloud-run-hello';
 const REPO_BRANCH = 'master';
 const COMMIT_SHA = 'b58e53791f17ebe0809895c0660356a87473fd85';
-const CONTAINER_APP_NAME = 'niikez-stub-test';
+const CONTAINER_APP_NAME = 'demo-stub-test';
 
 function encrypt(plaintext, keyB64) {
   const key = Buffer.from(keyB64, 'base64');

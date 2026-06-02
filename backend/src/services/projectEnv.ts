@@ -6,7 +6,7 @@
  * Both the build deploy step (`runBuild`) and rollback (`services/deploy.ts`)
  * call `loadDecryptedEnvVars` so a project's env vars are re-applied to its
  * Container App on every revision roll — that's how they get "surfaced as
- * Container App secrets" (PLAN.md M5 §2.2/§2.4). Decryption happens here, in
+ * Container App secrets". Decryption happens here, in
  * memory, immediately before handing off to the Azure SDK wrapper; the
  * plaintext never touches the DB or the logs.
  */

@@ -22,7 +22,7 @@ export interface ConfirmDialogProps {
 }
 
 /**
- * Confirmation dialog for mutating/destructive actions (PLAN.md M5 §3.2). Wraps
+ * Confirmation dialog for mutating/destructive actions. Wraps
  * `Modal` (which already traps focus, restores it on close, and announces its
  * title) and adds an optional typed-confirmation gate.
  */

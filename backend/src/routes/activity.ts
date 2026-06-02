@@ -5,7 +5,7 @@ import { prisma } from '../db.js';
 import { HttpError } from '../lib/errors.js';
 
 /**
- * Activity feed — mounted at `/api/activity` (PLAN.md M5 §3.11). There is no
+ * Activity feed — mounted at `/api/activity`. There is no
  * dedicated events table; the feed is a **synthesized union of build,
  * deployment, and project events** (the three sources the milestone calls for).
  * We fetch a window from each source ordered by its primary timestamp, expand

@@ -1,13 +1,13 @@
-// One-off: hit the deployed /webhooks/github endpoint with a synthetic
+// One-off: hit the /webhooks/github endpoint with a synthetic
 // GitHub push payload, signed with the seeded project's webhook secret
 // (`not-used-for-this-test`). Drives the M3 webhook -> enqueue path
-// end-to-end against the live API.
+// end-to-end against the target API (set API=<url>, defaults to localhost).
 //
-// Run: node backend/scripts/simulate-webhook.mjs
+// Run: API=http://localhost:3000 node backend/scripts/simulate-webhook.mjs
 
 import { createHmac, randomUUID } from 'node:crypto';
 
-const API = 'https://prodstack-api.agreeablegrass-e36d2a9a.francecentral.azurecontainerapps.io';
+const API = process.env.API ?? 'http://localhost:3000';
 const SECRET = 'not-used-for-this-test'; // matches seed-test-build.mjs
 const REPO_ID = 0;
 const BRANCH = 'master';

@@ -17,7 +17,7 @@ export interface UseBuildLogsResult {
  * EventSource can't set headers, but it sends cookies automatically — in dev
  * the Vite proxy keeps `/api` same-origin so the session cookie rides along.
  * `withCredentials` is set for the future cross-subdomain prod story (needs
- * `SameSite=None; Secure` + CORS — deferred, see PLAN.md M4 "SSE auth").
+ * `SameSite=None; Secure` + CORS — deferred).
  *
  * Reconnection is automatic: the server stamps each `log` event with
  * `id: <seq>`, so the browser replays `Last-Event-ID` on reconnect and the
