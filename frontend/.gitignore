@@ -1,0 +1,5 @@
+# Test + build artifacts
+coverage/
+playwright-report/
+test-results/
+.playwright/

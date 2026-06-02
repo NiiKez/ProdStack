@@ -71,8 +71,21 @@ jobs:
       - name: Lint
         run: npm run lint --workspace=@prodstack/web
 
+      # Unit/component tests (vitest + jsdom). Fully hermetic — no DB, no network.
+      - name: Test (unit)
+        run: npm run test --workspace=@prodstack/web
+
       - name: Build
         run: npm run build --workspace=@prodstack/web
+
+      # E2E (Playwright). The suite stubs /api at the network layer with
+      # page.route, so it boots only the Vite dev server — no backend, DB, or
+      # OAuth. Browsers must be installed on the runner first.
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Test (E2E)
+        run: npm run test:e2e --workspace=@prodstack/web
 
   # The TS builds above do NOT validate the Docker images — yet api.yml/web.yml
   # build them straight on push to main (post-merge). Without this, a Dockerfile
