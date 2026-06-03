@@ -33,6 +33,7 @@ import { logger } from '../../lib/logger.js';
 import { updateContainerApp } from '../azure/index.js';
 import { loadDecryptedEnvVars } from '../projectEnv.js';
 import { runKaniko } from './kaniko.js';
+import { resolveDockerfile, type ResolvedDockerfile } from './resolveDockerfile.js';
 
 const STUB_IMAGES = [
   'mcr.microsoft.com/k8se/quickstart:latest',
@@ -267,6 +268,12 @@ async function runRealBuild(
     },
   });
 
+  // Pick the Dockerfile: the repo's own if present, otherwise detect the
+  // framework and synthesize one (zero-Dockerfile auto-build). Throws a
+  // user-facing error — surfaced as the FAILED build's message — when the repo
+  // has neither a Dockerfile nor a recognizable framework.
+  const resolved = await resolveDockerfile(ctx.repoDir, ctx.logs);
+
   // ACR repository name = container app name (lowercase, hyphens). Image
   // path = `${acr}.azurecr.io/${appName}:${sha}` — keeps tags grouped per
   // project so retention policies / GC can act per-app.
@@ -278,11 +285,10 @@ async function runRealBuild(
   await setStatus(ctx.buildId, 'BUILDING', { imageTag: shaTag });
   await ctx.logs.write('STEP', `building image → ${shaTag}`);
 
-  const dockerfile = path.join(ctx.repoDir, 'Dockerfile');
   const result = await runKaniko({
     contextDir: ctx.repoDir,
     authDir: ctx.authDir,
-    dockerfile,
+    dockerfile: resolved.dockerfilePath,
     destinations: [shaTag, latestTag],
     timeoutMs: env.BUILD_TIMEOUT_MS,
     signal,
@@ -314,7 +320,7 @@ async function runRealBuild(
   if (signal.aborted) {
     throw new Error('cancelled');
   }
-  await deployAndRecord(build, ctx, shaTag);
+  await deployAndRecord(build, ctx, shaTag, resolved);
 }
 
 async function cloneRepo(opts: {
@@ -528,6 +534,7 @@ async function deployAndRecord(
   build: BuildWithRelations,
   ctx: RunBuildContext,
   image: string,
+  resolved?: ResolvedDockerfile,
 ): Promise<void> {
   await setStatus(ctx.buildId, 'DEPLOYING');
   await ctx.logs.write(
@@ -545,10 +552,19 @@ async function deployAndRecord(
     await ctx.logs.write('STEP', `applying ${envVars.length} env var(s) as secrets`);
   }
 
+  // For a generated Dockerfile we know the listen port; align the ingress
+  // target port with it so the app's `$PORT` and ingress stay in lockstep. A
+  // user-supplied Dockerfile leaves `port` null → ingress is left untouched.
+  const targetPort = resolved?.port ?? undefined;
+  if (targetPort !== undefined) {
+    await ctx.logs.write('STEP', `routing ingress → port ${targetPort}`);
+  }
+
   const deploy = await updateContainerApp({
     name: build.project.containerAppName,
     image,
     envVars,
+    ...(targetPort !== undefined ? { targetPort } : {}),
   });
 
   const finishedAt = new Date();
@@ -577,7 +593,12 @@ async function deployAndRecord(
     }),
     prisma.project.update({
       where: { id: build.projectId },
-      data: { liveUrl: deploy.liveUrl },
+      data: {
+        liveUrl: deploy.liveUrl,
+        // Record the auto-detected framework (or clear it when the user ships
+        // their own Dockerfile) so the UI can show how the app is built.
+        ...(resolved ? { frameworkHint: resolved.framework } : {}),
+      },
     }),
   ]);
 
