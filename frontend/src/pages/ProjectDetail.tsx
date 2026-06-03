@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
+  AlertTriangle,
   ArrowLeft,
   Copy,
   ExternalLink,
@@ -188,12 +189,16 @@ function BackLink() {
     <Link
       to="/dashboard"
       className={cn(
-        'inline-flex w-fit items-center gap-1.5 text-sm text-slate-400',
-        'hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2',
-        'focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 rounded-md'
+        'group inline-flex w-fit items-center gap-1.5 rounded-md text-sm text-slate-400',
+        'transition-colors hover:text-slate-200',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950'
       )}
     >
-      <ArrowLeft size={14} aria-hidden />
+      <ArrowLeft
+        size={14}
+        aria-hidden
+        className="transition-transform group-hover:-translate-x-0.5"
+      />
       All projects
     </Link>
   );
@@ -206,22 +211,29 @@ interface ProjectHeaderCardProps {
 
 function ProjectHeaderCard({ project, onCopy }: ProjectHeaderCardProps) {
   return (
-    <Card className="flex flex-col gap-4 p-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-semibold text-slate-100">{project.name}</h1>
+    <Card className="relative flex flex-col gap-5 overflow-hidden p-6">
+      {/* Subtle accent wash anchoring the hero to the brand. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute -right-24 -top-24 h-56 w-56 rounded-full bg-accent-400/5 blur-3xl"
+      />
+      <div className="relative flex flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-col gap-2">
+          <h1 className="truncate text-2xl font-semibold tracking-tight text-slate-50">
+            {project.name}
+          </h1>
           <a
             href={`https://github.com/${project.githubRepoFullName}`}
             target="_blank"
             rel="noreferrer noopener"
-            className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200"
+            className="inline-flex w-fit items-center gap-1.5 rounded-md font-mono text-sm text-slate-400 transition-colors hover:text-slate-200"
           >
-            <Github size={14} aria-hidden />
-            <span>{project.githubRepoFullName}</span>
-            <ExternalLink size={12} aria-hidden />
+            <Github size={14} aria-hidden className="shrink-0" />
+            <span className="truncate">{project.githubRepoFullName}</span>
+            <ExternalLink size={12} aria-hidden className="shrink-0 opacity-70" />
           </a>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <Badge mono variant="accent">
             <GitBranch size={12} aria-hidden />
             {project.branch}
@@ -235,14 +247,16 @@ function ProjectHeaderCard({ project, onCopy }: ProjectHeaderCardProps) {
       </div>
 
       {project.liveUrl && (
-        <div className="flex items-center justify-between gap-2 rounded-md border border-slate-800 bg-slate-950/40 px-3 py-2">
+        <div className="relative flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 transition-colors hover:border-slate-700">
           <a
             href={project.liveUrl}
             target="_blank"
             rel="noreferrer noopener"
-            className="flex min-w-0 items-center gap-1.5 truncate font-mono text-xs text-slate-300 hover:text-indigo-300"
+            className="flex min-w-0 items-center gap-2 truncate font-mono text-xs text-slate-300 transition-colors hover:text-accent-300"
           >
-            <ExternalLink size={12} aria-hidden className="shrink-0" />
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-slate-800/80 text-slate-400">
+              <ExternalLink size={11} aria-hidden />
+            </span>
             <span className="truncate">{project.liveUrl}</span>
           </a>
           <IconButton
@@ -319,7 +333,10 @@ function OverviewTab({ project }: OverviewTabProps) {
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="flex flex-col gap-3 p-5">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold text-slate-200">Latest build</h2>
+            <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-100">
+              <Rocket size={14} aria-hidden className="text-slate-500" />
+              Latest build
+            </h2>
             {latest ? (
               <StatusPill status={latest.status} />
             ) : (
@@ -328,7 +345,7 @@ function OverviewTab({ project }: OverviewTabProps) {
           </div>
           {latest ? (
             <>
-              <div className="flex items-center gap-2 text-sm text-slate-300">
+              <div className="flex min-w-0 items-center gap-2 text-sm text-slate-300">
                 <CommitRef sha={latest.commitSha} />
                 <span className="truncate text-slate-300">{latest.commitMessage}</span>
               </div>
@@ -341,10 +358,10 @@ function OverviewTab({ project }: OverviewTabProps) {
                 )}
                 <RelativeTime value={latest.createdAt} />
               </div>
-              <div className="flex items-center gap-3">
+              <div className="mt-1 flex items-center gap-3 border-t border-slate-800 pt-3">
                 <Link
                   to={`/projects/${project.id}/builds/${latest.id}`}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-indigo-300 hover:text-indigo-200"
+                  className="inline-flex items-center gap-1 rounded text-xs font-medium text-accent-400 transition-colors hover:text-accent-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
                 >
                   View logs
                 </Link>
@@ -369,11 +386,14 @@ function OverviewTab({ project }: OverviewTabProps) {
         </Card>
 
         <Card className="flex flex-col gap-3 p-5">
-          <h2 className="text-sm font-semibold text-slate-200">Active deployment</h2>
+          <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-100">
+            <Rocket size={14} aria-hidden className="text-slate-500" />
+            Active deployment
+          </h2>
           {active ? (
             <>
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-mono text-xs text-slate-300">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center rounded-md border border-slate-800 bg-slate-950/60 px-2 py-1 font-mono text-xs text-slate-300">
                   {active.revisionName}
                 </span>
               </div>
@@ -385,10 +405,10 @@ function OverviewTab({ project }: OverviewTabProps) {
                   href={project.liveUrl}
                   target="_blank"
                   rel="noreferrer noopener"
-                  className="inline-flex w-fit items-center gap-1 text-xs font-medium text-indigo-300 hover:text-indigo-200"
+                  className="inline-flex w-fit items-center gap-1.5 rounded font-mono text-xs font-medium text-accent-400 transition-colors hover:text-accent-300"
                 >
-                  <ExternalLink size={12} aria-hidden />
-                  {project.liveUrl}
+                  <ExternalLink size={12} aria-hidden className="shrink-0" />
+                  <span className="truncate">{project.liveUrl}</span>
                 </a>
               )}
             </>
@@ -415,8 +435,8 @@ function OverviewTab({ project }: OverviewTabProps) {
           rel="noreferrer noopener"
           className={cn(
             'inline-flex h-9 items-center gap-2 rounded-lg border border-slate-800 bg-slate-900 px-3.5 text-sm font-medium text-slate-100',
-            'hover:bg-slate-800 hover:border-slate-700',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950'
+            'transition-colors hover:border-slate-700 hover:bg-slate-800',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950'
           )}
         >
           <Github size={16} aria-hidden />
@@ -459,10 +479,10 @@ function Chip({
       aria-pressed={active}
       className={cn(
         'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
         active
-          ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-200'
-          : 'border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200',
+          ? 'border-accent-400/40 bg-accent-400/10 text-accent-300'
+          : 'border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-600 hover:text-slate-200',
       )}
     >
       {children}
@@ -592,8 +612,8 @@ function BuildsTab({ project }: BuildsTabProps) {
                     to={`/projects/${project.id}/builds/${b.id}`}
                     className={cn(
                       'grid grid-cols-[auto_1fr_auto_auto_auto] items-center gap-3 px-4 py-3',
-                      'hover:bg-slate-800/40 transition-colors',
-                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-inset',
+                      'transition-colors hover:bg-slate-800/40',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-400',
                     )}
                   >
                     <StatusPill status={b.status} />
@@ -724,7 +744,9 @@ function DeploymentsTab({ project }: { project: ProjectDetailType }) {
                   <Badge variant="neutral">Replaced</Badge>
                 )}
               </TD>
-              <TD className="font-mono text-xs text-slate-400">{d.revisionName}</TD>
+              <TD>
+                <span className="font-mono text-xs text-slate-400">{d.revisionName}</span>
+              </TD>
               <TD>
                 <div className="flex min-w-0 items-center gap-2">
                   <CommitRef sha={d.build.commitSha} />
@@ -740,7 +762,7 @@ function DeploymentsTab({ project }: { project: ProjectDetailType }) {
                 <div className="flex items-center justify-end gap-2">
                   <Link
                     to={`/projects/${project.id}/builds/${d.build.id}`}
-                    className="text-xs font-medium text-indigo-300 hover:text-indigo-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 rounded"
+                    className="rounded text-xs font-medium text-accent-400 transition-colors hover:text-accent-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
                   >
                     Logs
                   </Link>
@@ -957,16 +979,19 @@ function SettingsTab({ project }: SettingsTabProps) {
   return (
     <div className="flex flex-col gap-4">
       <Card className="flex flex-col gap-3 p-5">
-        <h2 className="text-sm font-semibold text-slate-200">GitHub repo</h2>
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-100">
+          <Github size={14} aria-hidden className="text-slate-500" />
+          GitHub repo
+        </h2>
         <a
           href={`https://github.com/${project.githubRepoFullName}`}
           target="_blank"
           rel="noreferrer noopener"
-          className="inline-flex w-fit items-center gap-1.5 font-mono text-sm text-slate-300 hover:text-indigo-300"
+          className="inline-flex w-fit items-center gap-1.5 rounded-md border border-slate-800 bg-slate-950/60 px-3 py-2 font-mono text-sm text-slate-300 transition-colors hover:border-slate-700 hover:text-accent-300"
         >
-          <Github size={14} aria-hidden />
+          <Github size={14} aria-hidden className="shrink-0" />
           {project.githubRepoFullName}
-          <ExternalLink size={12} aria-hidden />
+          <ExternalLink size={12} aria-hidden className="shrink-0 opacity-70" />
         </a>
         <p className="text-xs text-slate-500">
           Repo connection is read-only. To switch repos, create a new project.
@@ -974,7 +999,7 @@ function SettingsTab({ project }: SettingsTabProps) {
       </Card>
 
       <Card className="flex flex-col gap-4 p-5">
-        <h2 className="text-sm font-semibold text-slate-200">Project details</h2>
+        <h2 className="text-sm font-semibold text-slate-100">Project details</h2>
         <Input
           label="Project name"
           value={name}
@@ -1000,7 +1025,7 @@ function SettingsTab({ project }: SettingsTabProps) {
 
       <Card className="flex flex-col gap-4 p-5">
         <div className="flex flex-col gap-1">
-          <h2 className="text-sm font-semibold text-slate-200">Environment variables</h2>
+          <h2 className="text-sm font-semibold text-slate-100">Environment variables</h2>
           <p className="text-xs text-slate-500">
             Stored encrypted and injected as Container App secrets. Saving redeploys your
             app with the new values (using your latest successful image).
@@ -1019,8 +1044,11 @@ function SettingsTab({ project }: SettingsTabProps) {
         </div>
       </Card>
 
-      <Card className="flex flex-col gap-3 border-rose-500/30 p-5">
-        <h2 className="text-sm font-semibold text-rose-300">Danger zone</h2>
+      <Card className="flex flex-col gap-3 border-rose-500/30 bg-rose-500/[0.03] p-5">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-rose-300">
+          <AlertTriangle size={14} aria-hidden />
+          Danger zone
+        </h2>
         <p className="text-sm text-slate-400">
           Deleting a project removes its Container App, builds, and deployments. This cannot
           be undone.

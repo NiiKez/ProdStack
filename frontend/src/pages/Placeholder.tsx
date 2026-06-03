@@ -13,6 +13,7 @@ export default function Placeholder({ title, subtitle }: PlaceholderProps) {
   return (
     <div className="flex min-h-[60vh] items-center justify-center">
       <EmptyState
+        className="w-full max-w-md"
         icon={<Clock className="h-8 w-8" aria-hidden />}
         title={title}
         description={subtitle ?? 'Coming soon.'}

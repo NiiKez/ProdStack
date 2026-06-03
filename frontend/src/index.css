@@ -3,14 +3,56 @@
 @import '@fontsource-variable/jetbrains-mono';
 @import './styles/tokens.css';
 
+/*
+ * Design system (Tailwind v4 @theme). We deliberately REMAP two existing
+ * Tailwind palettes so the whole app reshades from a single place:
+ *   - `slate`  → a pure neutral near-black ramp (kills the default blue tint).
+ *   - `indigo` → the lime/chartreuse accent (every legacy `*-indigo-*` utility
+ *                now renders on-brand). Solid `bg-indigo` buttons additionally
+ *                get dark ink via the components themselves.
+ * Plus a first-class `accent` family for new code (`bg-accent`, `text-accent`…).
+ */
+@theme {
+  /* neutral surface ramp (overrides Tailwind's blue-ish slate) */
+  --color-slate-50: #f7f7f7;
+  --color-slate-100: #ececec;
+  --color-slate-200: #d6d6d6;
+  --color-slate-300: #b4b4b4;
+  --color-slate-400: #8c8c8c;
+  --color-slate-500: #6e6e6e;
+  --color-slate-600: #525252;
+  --color-slate-700: #363636;
+  --color-slate-800: #272727;
+  --color-slate-900: #161616;
+  --color-slate-950: #0c0c0c;
+
+  /* accent family — lime / chartreuse */
+  --color-accent: #cbf94e;
+  --color-accent-300: #dcff77;
+  --color-accent-400: #cbf94e;
+  --color-accent-500: #b6ec2f;
+  --color-accent-600: #9fd31f;
+  --color-accent-ink: #0c0c0c;
+
+  /* remap legacy `indigo` utilities onto the accent so older code is on-brand */
+  --color-indigo-200: #e9ffb0;
+  --color-indigo-300: #cdf94e;
+  --color-indigo-400: #c4f135;
+  --color-indigo-500: #b6ec2f;
+  --color-indigo-600: #cbf94e;
+  --color-indigo-700: #a6d62a;
+}
+
 @layer base {
   html, body, #root { height: 100%; }
   body {
     background: var(--surface-0);
-    color: rgb(241 245 249); /* slate-100 */
+    color: #ececec;
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
   code, pre, .mono { font-family: var(--font-mono); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* thin, neutral scrollbars to match the dark shell */
+  * { scrollbar-color: #363636 transparent; }
 }
