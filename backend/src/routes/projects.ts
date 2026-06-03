@@ -13,6 +13,8 @@ import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 import { createContainerApp, deleteContainerApp } from '../services/azure/index.js';
+import { getAppMetrics, type MetricRange } from '../services/azure/metrics.js';
+import { queryRuntimeLogs } from '../services/azure/logs.js';
 import {
   IN_FLIGHT_BUILD_STATUSES,
   redeployWithCurrentEnv,
@@ -40,6 +42,19 @@ const MAX_ENV_VARS_PER_PROJECT = 100;
 const MAX_ENV_VALUE_BYTES = 32 * 1024;
 
 const idParamSchema = z.object({ id: z.string().min(1).max(40) });
+
+const METRIC_RANGES = ['1h', '6h', '24h'] as const;
+const metricsQuerySchema = z.object({
+  range: z.enum(METRIC_RANGES).optional(),
+});
+
+const runtimeLogsQuerySchema = z.object({
+  // Look-back window for the snapshot; the frontend defaults to 15m.
+  sinceMinutes: z.coerce.number().int().positive().max(1440).optional(),
+  // Cursor for the auto-refresh "tail": only return lines newer than this ISO ts.
+  afterTs: z.string().datetime().optional(),
+  limit: z.coerce.number().int().positive().max(1000).optional(),
+});
 
 const rollbackParamSchema = z.object({
   id: z.string().min(1).max(40),
@@ -78,6 +93,7 @@ const createBodySchema = z.object({
 const patchBodySchema = z.object({
   branch: z.string().min(1).max(255).optional(),
   name: z.string().min(1).max(50).optional(),
+  autoDeploy: z.boolean().optional(),
   envVars: z
     .array(
       z.object({
@@ -166,6 +182,7 @@ function reshapeProject(project: ProjectWithRelations, opts: { allBuilds?: boole
     containerAppName: project.containerAppName,
     liveUrl: project.liveUrl,
     frameworkHint: project.frameworkHint,
+    autoDeploy: project.autoDeploy,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     latestBuild,
@@ -448,6 +465,48 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
   }
 });
 
+// --- GET /:id/metrics (Azure Monitor: cpu/mem/replicas/requests) -----------
+
+router.get('/:id/metrics', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = idParamSchema.parse(req.params);
+    const user = getUser(req);
+    const q = metricsQuerySchema.parse(req.query);
+    const project = await requireOwnedProject(id, user.id);
+
+    const range: MetricRange = q.range ?? '1h';
+    const metrics = await getAppMetrics({ containerAppName: project.containerAppName, range });
+    res.json(metrics);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- GET /:id/runtime/logs (the running app's stdout/stderr) ---------------
+// Snapshot of the live container's console logs from Log Analytics. The
+// frontend auto-refreshes on an interval (passing `afterTs` to tail only new
+// lines). The service degrades gracefully — `available:false` + a note rather
+// than a 500 — when the workspace isn't configured or the query fails.
+
+router.get('/:id/runtime/logs', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = idParamSchema.parse(req.params);
+    const user = getUser(req);
+    const q = runtimeLogsQuerySchema.parse(req.query);
+    const project = await requireOwnedProject(id, user.id);
+
+    const result = await queryRuntimeLogs({
+      containerAppName: project.containerAppName,
+      ...(q.sinceMinutes !== undefined ? { sinceMinutes: q.sinceMinutes } : {}),
+      ...(q.afterTs !== undefined ? { afterTs: q.afterTs } : {}),
+      ...(q.limit !== undefined ? { limit: q.limit } : {}),
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // --- GET /:id/builds (paginated, filterable, sortable) ---------------------
 
 router.get('/:id/builds', async (req: Request, res: Response, next: NextFunction) => {
@@ -674,6 +733,7 @@ router.patch(
       const updates: Prisma.ProjectUpdateInput = {};
       if (body.branch !== undefined) updates.branch = body.branch;
       if (body.name !== undefined) updates.name = body.name;
+      if (body.autoDeploy !== undefined) updates.autoDeploy = body.autoDeploy;
 
       // When env vars are submitted, diff the desired set against what's stored
       // so we only trigger a config-only redeploy when something actually

@@ -45,7 +45,7 @@ const STAGE_INDEX: Record<string, number> = Object.fromEntries(
 export default function BuildLogs() {
   const { id: projectId, buildId } = useParams<{ id: string; buildId: string }>();
   const buildQuery = useBuild(buildId);
-  const { lines, status: streamStatus, phase } = useBuildLogs(buildId);
+  const { lines, status: streamStatus, phase, reconnect } = useBuildLogs(buildId);
   const { toast } = useToast();
   const cancelBuild = useCancelBuild();
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -170,7 +170,7 @@ export default function BuildLogs() {
         )}
       </Card>
 
-      <LogViewport lines={lines} phase={phase} />
+      <LogViewport lines={lines} phase={phase} onReconnect={reconnect} />
 
       <ConfirmDialog
         open={confirmOpen}
@@ -274,9 +274,10 @@ const LEVEL_STYLES: Record<LogLevel, string> = {
 interface LogViewportProps {
   lines: ReturnType<typeof useBuildLogs>['lines'];
   phase: ReturnType<typeof useBuildLogs>['phase'];
+  onReconnect: () => void;
 }
 
-function LogViewport({ lines, phase }: LogViewportProps) {
+function LogViewport({ lines, phase, onReconnect }: LogViewportProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
 
@@ -318,10 +319,21 @@ function LogViewport({ lines, phase }: LogViewportProps) {
           </span>
           <h2 className="text-sm font-semibold text-slate-100">Build logs</h2>
         </div>
-        <span className={cn('inline-flex items-center gap-1.5 text-xs font-medium', indicator.cls)}>
-          <span className={cn('h-1.5 w-1.5 rounded-full', indicator.dot)} aria-hidden />
-          {indicator.label}
-        </span>
+        <div className="flex items-center gap-3">
+          <span className={cn('inline-flex items-center gap-1.5 text-xs font-medium', indicator.cls)}>
+            <span className={cn('h-1.5 w-1.5 rounded-full', indicator.dot)} aria-hidden />
+            {indicator.label}
+          </span>
+          {phase === 'error' && (
+            <button
+              type="button"
+              onClick={onReconnect}
+              className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
+            >
+              Reconnect
+            </button>
+          )}
+        </div>
       </div>
       <div
         ref={scrollRef}

@@ -145,6 +145,26 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
       return;
     }
 
+    // Auto-deploy gate: when the project has `autoDeploy` turned off, a push is
+    // acknowledged (200, so GitHub doesn't retry) but no Build is queued — the
+    // user deploys manually via "Trigger build". We still record the
+    // WebhookEvent for idempotency/audit so a redelivery is a clean no-op.
+    if (!project.autoDeploy) {
+      logger.info(
+        { projectId: project.id, deliveryId, commitSha },
+        'webhook push: autoDeploy disabled; recording event, skipping build',
+      );
+      try {
+        await prisma.webhookEvent.create({ data: { id: deliveryId, projectId: project.id } });
+      } catch (err) {
+        if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) {
+          throw err;
+        }
+      }
+      res.status(200).json({ ok: true, autoDeploy: false });
+      return;
+    }
+
     // Insert the idempotency marker first; if a concurrent retry of the same
     // delivery races us here, exactly one transaction will create the Build.
     let buildId: string;

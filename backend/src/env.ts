@@ -96,6 +96,12 @@ const EnvSchema = z.object({
   AZURE_REGION: z.string().default('francecentral'),
   ACR_NAME: z.string().optional(),
   CONTAINER_APPS_ENV_ID: z.string().optional(),
+  // Log Analytics workspace "customer id" (GUID) backing the Container Apps
+  // environment, used to query an app's runtime stdout/stderr from the
+  // `ContainerAppConsoleLogs_CL` table. Read from the ACA env's
+  // `appLogsConfiguration`. When unset (or AZURE_STUB=true), runtime-log
+  // queries return a friendly "logs unavailable" instead of 500-ing.
+  LOG_ANALYTICS_WORKSPACE_ID: z.string().optional(),
 
   // Build worker (M3). `stub` mirrors the M2.5 fake build for tests / fast
   // dev cycles; `docker` shells out to `docker run gcr.io/kaniko-project/...`
