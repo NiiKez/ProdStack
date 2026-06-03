@@ -1,6 +1,6 @@
 import type { Page, Route, Request } from '@playwright/test';
 import type { CurrentUser } from '../src/hooks/useCurrentUser';
-import type { GithubRepo, ProjectSummary } from '../src/types/api';
+import type { DetectFrameworkResult, GithubRepo, ProjectSummary } from '../src/types/api';
 
 /**
  * Hermetic backend stub for the E2E suite.
@@ -33,6 +33,7 @@ export const sampleProjects: ProjectSummary[] = [
     branch: 'main',
     liveUrl: 'https://alpha-service.example.com',
     containerAppName: 'app-alpha-service',
+    autoDeploy: true,
     createdAt: '2026-05-01T10:00:00.000Z',
     updatedAt: '2026-05-20T10:00:00.000Z',
     latestBuild: {
@@ -56,6 +57,7 @@ export const sampleProjects: ProjectSummary[] = [
     branch: 'develop',
     liveUrl: null,
     containerAppName: 'app-beta-worker',
+    autoDeploy: true,
     createdAt: '2026-05-10T10:00:00.000Z',
     updatedAt: '2026-05-18T10:00:00.000Z',
     latestBuild: {
@@ -105,6 +107,7 @@ export function makeProject(overrides: Partial<ProjectSummary> = {}): ProjectSum
     branch: 'main',
     liveUrl: null,
     containerAppName: 'app-my-new-app',
+    autoDeploy: true,
     createdAt: '2026-06-02T12:00:00.000Z',
     updatedAt: '2026-06-02T12:00:00.000Z',
     latestBuild: null,
@@ -128,6 +131,12 @@ export interface MockBackendOptions {
    * (which also triggers the manual fallback).
    */
   repos?: GithubRepo[] | 'error';
+  /**
+   * Response for `POST /api/github/detect` (the New Project framework preview).
+   * Defaults to a detected Express app. Pass `'error'` to reply 502 (the
+   * preview then stays hidden, as it does for the tokenless dev-login user).
+   */
+  detect?: DetectFrameworkResult | 'error';
 }
 
 function json(route: Route, status: number, body: unknown): Promise<void> {
@@ -156,6 +165,8 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
   const user = options.user === undefined ? ownerUser : options.user;
   const projects = options.projects ?? [];
   const repos = options.repos === undefined ? sampleRepos : options.repos;
+  const detect: DetectFrameworkResult | 'error' =
+    options.detect === undefined ? { hasDockerfile: false, framework: 'Express', port: 3000 } : options.detect;
 
   await page.route('**/api/**', async (route: Route, request: Request) => {
     const method = request.method();
@@ -181,6 +192,13 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
         return json(route, 502, { error: 'GITHUB_UNAVAILABLE' });
       }
       return json(route, 200, { repos });
+    }
+
+    if (path === '/api/github/detect' && method === 'POST') {
+      if (detect === 'error') {
+        return json(route, 502, { error: 'GITHUB_UNAVAILABLE' });
+      }
+      return json(route, 200, detect);
     }
 
     // Project detail — lets the create flow's post-success navigation resolve

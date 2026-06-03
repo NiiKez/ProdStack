@@ -1,6 +1,7 @@
 import { Octokit } from '@octokit/rest';
 
 import { env } from '../env.js';
+import type { PackageJsonLike, RepoSignals } from './builds/dockerfileGen.js';
 
 /**
  * GitHub services: OAuth code/token exchange, profile fetch, and a
@@ -177,6 +178,117 @@ export async function listUserRepos(octokit: Octokit): Promise<GithubRepo[]> {
     defaultBranch: r.default_branch,
     private: r.private,
   }));
+}
+
+/**
+ * Structured error from a repo-signals lookup (framework-detection preview).
+ * Wraps the upstream GitHub failure so the route can degrade to a clean 502
+ * instead of 500-crashing on a missing/expired token or an unreadable repo.
+ */
+export class GithubDetectError extends Error {
+  override readonly name = 'GithubDetectError';
+  constructor(
+    message: string,
+    readonly status: number | undefined,
+    readonly githubMessage?: string,
+    readonly cause?: unknown,
+  ) {
+    super(message);
+  }
+}
+
+/** Fetch + UTF-8 decode a single repo file via the Contents API, or undefined. */
+async function fetchRepoFile(
+  octokit: Octokit,
+  opts: { owner: string; repo: string; ref: string; path: string },
+): Promise<string | undefined> {
+  try {
+    const response = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+      owner: opts.owner,
+      repo: opts.repo,
+      path: opts.path,
+      ref: opts.ref,
+    });
+    const data = response.data as { content?: unknown; encoding?: unknown };
+    if (typeof data.content !== 'string') return undefined;
+    const encoding = data.encoding === 'base64' ? 'base64' : 'utf8';
+    return Buffer.from(data.content, encoding).toString('utf8');
+  } catch {
+    // A missing/oversized/binary file just means "no signal here" — never fatal.
+    return undefined;
+  }
+}
+
+/**
+ * Build the {@link RepoSignals} the pure `detectFramework` needs WITHOUT cloning
+ * the repo: one recursive Git-trees call for the file layout, then at most two
+ * Contents calls for `package.json` / `requirements.txt`. Mirrors
+ * `resolveDockerfile.gatherSignals`, but sourced from the GitHub API so the
+ * "New Project" modal can preview the detected framework before the first build.
+ * Throws `GithubDetectError` on any GitHub failure so the route can map it to a
+ * clean 502.
+ */
+export async function listRepoSignals(
+  octokit: Octokit,
+  opts: { owner: string; repo: string; ref: string },
+): Promise<RepoSignals> {
+  let entries: Array<{ path?: string; type?: string }>;
+  try {
+    const response = await octokit.request('GET /repos/{owner}/{repo}/git/trees/{tree_sha}', {
+      owner: opts.owner,
+      repo: opts.repo,
+      tree_sha: opts.ref,
+      recursive: 'true',
+    });
+    entries = (response.data as { tree?: Array<{ path?: string; type?: string }> }).tree ?? [];
+  } catch (err) {
+    throw new GithubDetectError(
+      'failed to read repository tree',
+      extractStatus(err),
+      extractGithubMessage(err),
+      err,
+    );
+  }
+
+  const paths = entries
+    .map((e) => e.path)
+    .filter((p): p is string => typeof p === 'string');
+  const rootEntries = paths.filter((p) => !p.includes('/'));
+
+  const hasManagePy = rootEntries.includes('manage.py');
+  let djangoWsgiModule: string | undefined;
+  if (hasManagePy) {
+    // Match `<pkg>/wsgi.py` one level deep, mirroring findDjangoWsgiModule.
+    const wsgi = paths.find((p) => /^[^/]+\/wsgi\.py$/.test(p));
+    if (wsgi) djangoWsgiModule = `${wsgi.slice(0, wsgi.indexOf('/'))}.wsgi`;
+  }
+
+  let packageJson: PackageJsonLike | undefined;
+  if (rootEntries.includes('package.json')) {
+    const raw = await fetchRepoFile(octokit, { ...opts, path: 'package.json' });
+    if (raw !== undefined) {
+      try {
+        packageJson = JSON.parse(raw) as PackageJsonLike;
+      } catch {
+        // Malformed package.json → treat as absent (same as gatherSignals).
+      }
+    }
+  }
+
+  const requirementsTxt = rootEntries.includes('requirements.txt')
+    ? await fetchRepoFile(octokit, { ...opts, path: 'requirements.txt' })
+    : undefined;
+
+  return {
+    rootEntries,
+    ...(packageJson !== undefined ? { packageJson } : {}),
+    hasPackageLock: rootEntries.includes('package-lock.json'),
+    ...(requirementsTxt !== undefined ? { requirementsTxt } : {}),
+    hasPyproject: rootEntries.includes('pyproject.toml'),
+    hasPipfile: rootEntries.includes('Pipfile'),
+    hasManagePy,
+    ...(djangoWsgiModule !== undefined ? { djangoWsgiModule } : {}),
+  };
 }
 
 /**

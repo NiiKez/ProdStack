@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   userFindUnique: vi.fn(),
   octokitForUser: vi.fn(),
   octokitPaginate: vi.fn(),
+  octokitRequest: vi.fn(),
 }));
 
 vi.mock('../db.js', () => ({
@@ -106,10 +107,14 @@ beforeEach(() => {
   mocks.userFindUnique.mockReset();
   mocks.octokitForUser.mockReset();
   mocks.octokitPaginate.mockReset();
+  mocks.octokitRequest.mockReset();
 
   mocks.userFindUnique.mockResolvedValue(userRow);
   mocks.octokitPaginate.mockResolvedValue(ghRepoRows);
-  mocks.octokitForUser.mockReturnValue({ paginate: mocks.octokitPaginate });
+  mocks.octokitForUser.mockReturnValue({
+    paginate: mocks.octokitPaginate,
+    request: mocks.octokitRequest,
+  });
 });
 
 afterEach(() => {
@@ -195,6 +200,83 @@ describe('GET /api/github/repos', () => {
 
     const app = createApp();
     const res = await supertest(app).get('/api/github/repos');
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('GITHUB_UNAVAILABLE');
+  });
+});
+
+describe('POST /api/github/detect', () => {
+  /** Drive `octokit.request` for the trees call + per-file Contents calls. */
+  function wireRepo(tree: Array<{ path: string }>, files: Record<string, string> = {}) {
+    mocks.octokitRequest.mockImplementation(async (route: string, params: { path?: string }) => {
+      if (route.includes('git/trees')) {
+        return { data: { tree: tree.map((t) => ({ ...t, type: 'blob' })) } };
+      }
+      if (route.includes('/contents/')) {
+        const content = params.path ? files[params.path] : undefined;
+        if (content === undefined) {
+          const err: Error & { status?: number } = new Error('Not Found');
+          err.status = 404;
+          throw err;
+        }
+        return { data: { content: Buffer.from(content).toString('base64'), encoding: 'base64' } };
+      }
+      throw new Error(`unexpected octokit route ${route}`);
+    });
+  }
+
+  const detect = (app: ReturnType<typeof createApp>, repoUrl: string) =>
+    supertest(app)
+      .post('/api/github/detect')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ repoUrl });
+
+  it('reports hasDockerfile when the repo ships its own Dockerfile', async () => {
+    wireRepo([{ path: 'Dockerfile' }, { path: 'server.js' }]);
+    const app = createApp();
+    const res = await detect(app, 'https://github.com/octocat/hello');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ hasDockerfile: true, framework: null, port: null });
+  });
+
+  it('detects a Node/Express app (no Dockerfile) and returns its port', async () => {
+    wireRepo([{ path: 'package.json' }, { path: 'index.js' }], {
+      'package.json': JSON.stringify({
+        dependencies: { express: '^4.19.0' },
+        scripts: { start: 'node index.js' },
+      }),
+    });
+    const app = createApp();
+    const res = await detect(app, 'https://github.com/octocat/hello');
+    expect(res.status).toBe(200);
+    expect(res.body.hasDockerfile).toBe(false);
+    expect(typeof res.body.framework).toBe('string');
+    expect(res.body.port).toBe(3000);
+  });
+
+  it('returns hasDockerfile:false, framework:null for an unrecognized repo', async () => {
+    wireRepo([{ path: 'README.md' }, { path: 'LICENSE' }]);
+    const app = createApp();
+    const res = await detect(app, 'https://github.com/octocat/hello');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ hasDockerfile: false, framework: null, port: null });
+  });
+
+  it('400 on a non-GitHub repo URL', async () => {
+    const app = createApp();
+    const res = await detect(app, 'https://gitlab.com/x/y');
+    expect(res.status).toBe(400);
+    expect(mocks.octokitRequest).not.toHaveBeenCalled();
+  });
+
+  it('502 GITHUB_UNAVAILABLE when the repo tree cannot be read', async () => {
+    mocks.octokitRequest.mockImplementation(async () => {
+      const err: Error & { status?: number } = new Error('Not Found');
+      err.status = 404;
+      throw err;
+    });
+    const app = createApp();
+    const res = await detect(app, 'https://github.com/octocat/private');
     expect(res.status).toBe(502);
     expect(res.body.error).toBe('GITHUB_UNAVAILABLE');
   });

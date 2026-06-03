@@ -90,6 +90,23 @@ test.describe('create project (authenticated)', () => {
     await expect(page).toHaveURL(/\/projects\/proj_created$/);
   });
 
+  test('previews the detected framework after picking a repo', async ({ page }) => {
+    await mockBackend(page, {
+      user: ownerUser,
+      projects: [],
+      detect: { hasDockerfile: false, framework: 'Express', port: 3000 },
+    });
+
+    const dialog = await openCreateModal(page);
+    await dialog.getByLabel('Search repositories').fill('my-new-app');
+    await dialog.getByRole('button', { name: /octocat\/my-new-app/ }).click();
+
+    // The framework-detect preview surfaces what we'd build for this repo.
+    await expect(dialog.getByText(/Detected/)).toBeVisible();
+    await expect(dialog.getByText('Express')).toBeVisible();
+    await expect(dialog.getByText(/listens on :3000/)).toBeVisible();
+  });
+
   test('falls back to manual URL entry and submits', async ({ page }) => {
     // Repos endpoint errors → the modal auto-switches to manual URL entry.
     await mockBackend(page, { user: ownerUser, projects: [], repos: 'error' });

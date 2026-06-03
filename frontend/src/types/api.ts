@@ -22,6 +22,8 @@ export interface ProjectSummary {
   branch: string;
   liveUrl: string | null;
   containerAppName: string;
+  /** When false, a `git push` no longer auto-builds — deploy manually instead. */
+  autoDeploy: boolean;
   createdAt: string;
   updatedAt: string;
   latestBuild: ProjectLatestBuild | null;
@@ -163,7 +165,37 @@ export interface GithubRepo {
 export interface UpdateProjectInput {
   branch?: string;
   name?: string;
+  autoDeploy?: boolean;
   envVars?: ProjectEnvVar[] | null;
+}
+
+/** A line of the running container's stdout/stderr (`GET …/runtime/logs`). */
+export interface RuntimeLogLine {
+  ts: string;
+  message: string;
+  stream: 'stdout' | 'stderr' | 'unknown';
+  revision: string | null;
+}
+
+/**
+ * `GET /api/projects/:id/runtime/logs`. `available:false` (with a `note`) when
+ * the log workspace isn't configured or the query failed — the UI shows the
+ * note instead of an error.
+ */
+export interface RuntimeLogsResult {
+  lines: RuntimeLogLine[];
+  available: boolean;
+  note?: string;
+}
+
+/** `POST /api/github/detect` — framework preview for the New Project modal. */
+export interface DetectFrameworkResult {
+  /** The repo ships its own Dockerfile (we build it as-is). */
+  hasDockerfile: boolean;
+  /** Detected framework label, or null when unrecognized. */
+  framework: string | null;
+  /** Detected listen port, or null. */
+  port: number | null;
 }
 
 /**

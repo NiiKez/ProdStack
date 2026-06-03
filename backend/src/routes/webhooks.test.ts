@@ -38,6 +38,7 @@ const projectRow = (() => {
     containerAppName: 'octocat-hello',
     liveUrl: 'https://octocat-hello.example.com',
     frameworkHint: null as string | null,
+    autoDeploy: true,
     createdAt: new Date(),
     updatedAt: new Date(),
     deletedAt: null as Date | null,
@@ -197,6 +198,28 @@ describe('POST /api/webhooks/github', () => {
       status: 'QUEUED',
     });
     expect(state.webhookEvents.has('delivery-1')).toBe(true);
+  });
+
+  it('acknowledges with 200 but creates no build when autoDeploy is off', async () => {
+    mocks.projectFindFirst.mockImplementationOnce(async () => ({
+      ...projectRow,
+      autoDeploy: false,
+    }));
+    const body = pushPayload();
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/webhooks/github')
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-GitHub-Delivery', 'delivery-noauto')
+      .set('X-Hub-Signature-256', sign(body))
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, autoDeploy: false });
+    expect(state.builds).toHaveLength(0);
+    // The delivery is still recorded for idempotency/audit.
+    expect(state.webhookEvents.has('delivery-noauto')).toBe(true);
   });
 
   it('rejects an invalid signature with 401 and creates no build', async () => {

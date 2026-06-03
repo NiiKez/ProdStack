@@ -2,14 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Lock, Search } from 'lucide-react';
+import { AlertCircle, CheckCircle2, FileCode2, Lock, Search } from 'lucide-react';
 import { Button, Input, Modal, Spinner, useToast } from '@/components/ui';
 import { ApiError } from '@/lib/api';
 import { REPO_URL_PATTERN, slugify, deriveNameFromRepoUrl, mapApiError } from '@/lib/repo';
 import { filterRepos, repoToFormValues } from '@/lib/githubRepos';
 import { useCreateProject } from '@/hooks/useCreateProject';
+import { useDetectFramework } from '@/hooks/useDetectFramework';
 import { useGithubRepos } from '@/hooks/useGithubRepos';
-import type { GithubRepo, ProjectSummary } from '@/types/api';
+import type { DetectFrameworkResult, GithubRepo, ProjectSummary } from '@/types/api';
 
 const schema = z.object({
   repoUrl: z.string().regex(REPO_URL_PATTERN, 'Must be a GitHub repo URL'),
@@ -30,6 +31,9 @@ export interface NewProjectModalProps {
 export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectModalProps) {
   const { toast } = useToast();
   const createProject = useCreateProject();
+  // Best-effort "what we'd build" preview. Failures are non-fatal (e.g. the
+  // dev-login user has no GitHub token → 502); the preview just stays hidden.
+  const detect = useDetectFramework();
 
   // Only fetch the repo list while the modal is open. The hook is lazy so a
   // closed modal never hits the network.
@@ -62,12 +66,15 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
     if (prevOpenRef.current && !open) {
       reset({ repoUrl: '', branch: 'main', name: '' });
       createProject.reset();
+      detect.reset();
+      detectReqRef.current += 1;
+      setPreview(null);
       setMode('picker');
       setSearch('');
       setSelectedRepo(null);
     }
     prevOpenRef.current = open;
-  }, [open, reset, createProject]);
+  }, [open, reset, createProject, detect]);
 
   // When the picker is unavailable (query errored or returned no repos), drop
   // the user into manual mode so the modal is never a dead end. We only force
@@ -84,6 +91,37 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
   const nameValue = watch('name');
   const derivedSlug = nameValue ? slugify(nameValue) : '';
 
+  // Framework-detect preview state. We manage it locally (rather than reading
+  // `detect.data`) so we can ignore STALE responses: picking repo A then B
+  // races two requests, and the slower one must not overwrite the newer repo's
+  // preview. Each call bumps `detectReqRef`; only the latest request's result
+  // is applied. `null` = hidden.
+  const [preview, setPreview] = useState<{
+    loading: boolean;
+    data?: DetectFrameworkResult;
+  } | null>(null);
+  const detectReqRef = useRef(0);
+
+  const runDetect = useCallback(
+    (repoUrl: string, ref: string) => {
+      const reqId = ++detectReqRef.current;
+      setPreview({ loading: true });
+      detect.mutate(
+        { repoUrl, ref },
+        {
+          onSuccess: (data) => {
+            if (reqId === detectReqRef.current) setPreview({ loading: false, data });
+          },
+          onError: () => {
+            // Stale or failed (e.g. tokenless dev-login user → 502): hide it.
+            if (reqId === detectReqRef.current) setPreview(null);
+          },
+        },
+      );
+    },
+    [detect],
+  );
+
   const handleRepoBlur = useCallback(() => {
     const repoUrl = getValues('repoUrl');
     const currentName = getValues('name');
@@ -93,7 +131,11 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
         setValue('name', derived, { shouldValidate: true, shouldDirty: true });
       }
     }
-  }, [getValues, setValue]);
+    // Preview the build plan once the URL looks like a real GitHub repo.
+    if (repoUrl && REPO_URL_PATTERN.test(repoUrl)) {
+      runDetect(repoUrl, getValues('branch') || 'main');
+    }
+  }, [getValues, setValue, runDetect]);
 
   const filtered = useMemo(
     () => filterRepos(repos.data ?? [], search),
@@ -107,8 +149,9 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
       setValue('branch', values.branch, { shouldValidate: true, shouldDirty: true });
       setValue('name', values.name, { shouldValidate: true, shouldDirty: true });
       setSelectedRepo(repo.fullName);
+      runDetect(values.repoUrl, values.branch);
     },
-    [setValue]
+    [setValue, runDetect]
   );
 
   const requestClose = useCallback(
@@ -273,6 +316,39 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
             >
               Pick from your repositories
             </button>
+          </div>
+        )}
+
+        {preview && (
+          <div
+            className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs"
+            aria-live="polite"
+          >
+            {preview.loading ? (
+              <span className="inline-flex items-center gap-2 text-slate-400">
+                <Spinner size="sm" /> Inspecting repository…
+              </span>
+            ) : preview.data?.hasDockerfile ? (
+              <span className="inline-flex items-center gap-2 text-emerald-300">
+                <FileCode2 className="h-4 w-4 shrink-0" aria-hidden /> Dockerfile found — we’ll build
+                it as-is.
+              </span>
+            ) : preview.data?.framework ? (
+              <span className="inline-flex items-center gap-2 text-emerald-300">
+                <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
+                <span>
+                  Detected <strong className="font-semibold">{preview.data.framework}</strong>
+                  {preview.data.port
+                    ? ` — we’ll generate a Dockerfile (listens on :${preview.data.port}).`
+                    : ' — we’ll generate a Dockerfile.'}
+                </span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-2 text-amber-300">
+                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden />
+                No Dockerfile or known framework detected — add a Dockerfile to deploy this repo.
+              </span>
+            )}
           </div>
         )}
 

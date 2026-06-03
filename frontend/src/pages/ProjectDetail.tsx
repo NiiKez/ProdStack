@@ -4,12 +4,14 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowLeft,
+  BarChart3,
   Copy,
   ExternalLink,
   Github,
   GitBranch,
   Rocket,
   RotateCcw,
+  Terminal,
   Trash2,
   XCircle,
 } from 'lucide-react';
@@ -51,9 +53,14 @@ import { useProject } from '@/hooks/useProject';
 import { useDeleteProject } from '@/hooks/useDeleteProject';
 import { useProjectBuilds, type BuildFilters } from '@/hooks/useProjectBuilds';
 import { useProjectDeployments } from '@/hooks/useProjectDeployments';
+import { useProjectMetrics } from '@/hooks/useProjectMetrics';
+import { useRuntimeLogs } from '@/hooks/useRuntimeLogs';
 import { useRollbackDeployment } from '@/hooks/useRollbackDeployment';
 import { useRebuildProject } from '@/hooks/useRebuildProject';
 import { useCancelBuild } from '@/hooks/useCancelBuild';
+import { MetricsChart } from '@/components/MetricsChart';
+import { formatLogClock } from '@/lib/runtimeLogs';
+import type { MetricKey, MetricRange } from '@/lib/metrics';
 import type {
   BuildSummary,
   DeploymentListItem,
@@ -62,12 +69,14 @@ import type {
   UpdateProjectResult,
 } from '@/types/api';
 
-type TabValue = 'overview' | 'builds' | 'deployments' | 'settings';
+type TabValue = 'overview' | 'builds' | 'deployments' | 'logs' | 'metrics' | 'settings';
 
 const TAB_VALUES: ReadonlySet<TabValue> = new Set<TabValue>([
   'overview',
   'builds',
   'deployments',
+  'logs',
+  'metrics',
   'settings',
 ]);
 
@@ -164,6 +173,8 @@ export default function ProjectDetail() {
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="builds">Builds</TabsTrigger>
           <TabsTrigger value="deployments">Deployments</TabsTrigger>
+          <TabsTrigger value="logs">Logs</TabsTrigger>
+          <TabsTrigger value="metrics">Metrics</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
         </TabsList>
 
@@ -175,6 +186,12 @@ export default function ProjectDetail() {
         </TabsContent>
         <TabsContent value="deployments">
           <DeploymentsTab project={project} />
+        </TabsContent>
+        <TabsContent value="logs">
+          <LogsTab project={project} />
+        </TabsContent>
+        <TabsContent value="metrics">
+          <MetricsTab project={project} />
         </TabsContent>
         <TabsContent value="settings">
           <SettingsTab project={project} />
@@ -816,6 +833,167 @@ function DeploymentsTab({ project }: { project: ProjectDetailType }) {
   );
 }
 
+// --- Logs tab (the running app's stdout/stderr) ----------------------------
+
+function LogsTab({ project }: { project: ProjectDetailType }) {
+  const logsQuery = useRuntimeLogs(project.id, { sinceMinutes: 15 });
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  const data = logsQuery.data;
+  const lines = useMemo(() => data?.lines ?? [], [data]);
+
+  // Autoscroll to the newest line unless the user has scrolled up to read.
+  useEffect(() => {
+    if (!autoScroll) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [lines, autoScroll]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    setAutoScroll(nearBottom);
+  };
+
+  return (
+    <Card className="flex flex-col gap-3 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-100">
+          <Terminal size={14} aria-hidden className="text-slate-500" />
+          Runtime logs
+        </h2>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => void logsQuery.refetch()}>
+            Refresh
+          </Button>
+          <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+            <span
+              className={cn(
+                'h-2 w-2 rounded-full',
+                logsQuery.isFetching ? 'animate-pulse bg-emerald-400' : 'bg-slate-600',
+              )}
+            />
+            {logsQuery.isFetching ? 'Refreshing' : 'Auto · every 8s'}
+          </span>
+        </div>
+      </div>
+
+      {logsQuery.isLoading ? (
+        <div className="flex flex-col gap-2">
+          <Skeleton className="h-4 w-2/3" />
+          <Skeleton className="h-4 w-1/2" />
+          <Skeleton className="h-4 w-3/4" />
+        </div>
+      ) : logsQuery.isError ? (
+        <ErrorState
+          title="Couldn’t load logs"
+          description="The runtime logs request failed. Retry, or check back in a moment."
+          onRetry={() => void logsQuery.refetch()}
+        />
+      ) : data && !data.available ? (
+        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-400">
+          {data.note ?? 'Runtime logs are unavailable for this app right now.'}
+        </div>
+      ) : lines.length === 0 ? (
+        <p className="rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-400">
+          No output in the last 15 minutes. A scale-to-zero app that isn’t handling requests sits
+          idle — open its URL to wake it and logs will appear here.
+        </p>
+      ) : (
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="max-h-[60vh] overflow-auto rounded-lg border border-slate-800 bg-slate-950/70 p-3 font-mono text-xs leading-relaxed"
+        >
+          {lines.map((line, i) => (
+            <div key={`${line.ts}-${i}`} className="flex gap-3">
+              <span className="shrink-0 select-none text-slate-600">{formatLogClock(line.ts)}</span>
+              <span
+                className={cn(
+                  'whitespace-pre-wrap break-all',
+                  line.stream === 'stderr' ? 'text-rose-300' : 'text-slate-300',
+                )}
+              >
+                {line.message}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="text-[11px] text-slate-600">
+        Streamed from Azure Log Analytics — a short ingestion delay (~1–2 min) is normal.
+      </p>
+    </Card>
+  );
+}
+
+// --- Metrics tab (Azure Monitor: cpu/memory/replicas/requests) -------------
+
+const METRIC_RANGE_OPTIONS = [
+  { value: '1h', label: 'Last hour' },
+  { value: '6h', label: 'Last 6 hours' },
+  { value: '24h', label: 'Last 24 hours' },
+];
+
+const METRIC_COLORS: Record<MetricKey, string> = {
+  cpu: '#a3e635', // lime / accent
+  memory: '#38bdf8', // sky
+  replicas: '#fbbf24', // amber
+  requests: '#34d399', // emerald
+};
+
+function MetricsTab({ project }: { project: ProjectDetailType }) {
+  const [range, setRange] = useState<MetricRange>('1h');
+  const metricsQuery = useProjectMetrics(project.id, range);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="inline-flex items-center gap-2 text-xs text-slate-500">
+          <BarChart3 size={14} aria-hidden className="text-slate-500" />
+          Resource usage from Azure Monitor · auto-refreshes every 30s
+        </p>
+        <Select
+          leadingLabel="Range"
+          options={METRIC_RANGE_OPTIONS}
+          value={range}
+          onChange={(e) => setRange(e.target.value as MetricRange)}
+        />
+      </div>
+
+      {metricsQuery.isLoading ? (
+        <div className="grid gap-4 md:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => (
+            <Card key={i} className="p-5">
+              <Skeleton className="h-40 w-full" />
+            </Card>
+          ))}
+        </div>
+      ) : metricsQuery.isError ? (
+        <ErrorState
+          title="Couldn’t load metrics"
+          description="Azure Monitor didn’t return data for this app. It may be idle (scaled to zero) or metrics aren’t available yet."
+          onRetry={() => void metricsQuery.refetch()}
+        />
+      ) : metricsQuery.data && !metricsQuery.data.available ? (
+        <Card className="p-6 text-sm text-slate-400">
+          {metricsQuery.data.note ?? 'Metrics are unavailable for this app right now.'}
+        </Card>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          {(metricsQuery.data?.series ?? []).map((s) => (
+            <Card key={s.key} className="p-5">
+              <MetricsChart series={s} color={METRIC_COLORS[s.key]} />
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface SettingsTabProps {
   project: ProjectDetailType;
 }
@@ -840,6 +1018,7 @@ function useUpdateProject(id: string) {
           ...prev,
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.branch !== undefined ? { branch: input.branch } : {}),
+          ...(input.autoDeploy !== undefined ? { autoDeploy: input.autoDeploy } : {}),
         });
       }
       return prev ? { prev } : {};
@@ -866,13 +1045,15 @@ function SettingsTab({ project }: SettingsTabProps) {
 
   const [name, setName] = useState(project.name);
   const [branch, setBranch] = useState(project.branch);
+  const [autoDeploy, setAutoDeploy] = useState(project.autoDeploy);
   const [deleteInput, setDeleteInput] = useState('');
 
   // Re-sync when the project data updates from elsewhere.
   useEffect(() => {
     setName(project.name);
     setBranch(project.branch);
-  }, [project.name, project.branch]);
+    setAutoDeploy(project.autoDeploy);
+  }, [project.name, project.branch, project.autoDeploy]);
 
   // Env vars: seed from the server, re-sync only when the saved content
   // actually changes (keyed on the serialized list) so a background refetch
@@ -892,7 +1073,8 @@ function SettingsTab({ project }: SettingsTabProps) {
   const updateProject = useUpdateProject(project.id);
   const deleteProject = useDeleteProject();
 
-  const dirty = name !== project.name || branch !== project.branch;
+  const dirty =
+    name !== project.name || branch !== project.branch || autoDeploy !== project.autoDeploy;
   const canSave = dirty && name.trim().length > 0 && branch.trim().length > 0;
 
   const envDirty = JSON.stringify(envVars) !== savedEnvKey;
@@ -947,6 +1129,7 @@ function SettingsTab({ project }: SettingsTabProps) {
     const patch: UpdateProjectInput = {};
     if (name !== project.name) patch.name = name.trim();
     if (branch !== project.branch) patch.branch = branch.trim();
+    if (autoDeploy !== project.autoDeploy) patch.autoDeploy = autoDeploy;
     try {
       await updateProject.mutateAsync(patch);
       toast({ title: 'Project settings saved.', variant: 'success' });
@@ -1012,6 +1195,35 @@ function SettingsTab({ project }: SettingsTabProps) {
           onChange={(e) => setBranch(e.target.value)}
           autoComplete="off"
         />
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm font-medium text-slate-200">Auto-deploy on push</span>
+            <span className="text-xs text-slate-500">
+              Build &amp; deploy automatically on a push to{' '}
+              <span className="font-mono text-slate-400">{branch || project.branch}</span>. Off =
+              deploy manually with “Trigger build”.
+            </span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoDeploy}
+            aria-label="Auto-deploy on push"
+            onClick={() => setAutoDeploy((v) => !v)}
+            className={cn(
+              'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900',
+              autoDeploy ? 'border-accent-500 bg-accent-500/80' : 'border-slate-700 bg-slate-800',
+            )}
+          >
+            <span
+              className={cn(
+                'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                autoDeploy ? 'translate-x-6' : 'translate-x-1',
+              )}
+            />
+          </button>
+        </div>
         <div className="flex items-center justify-end">
           <Button
             onClick={() => void handleSave()}

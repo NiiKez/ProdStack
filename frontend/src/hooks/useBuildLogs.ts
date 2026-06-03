@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { env } from '@/env';
 import type { LogLine } from '@/types/api';
 
@@ -9,6 +9,8 @@ export interface UseBuildLogsResult {
   /** Latest build status pushed over the stream (UPPERCASE enum), or null. */
   status: string | null;
   phase: StreamPhase;
+  /** Tear down + re-open the stream from scratch (manual recovery on error). */
+  reconnect: () => void;
 }
 
 /**
@@ -31,6 +33,9 @@ export function useBuildLogs(buildId: string | undefined): UseBuildLogsResult {
   // Guard against duplicate seqs across reconnects (defensive — server already
   // dedupes via Last-Event-ID, but a racing replay shouldn't double-render).
   const seenSeq = useRef<Set<number>>(new Set());
+  // Bumped by `reconnect()` to re-run the effect and re-open a closed stream.
+  const [nonce, setNonce] = useState(0);
+  const reconnect = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
     if (!buildId) return;
@@ -88,7 +93,7 @@ export function useBuildLogs(buildId: string | undefined): UseBuildLogsResult {
     });
 
     return () => es.close();
-  }, [buildId]);
+  }, [buildId, nonce]);
 
-  return { lines, status, phase };
+  return { lines, status, phase, reconnect };
 }
