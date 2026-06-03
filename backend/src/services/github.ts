@@ -108,6 +108,78 @@ export async function createRepoWebhook(
 }
 
 /**
+ * A repository as surfaced to the frontend repo picker. A trimmed projection of
+ * GitHub's `/user/repos` rows — just what the "create project" flow needs.
+ */
+export interface GithubRepo {
+  /** GitHub `full_name`, e.g. "owner/repo". */
+  fullName: string;
+  /** GitHub `html_url`, e.g. "https://github.com/owner/repo". */
+  url: string;
+  /** GitHub `default_branch`, e.g. "main". */
+  defaultBranch: string;
+  /** GitHub `private`. */
+  private: boolean;
+}
+
+/**
+ * Structured error from a repo listing. Wraps the upstream GitHub failure so
+ * the route layer can map an auth failure (401) to a clean 502 GITHUB_UNAVAILABLE
+ * rather than 500-crashing on a missing/expired token.
+ */
+export class GithubReposError extends Error {
+  override readonly name = 'GithubReposError';
+  constructor(
+    message: string,
+    readonly status: number | undefined,
+    readonly githubMessage?: string,
+    readonly cause?: unknown,
+  ) {
+    super(message);
+  }
+}
+
+/** Hard cap on repos returned, to bound payload size + listing time. */
+const MAX_REPOS = 300;
+
+/**
+ * List the authenticated user's repositories for the repo picker: owned +
+ * collaborator + org-member, most-recently-pushed first, capped at `MAX_REPOS`.
+ * Uses `octokit.paginate` so we walk every page transparently. On any GitHub
+ * failure throws `GithubReposError` so the route can branch on status.
+ */
+export async function listUserRepos(octokit: Octokit): Promise<GithubRepo[]> {
+  let rows: Array<{
+    full_name: string;
+    html_url: string;
+    default_branch: string;
+    private: boolean;
+  }>;
+  try {
+    rows = await octokit.paginate('GET /user/repos', {
+      affiliation: 'owner,collaborator,organization_member',
+      sort: 'pushed',
+      direction: 'desc',
+      per_page: 100,
+    });
+  } catch (err) {
+    throw new GithubReposError(
+      'failed to list user repos',
+      extractStatus(err),
+      extractGithubMessage(err),
+      err,
+    );
+  }
+
+  return rows.slice(0, MAX_REPOS).map((r) => ({
+    fullName: r.full_name,
+    url: r.html_url,
+    defaultBranch: r.default_branch,
+    private: r.private,
+  }));
+}
+
+/**
  * Structured error from a commit lookup. Wraps the upstream GitHub failure so
  * the route layer can fall back to the last stored build's commit instead of
  * propagating a raw octokit error.
