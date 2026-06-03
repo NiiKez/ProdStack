@@ -17,6 +17,11 @@
 #                             AND roll user Container Apps via updateContainerApp()
 #   AcrPull on ACR          — pull its own image
 #   Key Vault Secrets User  — read database-url, data-enc-key, deploy-token, etc.
+#   Monitoring Reader on RG — read Azure Monitor metrics for the Metrics tab
+#   Log Analytics Reader RG — query ContainerAppConsoleLogs_CL for the Logs tab
+# (Monitoring/Log Analytics Reader back the project-observability runtime-logs +
+#  metrics tabs; granted by hand 2026-06-03, made durable here so an identity
+#  reset re-applies them — the exact orphaning failure mode this script exists for.)
 #
 # Re-run any time the API app is recreated or its identity is reset. Safe to run
 # repeatedly: a duplicate assignment is a no-op ("already had ...").
@@ -47,7 +52,9 @@ echo "==> Asserting RBAC roles"
 for ROLE_SCOPE in \
   "Contributor:$RG_ID" \
   "AcrPull:$ACR_ID" \
-  "Key Vault Secrets User:$KV_ID"
+  "Key Vault Secrets User:$KV_ID" \
+  "Monitoring Reader:$RG_ID" \
+  "Log Analytics Reader:$RG_ID"
 do
   ROLE="${ROLE_SCOPE%%:*}"
   SCOPE="${ROLE_SCOPE#*:}"

@@ -56,6 +56,15 @@ WEB=https://$(az containerapp ingress show -n prodstack-web -g prodstack --query
 ENV_PATH=Microsoft.App/managedEnvironments/prodstack-env
 ENV_ID=/subscriptions/$SUB/resourceGroups/prodstack/providers/$ENV_PATH
 
+# Log Analytics workspace GUID (customerId) for the project-observability
+# runtime-logs + metrics tabs. Derived from az so no GUID is hardcoded. Optional:
+# the logs/metrics services degrade gracefully (available:false) when it's unset,
+# but the prod API needs it to surface real data. Also requires the API identity
+# to hold Monitoring Reader + Log Analytics Reader (infra/grant-prodstack-api-roles.sh).
+LOG_WS_ID=$(az resource show -g prodstack -n prodstack-logs \
+  --resource-type Microsoft.OperationalInsights/workspaces \
+  --query properties.customerId -o tsv)
+
 # NOTE (2026-06-01, M5 frontend): the OAuth callback lives on the WEB origin,
 # not the API. prodstack-web's nginx reverse-proxies /api to the backend, so the
 # browser runs the whole OAuth round-trip on the prodstack-web origin. The
@@ -82,6 +91,7 @@ az containerapp update $APP --set-env-vars \
   AZURE_SUBSCRIPTION_ID=$SUB \
   AZURE_RESOURCE_GROUP=prodstack \
   AZURE_REGION=francecentral \
+  LOG_ANALYTICS_WORKSPACE_ID=$LOG_WS_ID \
   ACR_NAME=prodstack \
   CONTAINER_APPS_ENV_ID=$ENV_ID \
   OWNER_GITHUB_ID="${OWNER_GITHUB_ID:?set to your GitHub numeric user id (curl -s https://api.github.com/users/<login> | jq .id)}" \
