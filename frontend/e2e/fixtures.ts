@@ -1,6 +1,6 @@
 import type { Page, Route, Request } from '@playwright/test';
 import type { CurrentUser } from '../src/hooks/useCurrentUser';
-import type { ProjectSummary } from '../src/types/api';
+import type { GithubRepo, ProjectSummary } from '../src/types/api';
 
 /**
  * Hermetic backend stub for the E2E suite.
@@ -69,6 +69,32 @@ export const sampleProjects: ProjectSummary[] = [
   },
 ];
 
+/**
+ * Fake GitHub repo list for the New Project picker. Backend returns these
+ * most-recently-pushed first as `{ repos: [...] }`; the picker filters/selects
+ * them. `octocat/my-new-app` matches the project the create-project spec creates.
+ */
+export const sampleRepos: GithubRepo[] = [
+  {
+    fullName: 'octocat/my-new-app',
+    url: 'https://github.com/octocat/my-new-app',
+    defaultBranch: 'main',
+    private: false,
+  },
+  {
+    fullName: 'octocat/secret-tool',
+    url: 'https://github.com/octocat/secret-tool',
+    defaultBranch: 'develop',
+    private: true,
+  },
+  {
+    fullName: 'octocat/legacy-site',
+    url: 'https://github.com/octocat/legacy-site',
+    defaultBranch: 'master',
+    private: false,
+  },
+];
+
 /** Build a fresh ProjectSummary (used as the POST /api/projects success body). */
 export function makeProject(overrides: Partial<ProjectSummary> = {}): ProjectSummary {
   return {
@@ -95,6 +121,13 @@ export interface MockBackendOptions {
   user?: CurrentUser | null;
   /** Projects list returned by `GET /api/projects`. Defaults to `[]`. */
   projects?: ProjectSummary[];
+  /**
+   * Repos returned by `GET /api/github/repos` (wrapped as `{ repos }`).
+   * Defaults to `sampleRepos`. Pass `'error'` to make the endpoint reply 502
+   * (so the modal falls back to manual URL entry), or `[]` for an empty list
+   * (which also triggers the manual fallback).
+   */
+  repos?: GithubRepo[] | 'error';
 }
 
 function json(route: Route, status: number, body: unknown): Promise<void> {
@@ -116,11 +149,13 @@ function json(route: Route, status: number, body: unknown): Promise<void> {
  *   GET  /api/health       → 200 { status:'ok', killSwitch:false }
  *   GET  /api/projects     → 200 { projects: [...] }
  *   GET  /api/projects/:id → 200 project detail (so post-create navigation is hermetic)
+ *   GET  /api/github/repos → 200 { repos: [...] } | 502 (when `repos === 'error'`)
  *   *    everything else    → 404 JSON (never reaches the real backend)
  */
 export async function mockBackend(page: Page, options: MockBackendOptions = {}): Promise<void> {
   const user = options.user === undefined ? ownerUser : options.user;
   const projects = options.projects ?? [];
+  const repos = options.repos === undefined ? sampleRepos : options.repos;
 
   await page.route('**/api/**', async (route: Route, request: Request) => {
     const method = request.method();
@@ -139,6 +174,13 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
 
     if (path === '/api/projects' && method === 'GET') {
       return json(route, 200, { projects });
+    }
+
+    if (path === '/api/github/repos' && method === 'GET') {
+      if (repos === 'error') {
+        return json(route, 502, { error: 'GITHUB_UNAVAILABLE' });
+      }
+      return json(route, 200, { repos });
     }
 
     // Project detail — lets the create flow's post-success navigation resolve

@@ -148,6 +148,18 @@ export interface CreateProjectInput {
   name: string;
 }
 
+/**
+ * A repo from `GET /api/github/repos` — the user's GitHub repositories the
+ * New Project picker lists, already sorted most-recently-pushed first by the
+ * backend. The endpoint wraps these as `{ repos: GithubRepo[] }`.
+ */
+export interface GithubRepo {
+  fullName: string;
+  url: string;
+  defaultBranch: string;
+  private: boolean;
+}
+
 export interface UpdateProjectInput {
   branch?: string;
   name?: string;

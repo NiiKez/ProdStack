@@ -13,6 +13,7 @@ import adminRouter from './routes/admin.js';
 import authRouter from './routes/auth.js';
 import buildsRouter from './routes/builds.js';
 import deploymentsRouter from './routes/deployments.js';
+import githubRouter from './routes/github.js';
 import healthRouter from './routes/health.js';
 import meRouter from './routes/me.js';
 import projectsRouter from './routes/projects.js';
@@ -68,6 +69,7 @@ export function createApp(): Express {
   // session), so it mounts OUTSIDE requireAuth — see routes/admin.ts.
   app.use('/api/admin', adminRouter);
   app.use('/api/projects', requireAuth, projectsRouter);
+  app.use('/api/github', requireAuth, githubRouter);
   app.use('/api/builds', requireAuth, buildsRouter);
   app.use('/api/deployments', requireAuth, deploymentsRouter);
   app.use('/api/activity', requireAuth, activityRouter);
