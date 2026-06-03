@@ -165,12 +165,17 @@ describe('getAppMetrics (real branch)', () => {
       aggregations: ['Average'],
     });
 
+    // A successful real query reports available:true.
+    expect(result.available).toBe(true);
+
     const byKey = Object.fromEntries(result.series.map((s) => [s.key, s]));
     // cpu: 250_000_000 nanocores → 0.25 cores; second bucket → null.
     expect(byKey.cpu!.points).toEqual([
       { t: '2026-06-03T10:00:00.000Z', v: 0.25 },
       { t: '2026-06-03T10:05:00.000Z', v: null },
     ]);
+    // memory: 250_000_000 bytes / 1048576 ≈ 238.4186 MiB.
+    expect(byKey.memory!.points[0]!.v).toBeCloseTo(238.4186, 3);
     // requests uses Total (5); replicas uses Maximum (1).
     expect(byKey.requests!.points[0]!.v).toBe(5);
     expect(byKey.replicas!.points[0]!.v).toBe(1);
@@ -207,12 +212,13 @@ describe('getAppMetrics (real branch)', () => {
     expect(byKey.cpu!.points[0]!.v).toBe(1); // 1e9 nanocores → 1 core
   });
 
-  it('throws a useful error when AZURE_SUBSCRIPTION_ID is missing', async () => {
+  it('degrades to available:false (does not throw) when AZURE_SUBSCRIPTION_ID is missing', async () => {
     process.env.AZURE_SUBSCRIPTION_ID = '';
     const { getAppMetrics } = await import('./metrics.js');
-    await expect(getAppMetrics({ containerAppName: 'x' })).rejects.toThrow(
-      /AZURE_SUBSCRIPTION_ID not configured/,
-    );
+    const result = await getAppMetrics({ containerAppName: 'x' });
+    expect(result.available).toBe(false);
+    expect(result.series).toEqual([]);
+    expect(result.note).toBeTruthy();
     process.env.AZURE_SUBSCRIPTION_ID = 'sub-test';
   });
 });

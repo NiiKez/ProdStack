@@ -169,6 +169,8 @@ describe('queryRuntimeLogs (real branch, with workspace id)', () => {
     expect(workspaceId).toBe('ws-guid-123');
     expect(query).toContain('ContainerAppConsoleLogs_CL');
     expect(query).toContain('ContainerAppName_s == "demo"');
+    // Keeps the NEWEST N (sort desc + take) then re-sorts ascending for display.
+    expect(query).toMatch(/order by TimeGenerated desc[\s\S]*take \d+[\s\S]*order by TimeGenerated asc/);
   });
 
   it('degrades gracefully (available:false + note) on a query error', async () => {

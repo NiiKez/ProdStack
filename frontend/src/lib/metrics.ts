@@ -26,6 +26,10 @@ export interface AppMetrics {
   start: string;
   end: string;
   intervalMinutes: number;
+  /** False when Azure Monitor isn't configured/reachable — `series` is then
+   *  empty and `note` explains why (the backend never 500s on this path). */
+  available: boolean;
+  note?: string;
   series: MetricSeries[];
 }
 

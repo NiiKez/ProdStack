@@ -52,6 +52,10 @@ export interface AppMetrics {
   /** ISO-8601 end of the window (≈ now). */
   end: string;
   intervalMinutes: number;
+  /** False when Azure Monitor isn't configured/reachable — `series` is then
+   *  empty and `note` explains why. The call never throws on this path. */
+  available: boolean;
+  note?: string;
   series: MetricSeries[];
 }
 
@@ -192,6 +196,7 @@ function stubMetrics(opts: GetAppMetricsOpts): AppMetrics {
     start: new Date(startMs).toISOString(),
     end: new Date(endMs).toISOString(),
     intervalMinutes: cfg.intervalMinutes,
+    available: true,
     series,
   };
 }
@@ -216,6 +221,16 @@ function durationMinutes(duration: string): number {
 }
 
 // --- Real branch -----------------------------------------------------------
+
+/**
+ * Defense-in-depth name guard (mirrors `logs.ts`). Container App names are
+ * already validated upstream, but we re-check before interpolating into the
+ * resource URI so a malformed name degrades to `available:false` rather than
+ * issuing a bogus Azure query.
+ */
+const APP_NAME_RE = /^[a-z0-9-]{1,32}$/;
+
+const NOTE_UNAVAILABLE = 'Metrics are temporarily unavailable.';
 
 let cachedClient: MetricsQueryClient | undefined;
 
@@ -294,6 +309,8 @@ async function realMetricSeries(
   cfg: RangeConfig,
 ): Promise<MetricSeries> {
   try {
+    // Note: `MetricsQueryOptions` has no server-timeout field (unlike the Logs
+    // query options), so metrics queries have no explicit server timeout.
     const result = await client.queryResource(resourceUri, [spec.azureMetric], {
       granularity: cfg.granularity,
       timespan: { duration: cfg.timespanDuration },
@@ -318,24 +335,52 @@ async function realMetricSeries(
 }
 
 async function realMetrics(opts: GetAppMetricsOpts): Promise<AppMetrics> {
+  // None of this throws (the range/Date math is pure), so compute it first and
+  // reuse it for both the success and the degraded result.
   const range = resolveRange(opts.range);
   const cfg = RANGE_CONFIG[range];
-  const client = getClient();
-  const resourceUri = resourceUriFor(opts.containerAppName);
-
-  const series = await Promise.all(
-    METRIC_SPECS.map((spec) => realMetricSeries(client, resourceUri, spec, cfg)),
-  );
-
   const end = new Date();
   const start = new Date(end.getTime() - durationMinutes(cfg.timespanDuration) * 60_000);
-  return {
+
+  const degraded = (): AppMetrics => ({
     range,
     start: start.toISOString(),
     end: end.toISOString(),
     intervalMinutes: cfg.intervalMinutes,
-    series,
-  };
+    series: [],
+    available: false,
+    note: NOTE_UNAVAILABLE,
+  });
+
+  if (!APP_NAME_RE.test(opts.containerAppName)) {
+    logger.warn(
+      { name: opts.containerAppName },
+      'metrics: rejected invalid container app name, returning unavailable',
+    );
+    return degraded();
+  }
+
+  try {
+    const resourceUri = resourceUriFor(opts.containerAppName);
+    const client = getClient();
+    const series = await Promise.all(
+      METRIC_SPECS.map((spec) => realMetricSeries(client, resourceUri, spec, cfg)),
+    );
+    return {
+      range,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      intervalMinutes: cfg.intervalMinutes,
+      series,
+      available: true,
+    };
+  } catch (err) {
+    // A hard credential/config error (e.g. AZURE_SUBSCRIPTION_ID unset) or an
+    // unexpected client failure degrades the whole call to `available:false`
+    // rather than propagating a 500 to the polling dashboard.
+    logger.warn({ err, name: opts.containerAppName }, 'metrics: query failed, returning unavailable');
+    return degraded();
+  }
 }
 
 // --- Public API ------------------------------------------------------------
@@ -347,8 +392,9 @@ export function isStub(): boolean {
 /**
  * Fetch the four standard Container Apps metrics (CPU, memory, replicas,
  * requests) for `containerAppName` over `range` (default `1h`), shaped for the
- * Metrics tab. Never throws on a single failing metric; the whole call may
- * throw only on a hard credential/config error.
+ * Metrics tab. Never throws — a single failing metric degrades to an empty
+ * series, and a hard credential/config error (or any other failure) degrades
+ * the whole call to `available:false` with a `note`.
  */
 export async function getAppMetrics(opts: GetAppMetricsOpts): Promise<AppMetrics> {
   return isStub() ? stubMetrics(opts) : realMetrics(opts);

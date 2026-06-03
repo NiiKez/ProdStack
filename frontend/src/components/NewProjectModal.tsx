@@ -10,7 +10,7 @@ import { filterRepos, repoToFormValues } from '@/lib/githubRepos';
 import { useCreateProject } from '@/hooks/useCreateProject';
 import { useDetectFramework } from '@/hooks/useDetectFramework';
 import { useGithubRepos } from '@/hooks/useGithubRepos';
-import type { GithubRepo, ProjectSummary } from '@/types/api';
+import type { DetectFrameworkResult, GithubRepo, ProjectSummary } from '@/types/api';
 
 const schema = z.object({
   repoUrl: z.string().regex(REPO_URL_PATTERN, 'Must be a GitHub repo URL'),
@@ -67,6 +67,8 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
       reset({ repoUrl: '', branch: 'main', name: '' });
       createProject.reset();
       detect.reset();
+      detectReqRef.current += 1;
+      setPreview(null);
       setMode('picker');
       setSearch('');
       setSelectedRepo(null);
@@ -89,6 +91,37 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
   const nameValue = watch('name');
   const derivedSlug = nameValue ? slugify(nameValue) : '';
 
+  // Framework-detect preview state. We manage it locally (rather than reading
+  // `detect.data`) so we can ignore STALE responses: picking repo A then B
+  // races two requests, and the slower one must not overwrite the newer repo's
+  // preview. Each call bumps `detectReqRef`; only the latest request's result
+  // is applied. `null` = hidden.
+  const [preview, setPreview] = useState<{
+    loading: boolean;
+    data?: DetectFrameworkResult;
+  } | null>(null);
+  const detectReqRef = useRef(0);
+
+  const runDetect = useCallback(
+    (repoUrl: string, ref: string) => {
+      const reqId = ++detectReqRef.current;
+      setPreview({ loading: true });
+      detect.mutate(
+        { repoUrl, ref },
+        {
+          onSuccess: (data) => {
+            if (reqId === detectReqRef.current) setPreview({ loading: false, data });
+          },
+          onError: () => {
+            // Stale or failed (e.g. tokenless dev-login user → 502): hide it.
+            if (reqId === detectReqRef.current) setPreview(null);
+          },
+        },
+      );
+    },
+    [detect],
+  );
+
   const handleRepoBlur = useCallback(() => {
     const repoUrl = getValues('repoUrl');
     const currentName = getValues('name');
@@ -100,9 +133,9 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
     }
     // Preview the build plan once the URL looks like a real GitHub repo.
     if (repoUrl && REPO_URL_PATTERN.test(repoUrl)) {
-      detect.mutate({ repoUrl, ref: getValues('branch') || 'main' });
+      runDetect(repoUrl, getValues('branch') || 'main');
     }
-  }, [getValues, setValue, detect]);
+  }, [getValues, setValue, runDetect]);
 
   const filtered = useMemo(
     () => filterRepos(repos.data ?? [], search),
@@ -116,9 +149,9 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
       setValue('branch', values.branch, { shouldValidate: true, shouldDirty: true });
       setValue('name', values.name, { shouldValidate: true, shouldDirty: true });
       setSelectedRepo(repo.fullName);
-      detect.mutate({ repoUrl: values.repoUrl, ref: values.branch });
+      runDetect(values.repoUrl, values.branch);
     },
-    [setValue, detect]
+    [setValue, runDetect]
   );
 
   const requestClose = useCallback(
@@ -286,27 +319,27 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
           </div>
         )}
 
-        {(detect.isPending || detect.data) && (
+        {preview && (
           <div
             className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs"
             aria-live="polite"
           >
-            {detect.isPending ? (
+            {preview.loading ? (
               <span className="inline-flex items-center gap-2 text-slate-400">
                 <Spinner size="sm" /> Inspecting repository…
               </span>
-            ) : detect.data?.hasDockerfile ? (
+            ) : preview.data?.hasDockerfile ? (
               <span className="inline-flex items-center gap-2 text-emerald-300">
                 <FileCode2 className="h-4 w-4 shrink-0" aria-hidden /> Dockerfile found — we’ll build
                 it as-is.
               </span>
-            ) : detect.data?.framework ? (
+            ) : preview.data?.framework ? (
               <span className="inline-flex items-center gap-2 text-emerald-300">
                 <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
                 <span>
-                  Detected <strong className="font-semibold">{detect.data.framework}</strong>
-                  {detect.data.port
-                    ? ` — we’ll generate a Dockerfile (listens on :${detect.data.port}).`
+                  Detected <strong className="font-semibold">{preview.data.framework}</strong>
+                  {preview.data.port
+                    ? ` — we’ll generate a Dockerfile (listens on :${preview.data.port}).`
                     : ' — we’ll generate a Dockerfile.'}
                 </span>
               </span>

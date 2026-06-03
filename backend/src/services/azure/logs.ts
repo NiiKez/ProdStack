@@ -133,13 +133,18 @@ function buildKql(opts: { name: string; afterTs?: string; limit: number }): stri
   const afterClause = opts.afterTs
     ? `| where TimeGenerated > datetime("${escapeKqlDatetime(opts.afterTs)}")\n`
     : '';
+  // `take` after a sort returns the FIRST N rows of the sorted output, so to
+  // keep the NEWEST N we sort descending, take N, then re-sort ascending for
+  // chronological display (otherwise a high-volume app silently drops its most
+  // recent lines — the opposite of what a log tail wants).
   return (
     'ContainerAppConsoleLogs_CL\n' +
     `| where ContainerAppName_s == "${safeName}"\n` +
     afterClause +
     '| project TimeGenerated, Log_s, Stream_s, RevisionName_s\n' +
-    '| order by TimeGenerated asc\n' +
-    `| take ${opts.limit}`
+    '| order by TimeGenerated desc\n' +
+    `| take ${opts.limit}\n` +
+    '| order by TimeGenerated asc'
   );
 }
 
@@ -167,13 +172,16 @@ function asStringOrNull(value: unknown): string | null {
   return String(value);
 }
 
-/** Pull the populated table out of either a success or partial-failure result. */
+/**
+ * Pull the populated table out of a successful result. `realRuntimeLogs`
+ * early-returns `available:false` on PartialFailure, so this is only ever
+ * called on a Success.
+ */
 function tableFrom(result: LogsQueryResult): LogsTable | undefined {
   if (result.status === LogsQueryResultStatus.Success) {
     return result.tables[0];
   }
-  // Partial failures still carry whatever rows came back.
-  return result.partialTables[0];
+  return undefined;
 }
 
 function rowsToLines(table: LogsTable | undefined): RuntimeLogLine[] {
@@ -221,7 +229,14 @@ async function realRuntimeLogs(opts: QueryRuntimeLogsOpts): Promise<RuntimeLogsR
   const duration = minutesToDuration(opts.sinceMinutes);
 
   try {
-    const result = await getClient().queryWorkspace(workspaceId, query, { duration });
+    // `serverTimeoutInSeconds` caps the Azure-side query so a hung call can't
+    // tie up a polling request indefinitely.
+    const result = await getClient().queryWorkspace(
+      workspaceId,
+      query,
+      { duration },
+      { serverTimeoutInSeconds: 30 },
+    );
 
     // `queryWorkspace` resolves to `Success | PartialFailure`; a hard `Failure`
     // surfaces as a thrown error (handled by the catch below).

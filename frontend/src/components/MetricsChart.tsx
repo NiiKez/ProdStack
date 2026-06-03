@@ -34,14 +34,14 @@ export interface MetricsChartProps {
 export function MetricsChart({ series, color = DEFAULT_COLOR }: MetricsChartProps): JSX.Element {
   const gradId = useId();
 
-  const { stats, max, linePath, areaPath, hasData } = useMemo(() => {
+  const { stats, linePath, areaPath, hasData } = useMemo(() => {
     const stats = seriesStats(series);
     const max = niceMax(series.points.map((p) => p.v ?? 0));
     const linePath = buildLinePath(series.points, VIEW_W, VIEW_H, max);
     const areaPath = buildAreaPath(series.points, VIEW_W, VIEW_H, max);
     // A line needs ≥2 renderable points; buildLinePath returns '' otherwise.
     const hasData = linePath !== '';
-    return { stats, max, linePath, areaPath, hasData };
+    return { stats, linePath, areaPath, hasData };
   }, [series]);
 
   const latest = formatMetricValue(series.key, stats.last);
@@ -126,7 +126,7 @@ export function MetricsChart({ series, color = DEFAULT_COLOR }: MetricsChartProp
             <div className="flex items-center gap-1.5">
               <dt className="text-slate-500">max</dt>
               <dd className="font-mono text-slate-300">
-                {formatMetricValue(series.key, max === 1 && stats.max === 0 ? 0 : stats.max)}
+                {formatMetricValue(series.key, stats.max)}
               </dd>
             </div>
           </dl>

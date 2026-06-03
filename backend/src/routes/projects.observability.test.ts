@@ -127,6 +127,11 @@ describe('GET /api/projects/:id/metrics', () => {
     expect(res.body.range).toBe('1h');
     expect(res.body.intervalMinutes).toBe(5);
   });
+
+  it('400 (not 500/200) when the range is outside the allowed enum', async () => {
+    const res = await supertest(createApp()).get('/api/projects/p1/metrics?range=90d');
+    expect(res.status).toBe(400);
+  });
 });
 
 describe('GET /api/projects/:id/runtime/logs', () => {

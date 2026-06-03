@@ -886,6 +886,12 @@ function LogsTab({ project }: { project: ProjectDetailType }) {
           <Skeleton className="h-4 w-1/2" />
           <Skeleton className="h-4 w-3/4" />
         </div>
+      ) : logsQuery.isError ? (
+        <ErrorState
+          title="Couldn’t load logs"
+          description="The runtime logs request failed. Retry, or check back in a moment."
+          onRetry={() => void logsQuery.refetch()}
+        />
       ) : data && !data.available ? (
         <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-400">
           {data.note ?? 'Runtime logs are unavailable for this app right now.'}
@@ -971,6 +977,10 @@ function MetricsTab({ project }: { project: ProjectDetailType }) {
           description="Azure Monitor didn’t return data for this app. It may be idle (scaled to zero) or metrics aren’t available yet."
           onRetry={() => void metricsQuery.refetch()}
         />
+      ) : metricsQuery.data && !metricsQuery.data.available ? (
+        <Card className="p-6 text-sm text-slate-400">
+          {metricsQuery.data.note ?? 'Metrics are unavailable for this app right now.'}
+        </Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {(metricsQuery.data?.series ?? []).map((s) => (
