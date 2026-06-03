@@ -31,19 +31,30 @@ import type { ActivityEvent, ActivityType } from '@/types/api';
 interface EventMeta {
   label: string;
   icon: LucideIcon;
-  /** Tailwind text-color class for the icon. */
+  /** Tailwind classes for the circular icon badge (bg + border + text), colored by event type. */
   tone: string;
 }
 
+// Per-type semantic badge colors. emerald = success/deploy, rose = failure/destructive,
+// amber = rollback (in-progress-ish), sky = queued, accent = project creation, neutral = cancelled.
+const TONE = {
+  emerald: 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300',
+  rose: 'bg-rose-500/10 border-rose-500/30 text-rose-300',
+  amber: 'bg-amber-500/10 border-amber-500/30 text-amber-300',
+  sky: 'bg-sky-500/10 border-sky-500/30 text-sky-300',
+  accent: 'bg-accent-400/10 border-accent-400/30 text-accent-300',
+  neutral: 'bg-slate-800/80 border-slate-700 text-slate-400',
+} as const;
+
 const EVENT_META: Record<ActivityType, EventMeta> = {
-  'build.queued': { label: 'Build queued', icon: Clock, tone: 'text-sky-400' },
-  'build.succeeded': { label: 'Build succeeded', icon: CheckCircle2, tone: 'text-emerald-400' },
-  'build.failed': { label: 'Build failed', icon: XCircle, tone: 'text-rose-400' },
-  'build.cancelled': { label: 'Build cancelled', icon: Ban, tone: 'text-slate-400' },
-  'deployment.created': { label: 'Deployed', icon: Rocket, tone: 'text-indigo-400' },
-  'deployment.rollback': { label: 'Rolled back', icon: RotateCcw, tone: 'text-amber-400' },
-  'project.created': { label: 'Project created', icon: FolderPlus, tone: 'text-emerald-400' },
-  'project.deleted': { label: 'Project deleted', icon: Trash2, tone: 'text-rose-400' },
+  'build.queued': { label: 'Build queued', icon: Clock, tone: TONE.sky },
+  'build.succeeded': { label: 'Build succeeded', icon: CheckCircle2, tone: TONE.emerald },
+  'build.failed': { label: 'Build failed', icon: XCircle, tone: TONE.rose },
+  'build.cancelled': { label: 'Build cancelled', icon: Ban, tone: TONE.neutral },
+  'deployment.created': { label: 'Deployed', icon: Rocket, tone: TONE.emerald },
+  'deployment.rollback': { label: 'Rolled back', icon: RotateCcw, tone: TONE.amber },
+  'project.created': { label: 'Project created', icon: FolderPlus, tone: TONE.accent },
+  'project.deleted': { label: 'Project deleted', icon: Trash2, tone: TONE.rose },
 };
 
 /** All known event types, used to render one filter chip per type. */
@@ -151,11 +162,11 @@ function Chip({ active, onClick, children }: ChipProps) {
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        'rounded-full border px-3 py-1 text-xs transition-colors',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400',
+        'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400',
         active
-          ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-200'
-          : 'border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200'
+          ? 'border-accent-400/40 bg-accent-400/10 text-accent-300'
+          : 'border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-600'
       )}
     >
       {children}
@@ -171,11 +182,12 @@ function EventRow({ event }: { event: ActivityEvent }) {
   const href = eventHref(event);
 
   return (
-    <li className="relative flex items-start gap-3 py-3">
+    <li className="group relative flex items-start gap-3 rounded-lg px-2 py-3">
       <span
         aria-hidden
         className={cn(
-          'relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-800/80',
+          'relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border',
+          'ring-4 ring-slate-900',
           '[&_svg]:h-4 [&_svg]:w-4',
           meta.tone
         )}
@@ -226,8 +238,8 @@ function EventRow({ event }: { event: ActivityEvent }) {
           aria-label={`${meta.label}${event.projectName ? ` in ${event.projectName}` : ''}`}
           className={cn(
             'absolute inset-0 z-0 rounded-lg',
-            'transition-colors hover:bg-slate-800/30',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400'
+            'transition-colors hover:bg-slate-800/40',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400'
           )}
         />
       )}
@@ -278,7 +290,7 @@ export default function Activity() {
   return (
     <div className="flex flex-col gap-6">
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold text-slate-100">Activity</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-50">Activity</h1>
         <p className="text-sm text-slate-400">
           A chronological feed of build, deployment, and project events across your projects.
         </p>
@@ -345,15 +357,23 @@ export default function Activity() {
       ) : (
         <div className="flex flex-col gap-6">
           {groups.map((group) => (
-            <section key={group.key} className="flex flex-col gap-2">
+            <section key={group.key} className="flex flex-col gap-3">
               <h2 className="text-xs font-medium uppercase tracking-wide text-slate-500">
                 {group.label}
               </h2>
-              <ul className="ml-4 border-l border-slate-800 pl-4">
-                {group.events.map((event) => (
-                  <EventRow key={event.id} event={event} />
-                ))}
-              </ul>
+              <Card className="overflow-hidden p-2">
+                <ul className="relative">
+                  {/* Vertical timeline rail, centered under the icon badges (badge
+                      center = px-2 + 16px = left-6); short of the first/last badge. */}
+                  <span
+                    aria-hidden
+                    className="absolute bottom-6 left-6 top-6 w-px bg-slate-800"
+                  />
+                  {group.events.map((event) => (
+                    <EventRow key={event.id} event={event} />
+                  ))}
+                </ul>
+              </Card>
             </section>
           ))}
 

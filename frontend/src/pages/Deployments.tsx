@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Rocket } from 'lucide-react';
+import { Rocket, RotateCcw, ScrollText } from 'lucide-react';
 import {
   Avatar,
   Badge,
@@ -34,7 +34,7 @@ interface ChipProps {
   children: ReactNode;
 }
 
-/** A toggleable filter pill. Indigo accent when active, muted otherwise. */
+/** A toggleable filter pill. Accent tint when active, muted otherwise. */
 function Chip({ active, onClick, children }: ChipProps) {
   return (
     <button
@@ -43,10 +43,10 @@ function Chip({ active, onClick, children }: ChipProps) {
       aria-pressed={active}
       className={cn(
         'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400',
         active
-          ? 'bg-indigo-500/15 text-indigo-200 border-indigo-500/40'
-          : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-slate-200',
+          ? 'border-accent-400/40 bg-accent-400/10 text-accent-300'
+          : 'border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-600',
       )}
     >
       {children}
@@ -114,7 +114,7 @@ export default function Deployments() {
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold text-slate-100">Deployments</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-50">Deployments</h1>
         <p className="text-sm text-slate-400">
           Every deployment across your projects, newest first.
         </p>
@@ -271,8 +271,8 @@ function DeploymentsTable({ deployments, onRollback }: DeploymentsTableProps) {
               <Link
                 to={`/projects/${d.project.id}`}
                 className={cn(
-                  'font-medium text-slate-200 hover:text-indigo-300',
-                  'rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400',
+                  'font-medium text-slate-100 hover:text-accent-300 transition-colors',
+                  'rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400',
                 )}
               >
                 {d.project.name}
@@ -321,16 +321,19 @@ function DeploymentsTable({ deployments, onRollback }: DeploymentsTableProps) {
                 <Link
                   to={`/projects/${d.project.id}/builds/${d.build.id}`}
                   className={cn(
-                    'text-xs font-medium text-indigo-300 hover:text-indigo-200',
-                    'rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400',
+                    'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium',
+                    'text-slate-400 hover:bg-slate-800/60 hover:text-slate-100 transition-colors',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400',
                   )}
                 >
+                  <ScrollText size={13} aria-hidden />
                   View logs
                 </Link>
                 {!d.active && (
                   <Button
-                    variant="secondary"
+                    variant="ghost"
                     size="sm"
+                    leadingIcon={<RotateCcw size={13} />}
                     onClick={() => onRollback(d)}
                   >
                     Rollback

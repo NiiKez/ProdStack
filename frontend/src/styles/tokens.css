@@ -1,11 +1,12 @@
 :root {
-  /* surfaces */
-  --surface-0: #020617;  /* slate-950 */
-  --surface-1: #0f172a;  /* slate-900 */
-  --surface-2: #1e293b;  /* slate-800 */
-  /* accent */
-  --accent: #6366f1;     /* indigo-500 */
-  --accent-strong: #4f46e5;
+  /* surfaces — neutral near-black (was slate/blue-tinted) */
+  --surface-0: #0c0c0c;  /* page background */
+  --surface-1: #161616;  /* cards */
+  --surface-2: #1f1f1f;  /* raised / inputs */
+  /* accent — lime / chartreuse (was indigo) */
+  --accent: #cbf94e;
+  --accent-strong: #b6ec2f;
+  --accent-ink: #0c0c0c;     /* text/icon color that sits ON the accent */
   /* status */
   --status-ready: #10b981;    /* emerald-500 */
   --status-building: #f59e0b; /* amber-500 */

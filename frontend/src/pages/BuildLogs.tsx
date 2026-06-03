@@ -114,11 +114,11 @@ export default function BuildLogs() {
                   href={`https://github.com/${build.project.githubRepoFullName}`}
                   target="_blank"
                   rel="noreferrer noopener"
-                  className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200"
+                  className="inline-flex w-fit items-center gap-1.5 rounded-md font-mono text-xs text-slate-400 transition-colors hover:text-slate-200"
                 >
-                  <Github size={13} aria-hidden />
+                  <Github size={13} aria-hidden className="shrink-0" />
                   {build.project.githubRepoFullName}
-                  <ExternalLink size={11} aria-hidden />
+                  <ExternalLink size={11} aria-hidden className="shrink-0 opacity-70" />
                 </a>
               </>
             ) : (
@@ -150,8 +150,9 @@ export default function BuildLogs() {
         <StageStepper status={normalized} />
 
         {normalized === 'failed' && build?.errorMessage && (
-          <div className="rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-sm text-rose-300">
-            {build.errorMessage}
+          <div className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-sm text-rose-300">
+            <XCircle size={15} aria-hidden className="mt-0.5 shrink-0" />
+            <span className="font-mono text-xs leading-relaxed">{build.errorMessage}</span>
           </div>
         )}
 
@@ -160,10 +161,11 @@ export default function BuildLogs() {
             href={build.project.liveUrl}
             target="_blank"
             rel="noreferrer noopener"
-            className="inline-flex w-fit items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 font-mono text-xs text-emerald-300 hover:bg-emerald-500/10"
+            className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 font-mono text-xs text-emerald-300 transition-colors hover:bg-emerald-500/10"
           >
-            <ExternalLink size={12} aria-hidden />
-            {build.project.liveUrl}
+            <CheckCircle2 size={13} aria-hidden className="shrink-0" />
+            <span className="truncate">{build.project.liveUrl}</span>
+            <ExternalLink size={12} aria-hidden className="shrink-0 opacity-70" />
           </a>
         )}
       </Card>
@@ -190,12 +192,16 @@ function BackLink({ projectId }: { projectId: string | undefined }) {
     <Link
       to={projectId ? `/projects/${projectId}?tab=builds` : '/dashboard'}
       className={cn(
-        'inline-flex w-fit items-center gap-1.5 text-sm text-slate-400',
-        'hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2',
-        'focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 rounded-md',
+        'group inline-flex w-fit items-center gap-1.5 rounded-md text-sm text-slate-400',
+        'transition-colors hover:text-slate-200',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
       )}
     >
-      <ArrowLeft size={14} aria-hidden />
+      <ArrowLeft
+        size={14}
+        aria-hidden
+        className="transition-transform group-hover:-translate-x-0.5"
+      />
       Back to project
     </Link>
   );
@@ -207,27 +213,32 @@ function StageStepper({ status }: { status: BuildStatus }) {
   const current = STAGE_INDEX[status] ?? 0;
 
   return (
-    <ol className="flex flex-wrap items-center gap-1.5">
+    <ol className="flex flex-wrap items-center gap-y-2">
       {STAGES.map((stage, i) => {
         const reached = current >= i;
         const isCurrent = current === i && !failed && status !== 'ready';
         // A failed/cancelled build marks the stage it died on as the error node.
         const erroredHere = (failed || cancelled) && i === current;
+        // A completed (passed) stage is everything reached that isn't the
+        // currently-running or errored node — these get the lime "done" tint.
+        const done = reached && !isCurrent && !erroredHere;
         return (
-          <li key={stage.key} className="flex items-center gap-1.5">
+          <li key={stage.key} className="flex items-center">
             <span
               className={cn(
-                'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium',
+                'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
                 erroredHere
                   ? 'border-rose-500/40 bg-rose-500/10 text-rose-300'
-                  : reached
-                    ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
-                    : 'border-slate-700 bg-slate-900/60 text-slate-500',
+                  : isCurrent
+                    ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                    : done
+                      ? 'border-accent-400/40 bg-accent-400/10 text-accent-300'
+                      : 'border-slate-800 bg-slate-900/60 text-slate-500',
               )}
             >
               {erroredHere ? (
                 <XCircle size={12} aria-hidden />
-              ) : status === 'ready' || (reached && !isCurrent) ? (
+              ) : done ? (
                 <CheckCircle2 size={12} aria-hidden />
               ) : isCurrent ? (
                 <Spinner size="sm" />
@@ -238,7 +249,10 @@ function StageStepper({ status }: { status: BuildStatus }) {
             </span>
             {i < STAGES.length - 1 && (
               <span
-                className={cn('h-px w-4', reached ? 'bg-emerald-500/40' : 'bg-slate-700')}
+                className={cn(
+                  'mx-1 h-px w-5 shrink-0 transition-colors sm:w-6',
+                  done ? 'bg-accent-400/40' : 'bg-slate-800',
+                )}
                 aria-hidden
               />
             )}
@@ -250,11 +264,11 @@ function StageStepper({ status }: { status: BuildStatus }) {
 }
 
 const LEVEL_STYLES: Record<LogLevel, string> = {
-  INFO: 'text-slate-300',
-  STEP: 'text-indigo-300',
-  WARN: 'text-amber-300',
-  ERROR: 'text-rose-300',
-  SUCCESS: 'text-emerald-300',
+  INFO: 'text-slate-400',
+  STEP: 'text-accent-400 font-medium',
+  WARN: 'text-amber-400',
+  ERROR: 'text-rose-400',
+  SUCCESS: 'text-emerald-400',
 };
 
 interface LogViewportProps {
@@ -294,10 +308,17 @@ function LogViewport({ lines, phase }: LogViewportProps) {
   }, [phase]);
 
   return (
-    <Card className="flex flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2">
-        <h2 className="text-sm font-semibold text-slate-200">Build logs</h2>
-        <span className={cn('inline-flex items-center gap-1.5 text-xs', indicator.cls)}>
+    <div className="flex flex-col overflow-hidden rounded-xl border border-slate-800 bg-black/40 shadow-sm">
+      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/60 px-4 py-2.5">
+        <div className="flex items-center gap-2.5">
+          <span className="flex items-center gap-1.5" aria-hidden>
+            <span className="h-2.5 w-2.5 rounded-full bg-slate-700" />
+            <span className="h-2.5 w-2.5 rounded-full bg-slate-700" />
+            <span className="h-2.5 w-2.5 rounded-full bg-slate-700" />
+          </span>
+          <h2 className="text-sm font-semibold text-slate-100">Build logs</h2>
+        </div>
+        <span className={cn('inline-flex items-center gap-1.5 text-xs font-medium', indicator.cls)}>
           <span className={cn('h-1.5 w-1.5 rounded-full', indicator.dot)} aria-hidden />
           {indicator.label}
         </span>
@@ -305,20 +326,26 @@ function LogViewport({ lines, phase }: LogViewportProps) {
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="h-[60vh] overflow-auto bg-slate-950/60 p-4 font-mono text-xs leading-relaxed"
+        className="h-[60vh] overflow-auto bg-slate-950 p-4 font-mono text-xs leading-relaxed"
       >
         {lines.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-slate-500">
+          <div className="flex h-full items-center justify-center text-slate-600">
             {phase === 'connecting' ? 'Waiting for output…' : 'No log output.'}
           </div>
         ) : (
           <ol className="flex flex-col">
             {lines.map((line) => (
-              <li key={line.seq} className="flex gap-3 whitespace-pre-wrap break-all">
-                <span className="select-none text-right text-slate-600 tabular-nums" style={{ minWidth: '3ch' }}>
+              <li
+                key={line.seq}
+                className="flex gap-3 whitespace-pre-wrap break-all rounded px-1 -mx-1 hover:bg-slate-900/60"
+              >
+                <span
+                  className="select-none text-right text-slate-700 tabular-nums"
+                  style={{ minWidth: '3ch' }}
+                >
                   {line.seq}
                 </span>
-                <span className={LEVEL_STYLES[line.level] ?? 'text-slate-300'}>
+                <span className={LEVEL_STYLES[line.level] ?? 'text-slate-400'}>
                   {line.message}
                 </span>
               </li>
@@ -326,6 +353,6 @@ function LogViewport({ lines, phase }: LogViewportProps) {
           </ol>
         )}
       </div>
-    </Card>
+    </div>
   );
 }

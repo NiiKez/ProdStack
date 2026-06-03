@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import {
+  ArrowRight,
   Cloud,
   Github,
   Mail,
@@ -21,7 +22,7 @@ export default function Integrations() {
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold text-slate-100">Integrations</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-50">Integrations</h1>
         <p className="text-sm text-slate-400">
           Services connected to your ProdStack account.
         </p>
@@ -86,6 +87,8 @@ interface IntegrationShellProps {
   children: React.ReactNode;
   /** When true, dim the card (no active connection / coming soon). */
   muted?: boolean;
+  /** When true, accent the icon tile (active / connected service). */
+  accent?: boolean;
   interactive?: boolean;
 }
 
@@ -95,6 +98,7 @@ function IntegrationShell({
   badge,
   children,
   muted = false,
+  accent = false,
   interactive = false,
 }: IntegrationShellProps) {
   return (
@@ -106,7 +110,12 @@ function IntegrationShell({
         <div className="flex items-center gap-3">
           <span
             aria-hidden
-            className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-800/80 text-slate-300 [&_svg]:h-5 [&_svg]:w-5"
+            className={cn(
+              'flex h-9 w-9 items-center justify-center rounded-lg border [&_svg]:h-5 [&_svg]:w-5',
+              accent
+                ? 'border-accent-400/30 bg-accent-400/10 text-accent-300'
+                : 'border-slate-700/60 bg-slate-800/80 text-slate-300',
+            )}
           >
             <Icon />
           </span>
@@ -130,16 +139,17 @@ function GithubIntegration({ account }: { account: AccountInfo }) {
       icon={Github}
       name="GitHub"
       interactive
+      accent={connected}
       badge={
         <Badge variant={connected ? 'success' : 'neutral'}>
           {connected ? 'Connected' : 'Disconnected'}
         </Badge>
       }
     >
-      <p className="text-sm text-slate-400">
+      <p className="text-sm text-slate-300">
         Source of your repos, push webhooks, and OAuth sign-in.
       </p>
-      <p className="truncate text-xs text-slate-500">
+      <p className="truncate font-mono text-xs text-slate-500">
         {scopes.length > 0 ? `Scopes: ${scopes.join(', ')}` : 'No scopes granted'}
       </p>
       <ManageLink />
@@ -157,17 +167,18 @@ function AzureIntegration({ account }: { account: AccountInfo }) {
       icon={Cloud}
       name="Azure"
       interactive
+      accent={managed}
       badge={
         <Badge variant={managed ? 'success' : 'neutral'}>
           {managed ? 'Connected' : 'Not configured'}
         </Badge>
       }
     >
-      <p className="text-sm text-slate-400">
+      <p className="text-sm text-slate-300">
         Container Apps host your deployments via a managed identity — no secrets
         stored.
       </p>
-      <p className="truncate text-xs text-slate-500">Region: {account.azure.region}</p>
+      <p className="truncate font-mono text-xs text-slate-500">Region: {account.azure.region}</p>
       <ManageLink />
     </IntegrationShell>
   );
@@ -178,11 +189,12 @@ function ManageLink() {
     <Link
       to="/settings"
       className={cn(
-        'mt-auto inline-flex w-fit items-center text-xs font-medium text-indigo-300 hover:text-indigo-200',
-        'rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400',
+        'mt-auto inline-flex w-fit items-center gap-1 text-xs font-medium text-accent-400 hover:text-accent-300',
+        'rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400',
       )}
     >
       Manage
+      <ArrowRight size={12} aria-hidden />
     </Link>
   );
 }
@@ -203,7 +215,7 @@ function ComingSoonIntegration({ icon, name, description }: ComingSoonProps) {
       muted
       badge={<Badge variant="neutral">Coming soon</Badge>}
     >
-      <p className="text-sm text-slate-400">{description}</p>
+      <p className="text-sm text-slate-300">{description}</p>
     </IntegrationShell>
   );
 }
