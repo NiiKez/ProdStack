@@ -257,6 +257,71 @@ describe('env vars surfaced as Container App secrets', () => {
   });
 });
 
+describe('ingress targetPort on update (zero-Dockerfile auto-build)', () => {
+  it('re-points ingress to the requested port, preserving the other ingress fields', async () => {
+    mocks.get.mockResolvedValue({
+      location: 'francecentral',
+      environmentId: process.env.CONTAINER_APPS_ENV_ID,
+      configuration: {
+        ingress: {
+          external: true,
+          targetPort: 80,
+          transport: 'auto',
+          fqdn: 'demo.example.azurecontainerapps.io',
+        },
+        secrets: [],
+      },
+      template: { containers: [{ name: 'demo', image: 'old' }], scale: {} },
+    });
+    mocks.beginCreateOrUpdateAndWait.mockResolvedValue({
+      configuration: { ingress: { fqdn: 'demo.example.azurecontainerapps.io' } },
+      latestRevisionName: 'demo--rev9',
+    });
+
+    const { updateContainerApp } = await import('./containerApps.js');
+    await updateContainerApp({ name: 'demo', image: 'new:tag', targetPort: 3000 });
+
+    const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    // Only targetPort changes; external/transport/fqdn are preserved.
+    expect(envelope.configuration.ingress).toEqual({
+      external: true,
+      targetPort: 3000,
+      transport: 'auto',
+      fqdn: 'demo.example.azurecontainerapps.io',
+    });
+    expect(envelope.template.containers[0].image).toBe('new:tag');
+  });
+
+  it('does not blank a plain-value secret on a port-only change', async () => {
+    mocks.get.mockResolvedValue({
+      location: 'francecentral',
+      environmentId: process.env.CONTAINER_APPS_ENV_ID,
+      // get() returns the secret name WITHOUT its value.
+      configuration: {
+        ingress: { external: true, targetPort: 80 },
+        secrets: [{ name: 'some-literal' }],
+      },
+      template: { containers: [{ name: 'demo', image: 'old' }], scale: {} },
+    });
+    mocks.listSecrets.mockResolvedValue({ value: [{ name: 'some-literal', value: 'keepme' }] });
+    mocks.beginCreateOrUpdateAndWait.mockResolvedValue({
+      configuration: { ingress: {} },
+      latestRevisionName: 'r',
+    });
+
+    const { updateContainerApp } = await import('./containerApps.js');
+    // No envVars, no image — purely a port change. The configuration block is
+    // still re-PUT, so secrets must round-trip via listSecrets, not get().
+    await updateContainerApp({ name: 'demo', targetPort: 8080 });
+
+    expect(mocks.listSecrets).toHaveBeenCalledTimes(1);
+    const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    expect(envelope.configuration.ingress.targetPort).toBe(8080);
+    const secrets = envelope.configuration.secrets as Array<{ name: string; value?: string }>;
+    expect(secrets).toContainEqual({ name: 'some-literal', value: 'keepme' });
+  });
+});
+
 describe('ACR pull auth (private-registry credentials on user apps)', () => {
   // env is parsed once per module load; `vi.resetModules()` in the top-level
   // beforeEach lets us re-import with these set so `acrPullAuth()` activates.

@@ -60,6 +60,12 @@ export interface UpdateContainerAppOpts {
   name: string;
   image?: string;
   envVars?: EnvVarInput[];
+  /**
+   * When set, re-point the ingress at this port. Used by zero-Dockerfile builds
+   * to align the ingress with the framework's listen port (e.g. 3000 for a
+   * Node server). Omitted on plain rolls so the existing port is preserved.
+   */
+  targetPort?: number;
 }
 
 // --- Constants -------------------------------------------------------------
@@ -207,6 +213,7 @@ async function stubUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
       name: opts.name,
       image: opts.image,
       envVarKeys: envVarKeys(opts.envVars),
+      targetPort: opts.targetPort,
     },
     'stub: update Container App',
   );
@@ -349,11 +356,13 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
   let mergedSecrets: Secret[] | undefined;
   let mergedRegistries: RegistryCredentials[] | undefined;
   // Rewrite the secrets array when applying env vars OR when repairing the ACR
-  // registry (the pull secret must exist for `passwordSecretRef` to resolve).
-  // Either way we must read live secret *values* via `listSecrets` first —
-  // `get()` returns names with `value: undefined`, so any preserved plain-value
-  // secret would otherwise round-trip blanked and ARM would reject the PUT.
-  if (secrets !== undefined || registriesNeedRepair) {
+  // registry (the pull secret must exist for `passwordSecretRef` to resolve) OR
+  // when changing the ingress port (any re-PUT of `configuration` re-sends
+  // `secrets`). Either way we must read live secret *values* via `listSecrets`
+  // first — `get()` returns names with `value: undefined`, so any preserved
+  // plain-value secret would otherwise round-trip blanked and ARM would reject
+  // the PUT. Changing the port therefore goes through the same round-trip.
+  if (secrets !== undefined || registriesNeedRepair || opts.targetPort !== undefined) {
     const live = await client.containerApps.listSecrets(resourceGroup, opts.name);
     const liveSecrets = (live.value ?? []).filter(
       (s): s is Secret => typeof s.name === 'string',
@@ -373,12 +382,17 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
 
   const merged: ContainerApp = {
     ...existing,
-    ...(mergedSecrets !== undefined || mergedRegistries !== undefined
+    ...(mergedSecrets !== undefined || mergedRegistries !== undefined || opts.targetPort !== undefined
       ? {
           configuration: {
             ...existing.configuration,
             ...(mergedSecrets !== undefined ? { secrets: mergedSecrets } : {}),
             ...(mergedRegistries !== undefined ? { registries: mergedRegistries } : {}),
+            // Re-point ingress at the requested port, preserving everything else
+            // about the existing ingress (external flag, transport, fqdn).
+            ...(opts.targetPort !== undefined
+              ? { ingress: { ...existing.configuration?.ingress, targetPort: opts.targetPort } }
+              : {}),
           },
         }
       : {}),
