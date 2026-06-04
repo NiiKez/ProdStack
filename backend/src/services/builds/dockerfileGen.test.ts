@@ -164,6 +164,49 @@ describe('detectFramework — static + no match', () => {
   });
 });
 
+describe('detectFramework — build-time-public env vars', () => {
+  it('declares NEXT_PUBLIC_* as ARG+ENV before the Next.js build step', () => {
+    const d = detectFramework(
+      signals({ rootEntries: ['package.json'], packageJson: { dependencies: { next: '14' } } }),
+      { buildArgKeys: ['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY'] },
+    );
+    const df = d?.dockerfile ?? '';
+    expect(df).toContain('ARG NEXT_PUBLIC_SUPABASE_URL');
+    expect(df).toContain('ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL');
+    expect(df).toContain('ARG NEXT_PUBLIC_SUPABASE_ANON_KEY');
+    // The bundler only inlines vars set before the build runs.
+    expect(df.indexOf('ARG NEXT_PUBLIC_SUPABASE_URL')).toBeLessThan(df.indexOf('RUN npm run build'));
+  });
+
+  it('declares ARGs in the Vite build stage (before npm run build)', () => {
+    const d = detectFramework(
+      signals({ rootEntries: ['package.json'], packageJson: { devDependencies: { vite: '5' } } }),
+      { buildArgKeys: ['VITE_API_URL'] },
+    );
+    const df = d?.dockerfile ?? '';
+    expect(df).toContain('ARG VITE_API_URL');
+    expect(df).toContain('ENV VITE_API_URL=$VITE_API_URL');
+    expect(df.indexOf('ARG VITE_API_URL')).toBeLessThan(df.indexOf('RUN npm run build'));
+    // Still kaniko-safe with ARGs added.
+    expect(df).not.toContain('--mount=');
+    expect(df).not.toContain('<<');
+  });
+
+  it('emits no ARG lines when there are no build-time-public vars', () => {
+    const d = detectFramework(
+      signals({ rootEntries: ['package.json'], packageJson: { dependencies: { next: '14' } } }),
+    );
+    expect(d?.dockerfile).not.toContain('ARG ');
+  });
+
+  it('ignores buildArgKeys for non-Node frameworks (no JS bundler)', () => {
+    const go = detectFramework(signals({ rootEntries: ['go.mod'] }), {
+      buildArgKeys: ['NEXT_PUBLIC_X'],
+    });
+    expect(go?.dockerfile).not.toContain('ARG NEXT_PUBLIC_X');
+  });
+});
+
 describe('generated Dockerfiles are kaniko-safe (classic syntax only)', () => {
   // Kaniko is archived and rejects BuildKit-only syntax. Every recipe must avoid
   // cache/secret/bind mounts, heredocs, and the syntax frontend directive.

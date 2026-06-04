@@ -32,6 +32,7 @@ import { decrypt } from '../../lib/crypto.js';
 import { logger } from '../../lib/logger.js';
 import { updateContainerApp } from '../azure/index.js';
 import { loadDecryptedEnvVars } from '../projectEnv.js';
+import { selectBuildArgs } from './buildArgs.js';
 import { runKaniko } from './kaniko.js';
 import { resolveDockerfile, type ResolvedDockerfile } from './resolveDockerfile.js';
 
@@ -268,11 +269,28 @@ async function runRealBuild(
     },
   });
 
+  // Build-time-public env vars (`NEXT_PUBLIC_*`, `VITE_*`, …) are inlined into
+  // the client bundle by web frameworks at build time, so they must reach the
+  // build as `--build-arg`s AND be declared as `ARG`s in a generated Dockerfile.
+  // Everything else stays runtime-only (injected as Container App secrets at
+  // deploy). We log only the names — these values are public by design.
+  const buildArgs = selectBuildArgs(await loadDecryptedEnvVars(build.projectId));
+  if (buildArgs.length > 0) {
+    await ctx.logs.write(
+      'STEP',
+      `exposing ${buildArgs.length} public build var(s) to the build: ${buildArgs
+        .map((a) => a.name)
+        .join(', ')}`,
+    );
+  }
+
   // Pick the Dockerfile: the repo's own if present, otherwise detect the
   // framework and synthesize one (zero-Dockerfile auto-build). Throws a
   // user-facing error — surfaced as the FAILED build's message — when the repo
   // has neither a Dockerfile nor a recognizable framework.
-  const resolved = await resolveDockerfile(ctx.repoDir, ctx.logs);
+  const resolved = await resolveDockerfile(ctx.repoDir, ctx.logs, {
+    buildArgKeys: buildArgs.map((a) => a.name),
+  });
 
   // ACR repository name = container app name (lowercase, hyphens). Image
   // path = `${acr}.azurecr.io/${appName}:${sha}` — keeps tags grouped per
@@ -290,6 +308,7 @@ async function runRealBuild(
     authDir: ctx.authDir,
     dockerfile: resolved.dockerfilePath,
     destinations: [shaTag, latestTag],
+    buildArgs,
     timeoutMs: env.BUILD_TIMEOUT_MS,
     signal,
     onLine: (line, stream) => {

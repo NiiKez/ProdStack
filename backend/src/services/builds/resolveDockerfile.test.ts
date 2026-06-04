@@ -67,4 +67,27 @@ describe('resolveDockerfile', () => {
       /could not be auto-detected/,
     );
   });
+
+  it('declares build-time-public keys as ARGs in the generated Dockerfile', async () => {
+    await writeFile(
+      path.join(repoDir, 'package.json'),
+      JSON.stringify({ dependencies: { next: '14' } }),
+    );
+    const res = await resolveDockerfile(repoDir, logs, {
+      buildArgKeys: ['NEXT_PUBLIC_API_URL'],
+    });
+    expect(res.generated).toBe(true);
+    const written = await readFile(res.dockerfilePath, 'utf8');
+    expect(written).toContain('ARG NEXT_PUBLIC_API_URL');
+    expect(written).toContain('ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL');
+  });
+
+  it('never rewrites a user Dockerfile, even when buildArgKeys are given', async () => {
+    await writeFile(path.join(repoDir, 'Dockerfile'), 'FROM scratch\n');
+    const res = await resolveDockerfile(repoDir, logs, { buildArgKeys: ['NEXT_PUBLIC_X'] });
+    expect(res.generated).toBe(false);
+    expect(res.dockerfilePath).toBe(path.join(repoDir, 'Dockerfile'));
+    const written = await readFile(res.dockerfilePath, 'utf8');
+    expect(written).toBe('FROM scratch\n');
+  });
 });

@@ -98,6 +98,15 @@ export interface ResolveLogger {
   write(level: 'STEP' | 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS', message: string): Promise<void>;
 }
 
+export interface ResolveOptions {
+  /**
+   * Build-time-public env var keys (`NEXT_PUBLIC_*`, `VITE_*`, …) to declare as
+   * `ARG`s in a generated Dockerfile so the framework's bundler inlines them.
+   * Ignored when the repo ships its own Dockerfile (we never rewrite it).
+   */
+  buildArgKeys?: string[];
+}
+
 /**
  * Resolve the Dockerfile for a cloned repo at `repoDir`. Logs progress via the
  * build's log sink. Throws a user-facing Error when no Dockerfile exists and the
@@ -106,6 +115,7 @@ export interface ResolveLogger {
 export async function resolveDockerfile(
   repoDir: string,
   logs: ResolveLogger,
+  opts: ResolveOptions = {},
 ): Promise<ResolvedDockerfile> {
   const userDockerfile = path.join(repoDir, 'Dockerfile');
   if (await fileExists(userDockerfile)) {
@@ -115,7 +125,7 @@ export async function resolveDockerfile(
 
   await logs.write('STEP', 'no Dockerfile found — detecting framework');
   const signals = await gatherSignals(repoDir);
-  const detection = detectFramework(signals);
+  const detection = detectFramework(signals, { buildArgKeys: opts.buildArgKeys });
 
   if (!detection) {
     throw new Error(
