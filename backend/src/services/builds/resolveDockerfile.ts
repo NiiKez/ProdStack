@@ -60,6 +60,33 @@ async function readTextIfPresent(p: string): Promise<string | undefined> {
 }
 
 /**
+ * Parse the listen port from a repo-supplied Dockerfile's `EXPOSE` instruction
+ * so ingress can be pointed at it — Docker and kaniko both treat EXPOSE as the
+ * declared port, and we mirror that for the Container App's ingress targetPort.
+ * Without this, a BYO-Dockerfile app that listens on anything other than 80
+ * fails its ACA startup probe and the placeholder revision keeps serving (the
+ * "Hello World" incident). Handles `EXPOSE 3000`, `EXPOSE 3000/tcp`, and
+ * multiple ports/lines (first valid numeric wins). Returns null when there's no
+ * EXPOSE or it only uses values we can't resolve statically (`$PORT`,
+ * `${PORT}`) — the caller then leaves ingress at its default.
+ */
+export function parseExposedPort(dockerfile: string): number | null {
+  for (const raw of dockerfile.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith('#')) continue;
+    const m = /^EXPOSE\s+(.+)$/i.exec(line);
+    if (m === null) continue;
+    for (const token of m[1].split(/\s+/)) {
+      const portMatch = /^(\d{1,5})(?:\/(?:tcp|udp))?$/i.exec(token);
+      if (portMatch === null) continue; // skip $PORT / ${PORT} / junk
+      const port = Number(portMatch[1]);
+      if (port >= 1 && port <= 65535) return port;
+    }
+  }
+  return null;
+}
+
+/**
  * Find a Django wsgi module by scanning one level deep for `<pkg>/wsgi.py`.
  * Returns e.g. `myproject.wsgi`, or undefined if none found.
  */
@@ -119,8 +146,25 @@ export async function resolveDockerfile(
 ): Promise<ResolvedDockerfile> {
   const userDockerfile = path.join(repoDir, 'Dockerfile');
   if (await fileExists(userDockerfile)) {
-    await logs.write('STEP', 'using Dockerfile from repository');
-    return { dockerfilePath: userDockerfile, port: null, framework: null, generated: false };
+    // User Dockerfile always wins — we never rewrite it. But we DO read its
+    // EXPOSE so ingress can be pointed at the app's real port; otherwise an app
+    // listening on anything but 80 fails the ACA startup probe and the
+    // placeholder revision keeps serving. No parseable EXPOSE → ingress is left
+    // at its default (the caller treats a null port as "don't touch ingress").
+    const port = parseExposedPort((await readTextIfPresent(userDockerfile)) ?? '');
+    if (port !== null) {
+      await logs.write(
+        'STEP',
+        `using Dockerfile from repository (ingress → port ${port} from EXPOSE)`,
+      );
+    } else {
+      await logs.write(
+        'WARN',
+        'using Dockerfile from repository; no EXPOSE port found — leaving ingress at its ' +
+          'default (80). Add an `EXPOSE <port>` line if your app listens elsewhere.',
+      );
+    }
+    return { dockerfilePath: userDockerfile, port, framework: null, generated: false };
   }
 
   await logs.write('STEP', 'no Dockerfile found — detecting framework');

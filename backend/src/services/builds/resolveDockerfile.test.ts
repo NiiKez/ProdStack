@@ -4,7 +4,11 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { GENERATED_DOCKERFILE_NAME, resolveDockerfile } from './resolveDockerfile.js';
+import {
+  GENERATED_DOCKERFILE_NAME,
+  parseExposedPort,
+  resolveDockerfile,
+} from './resolveDockerfile.js';
 
 let repoDir: string;
 const logs = { write: vi.fn().mockResolvedValue(undefined) };
@@ -26,6 +30,30 @@ describe('resolveDockerfile', () => {
     expect(res.framework).toBeNull();
     expect(res.port).toBeNull();
     expect(res.dockerfilePath).toBe(path.join(repoDir, 'Dockerfile'));
+  });
+
+  it('derives the ingress port from a repo Dockerfile EXPOSE', async () => {
+    await writeFile(
+      path.join(repoDir, 'Dockerfile'),
+      'FROM node:20-alpine\nEXPOSE 3000\nCMD ["node", "server.js"]\n',
+    );
+    const res = await resolveDockerfile(repoDir, logs);
+    expect(res.generated).toBe(false);
+    expect(res.framework).toBeNull();
+    expect(res.port).toBe(3000);
+    expect(res.dockerfilePath).toBe(path.join(repoDir, 'Dockerfile'));
+    // It must NOT rewrite the user's Dockerfile.
+    const written = await readFile(res.dockerfilePath, 'utf8');
+    expect(written).toContain('EXPOSE 3000');
+    expect(logs.write).toHaveBeenCalledWith('STEP', expect.stringContaining('port 3000'));
+  });
+
+  it('warns and leaves ingress at default when a repo Dockerfile has no EXPOSE', async () => {
+    await writeFile(path.join(repoDir, 'Dockerfile'), 'FROM nginx:alpine\n');
+    const res = await resolveDockerfile(repoDir, logs);
+    expect(res.generated).toBe(false);
+    expect(res.port).toBeNull();
+    expect(logs.write).toHaveBeenCalledWith('WARN', expect.stringContaining('no EXPOSE'));
   });
 
   it('generates a Dockerfile for a detected Node app and writes it into the context', async () => {
@@ -89,5 +117,44 @@ describe('resolveDockerfile', () => {
     expect(res.dockerfilePath).toBe(path.join(repoDir, 'Dockerfile'));
     const written = await readFile(res.dockerfilePath, 'utf8');
     expect(written).toBe('FROM scratch\n');
+  });
+});
+
+describe('parseExposedPort', () => {
+  it('parses a bare EXPOSE port', () => {
+    expect(parseExposedPort('FROM x\nEXPOSE 3000\n')).toBe(3000);
+  });
+
+  it('parses EXPOSE with a protocol suffix', () => {
+    expect(parseExposedPort('EXPOSE 8080/tcp\n')).toBe(8080);
+    expect(parseExposedPort('EXPOSE 5000/udp\n')).toBe(5000);
+  });
+
+  it('is case-insensitive on the instruction', () => {
+    expect(parseExposedPort('expose 4321\n')).toBe(4321);
+  });
+
+  it('takes the first valid port when several are exposed', () => {
+    expect(parseExposedPort('EXPOSE 8080 9090\n')).toBe(8080);
+    expect(parseExposedPort('EXPOSE 7000\nEXPOSE 7001\n')).toBe(7000);
+  });
+
+  it('skips unresolvable values and falls back to the next numeric', () => {
+    expect(parseExposedPort('EXPOSE ${PORT}\nEXPOSE 6000\n')).toBe(6000);
+    expect(parseExposedPort('EXPOSE $PORT\n')).toBeNull();
+  });
+
+  it('ignores commented-out EXPOSE lines', () => {
+    expect(parseExposedPort('# EXPOSE 3000\nEXPOSE 8000\n')).toBe(8000);
+    expect(parseExposedPort('# EXPOSE 3000\n')).toBeNull();
+  });
+
+  it('returns null when there is no EXPOSE', () => {
+    expect(parseExposedPort('FROM nginx:alpine\nCMD ["nginx"]\n')).toBeNull();
+  });
+
+  it('rejects out-of-range ports', () => {
+    expect(parseExposedPort('EXPOSE 70000\n')).toBeNull();
+    expect(parseExposedPort('EXPOSE 0\n')).toBeNull();
   });
 });
