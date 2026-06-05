@@ -39,6 +39,14 @@ export interface KanikoOptions {
   authDir: string;
   dockerfile: string;
   destinations: string[];
+  /**
+   * Build-time-public env vars (e.g. `NEXT_PUBLIC_*`) passed to the build as
+   * `--build-arg`. These end up inlined into the image, so ONLY values that are
+   * public by design belong here — never runtime secrets. The generated
+   * Dockerfile declares matching `ARG`s; a user's own Dockerfile must declare
+   * its own (kaniko silently ignores a `--build-arg` with no matching `ARG`).
+   */
+  buildArgs?: Array<{ name: string; value: string }>;
   /** Called once per line of stdout/stderr emitted by kaniko. */
   onLine: (line: string, stream: 'stdout' | 'stderr') => void;
   /** Hard timeout; killed with SIGKILL if exceeded. */
@@ -109,7 +117,17 @@ async function writeDockerConfig(authDir: string): Promise<string> {
   return dir;
 }
 
-function buildCommand(
+/**
+ * Render build-time-public vars as kaniko/docker `--build-arg` flags. One
+ * `--build-arg=NAME=VALUE` token per var (single argv element, so spaces/`=` in
+ * the value are safe — nothing reaches a shell). Identical syntax for the
+ * kaniko binary and the kaniko image, so both invocation modes reuse this.
+ */
+export function buildArgFlags(buildArgs: KanikoOptions['buildArgs'] = []): string[] {
+  return buildArgs.map((a) => `--build-arg=${a.name}=${a.value}`);
+}
+
+export function buildCommand(
   opts: KanikoOptions,
   dockerConfigDir: string,
 ): { command: string; args: string[]; env: NodeJS.ProcessEnv } {
@@ -125,6 +143,7 @@ function buildCommand(
       '--context=dir:///workspace',
       `--dockerfile=${path.posix.join('/workspace', path.relative(opts.contextDir, opts.dockerfile))}`,
       '--single-snapshot',
+      ...buildArgFlags(opts.buildArgs),
       ...opts.destinations.map((d) => `--destination=${d}`),
     ];
     return { command: 'docker', args, env: process.env };
@@ -145,6 +164,7 @@ function buildCommand(
       `--dockerfile=${opts.dockerfile}`,
       `--ignore-path=${env.BUILD_WORK_DIR}`,
       '--single-snapshot',
+      ...buildArgFlags(opts.buildArgs),
       ...opts.destinations.map((d) => `--destination=${d}`),
     ],
     env: { ...process.env, DOCKER_CONFIG: dockerConfigDir },

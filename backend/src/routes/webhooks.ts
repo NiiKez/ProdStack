@@ -13,6 +13,12 @@ const router = Router();
 
 const SIGNATURE_PREFIX = 'sha256=';
 const DELIVERY_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
+// A commit SHA must be lowercase hex, 7–64 chars (short SHA → full SHA-1/SHA-256).
+// This is a security boundary: the value flows into `git fetch`/`git checkout`
+// positionals in runBuild, where a leading-dash string would be parsed as a git
+// option (e.g. `--upload-pack=<cmd>` → arbitrary command execution). Reject
+// anything that isn't a plain SHA before a Build row is ever created.
+const COMMIT_SHA_RE = /^[0-9a-f]{7,64}$/;
 
 interface PushPayload {
   ref?: unknown;
@@ -124,6 +130,21 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
     const commitSha = head.id;
     const commitMessage = head.message;
     const commitAuthor = head.author.name;
+
+    // Security boundary: the commit SHA reaches `git fetch`/`git checkout` as a
+    // positional in the build worker. A non-hex value (e.g.
+    // `--upload-pack=touch /tmp/x`) would be parsed by git as an option →
+    // arbitrary command execution on the builder identity. Reject it here so no
+    // Build row is ever created for a malformed SHA. Acknowledge with 202 so
+    // GitHub treats the (already-signed) delivery as accepted and won't retry.
+    if (!COMMIT_SHA_RE.test(commitSha)) {
+      logger.warn(
+        { projectId: project.id, deliveryId },
+        'webhook push ignored: head_commit.id is not a valid commit sha',
+      );
+      res.status(202).json({ ignored: 'invalid commit sha' });
+      return;
+    }
 
     // Kill switch (degrade mode): this is a real push that would create a Build.
     // Refuse it before writing any WebhookEvent/Build rows so the platform stops

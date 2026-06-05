@@ -5,6 +5,7 @@ import { prisma } from '../db.js';
 import { decrypt } from '../lib/crypto.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
+import { expensiveLimiter } from '../middleware/rateLimit.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 import { detectFramework } from '../services/builds/dockerfileGen.js';
 import {
@@ -37,7 +38,7 @@ function githubUnavailable(message: string): HttpError {
 
 // --- GET /repos (the authenticated user's repos, for the repo picker) ------
 
-router.get('/repos', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/repos', expensiveLimiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = req.user;
     if (user === undefined || typeof user.id !== 'string') {
@@ -95,6 +96,7 @@ router.get('/repos', async (req: Request, res: Response, next: NextFunction) => 
 
 router.post(
   '/detect',
+  expensiveLimiter,
   requireXRequestedWith,
   async (req: Request, res: Response, next: NextFunction) => {
     try {

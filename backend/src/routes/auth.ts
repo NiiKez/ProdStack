@@ -7,6 +7,7 @@ import { env } from '../env.js';
 import { OAUTH_NEXT_COOKIE, OAUTH_STATE_COOKIE, clearOAuthCookies, clearSessionCookie, setOAuthNextCookie, setOAuthStateCookie, setSessionCookie } from '../lib/cookies.js';
 import { encrypt } from '../lib/crypto.js';
 import { signSession } from '../lib/jwt.js';
+import { authLimiter } from '../middleware/rateLimit.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 import { exchangeCodeForToken, fetchGithubProfile } from '../services/github.js';
@@ -33,7 +34,7 @@ const OAUTH_SCOPES = 'repo admin:repo_hook';
 
 const router = Router();
 
-router.get('/github/begin', (req, res) => {
+router.get('/github/begin', authLimiter, (req, res) => {
   const state = randomBytes(16).toString('hex');
   setOAuthStateCookie(res, state);
 
@@ -53,7 +54,7 @@ router.get('/github/begin', (req, res) => {
   res.redirect(302, `${GITHUB_AUTHORIZE_URL}?${params.toString()}`);
 });
 
-router.get('/github/callback', async (req, res, next) => {
+router.get('/github/callback', authLimiter, async (req, res, next) => {
   const code = typeof req.query.code === 'string' ? req.query.code : '';
   const state = typeof req.query.state === 'string' ? req.query.state : '';
   const expectedState = req.signedCookies?.[OAUTH_STATE_COOKIE];

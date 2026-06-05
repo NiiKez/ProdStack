@@ -151,6 +151,41 @@ const EnvSchema = z.object({
   KILL_SWITCH: boolFromString(false),
 });
 
+// --- Cross-field safety guards ---------------------------------------------
+
+/**
+ * Fail closed on the dev-backdoor combination.
+ *
+ * The local-only dev-login backdoor (`routes/devAuth.ts`) mints a full session
+ * with no auth and is mounted only when `NODE_ENV === 'development'`. Real
+ * deployments talk to live Azure with `AZURE_STUB=false`. `NODE_ENV` defaults
+ * to `'development'` when unset (see the schema above), so a deployment that
+ * loses/omits `NODE_ENV` would silently "fail open" into dev mode and expose
+ * the backdoor. Refuse to boot on exactly that dangerous combination — the
+ * backdoor's trigger (`NODE_ENV === 'development'`) together with real Azure
+ * (`AZURE_STUB === false`) — converting a silent fail-open into a loud
+ * crash-loop. `NODE_ENV='test'` against real Azure is allowed: the backdoor
+ * never mounts under `test`, and the suite legitimately exercises the
+ * real-Azure code paths (logs/metrics/containerApps) with `AZURE_STUB=false`.
+ *
+ * Exported + pure (throws instead of `process.exit`) so it can be unit-tested
+ * without spawning a subprocess; the module-load caller below catches the throw
+ * and exits, matching the existing exit-on-misconfig style.
+ */
+export function assertSafeEnvCombination(e: {
+  NODE_ENV: string;
+  AZURE_STUB: boolean;
+}): void {
+  if (e.NODE_ENV === 'development' && e.AZURE_STUB === false) {
+    throw new Error(
+      'Unsafe env combination: NODE_ENV=development with AZURE_STUB=false (real Azure). ' +
+        'Development mode mounts the unauthenticated dev-login backdoor (routes/devAuth.ts); ' +
+        'it must never run against live Azure. Set NODE_ENV=production for any deployment that ' +
+        'talks to real Azure, or set AZURE_STUB=true for local runs.',
+    );
+  }
+}
+
 // --- Parse + freeze --------------------------------------------------------
 
 const parsed = EnvSchema.safeParse(process.env);
@@ -161,6 +196,17 @@ if (!parsed.success) {
     const path = issue.path.length > 0 ? issue.path.join('.') : '(root)';
     console.error(`  - ${path}: ${issue.message}`);
   }
+  console.error('[env] See backend/.env.example for the full list of expected vars.');
+  process.exit(1);
+}
+
+try {
+  // Cross-field check against the PARSED env (not process.env) so runtime
+  // mutations of process.env in tests can't retroactively trip the guard.
+  assertSafeEnvCombination(parsed.data);
+} catch (err) {
+  console.error('[env] Invalid environment configuration:');
+  console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
   console.error('[env] See backend/.env.example for the full list of expected vars.');
   process.exit(1);
 }

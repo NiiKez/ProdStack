@@ -88,6 +88,15 @@ const DEFAULT_RANGE: MetricRange = '1h';
 const NANOCORES_PER_CORE = 1e9;
 const BYTES_PER_MIB = 1048576;
 
+/**
+ * Per-query client-side timeout. `MetricsQueryOptions` has no server-timeout
+ * field (unlike the Logs query options, which the sibling logs.ts caps with
+ * `serverTimeoutInSeconds: 30`), so we abort each query client-side instead.
+ * Without this a hung Azure Monitor call would tie up the Node request
+ * indefinitely (the route awaits a Promise.all of all four queries).
+ */
+const METRIC_QUERY_TIMEOUT_MS = 30_000;
+
 interface MetricSpec {
   key: MetricKey;
   /** The Azure Container Apps metric name. */
@@ -308,13 +317,15 @@ async function realMetricSeries(
   spec: MetricSpec,
   cfg: RangeConfig,
 ): Promise<MetricSeries> {
+  // `AbortSignal.timeout` rejects the query with an AbortError after the
+  // deadline so a slow/hung Azure call can't tie up the request indefinitely.
+  const abortSignal = AbortSignal.timeout(METRIC_QUERY_TIMEOUT_MS);
   try {
-    // Note: `MetricsQueryOptions` has no server-timeout field (unlike the Logs
-    // query options), so metrics queries have no explicit server timeout.
     const result = await client.queryResource(resourceUri, [spec.azureMetric], {
       granularity: cfg.granularity,
       timespan: { duration: cfg.timespanDuration },
       aggregations: [spec.aggregation],
+      abortSignal,
     });
     return {
       key: spec.key,

@@ -70,6 +70,18 @@ function npmInstall(hasLock: boolean): string {
 }
 
 /**
+ * Declare build-time-public env vars (`NEXT_PUBLIC_*`, `VITE_*`, …) so the
+ * framework's bundler can inline them. `ARG K` accepts the value kaniko passes
+ * via `--build-arg`; `ENV K=$K` promotes it to an env var visible to the build
+ * step (`npm run build`). These MUST sit in the build stage BEFORE the build
+ * runs. Classic syntax only (kaniko-safe). Keys are pre-validated
+ * UPPER_SNAKE_CASE by the API, so they're safe to interpolate verbatim.
+ */
+function buildArgEnvLines(keys: string[]): string[] {
+  return keys.flatMap((k) => [`ARG ${k}`, `ENV ${k}=$${k}`]);
+}
+
+/**
  * nginx site config for a single-page app: serve the built assets and fall back
  * to `index.html` so client-side routes don't 404. Written via `printf` (one
  * classic `RUN`) — no heredoc, so kaniko is happy. `$uri` is kept literal by the
@@ -88,12 +100,13 @@ function spaNginxConfRun(): string {
 }
 
 /** Two-stage "build with Node, serve the static output with nginx" template. */
-function staticSpaDockerfile(outputDir: string, hasLock: boolean): string {
+function staticSpaDockerfile(outputDir: string, hasLock: boolean, buildArgKeys: string[]): string {
   return [
     `FROM ${NODE_IMAGE} AS build`,
     'WORKDIR /app',
     'COPY package*.json ./',
     `RUN ${npmInstall(hasLock)}`,
+    ...buildArgEnvLines(buildArgKeys),
     'COPY . .',
     'RUN npm run build',
     '',
@@ -112,12 +125,14 @@ function nodeServerDockerfile(opts: {
   startCmd: string;
   buildStep?: string;
   port: number;
+  buildArgKeys: string[];
 }): string {
   const lines = [
     `FROM ${NODE_IMAGE}`,
     'WORKDIR /app',
     'COPY package*.json ./',
     `RUN ${npmInstall(opts.hasLock)}`,
+    ...buildArgEnvLines(opts.buildArgKeys),
     'COPY . .',
   ];
   if (opts.buildStep) lines.push(`RUN ${opts.buildStep}`);
@@ -185,7 +200,7 @@ function allNodeDeps(pkg: PackageJsonLike): Record<string, string> {
   return { ...pkg.dependencies, ...pkg.devDependencies };
 }
 
-function detectNode(pkg: PackageJsonLike, signals: RepoSignals): Detection {
+function detectNode(pkg: PackageJsonLike, signals: RepoSignals, buildArgKeys: string[]): Detection {
   const deps = allNodeDeps(pkg);
   const scripts = pkg.scripts ?? {};
   const has = (name: string): boolean => Object.prototype.hasOwnProperty.call(deps, name);
@@ -200,6 +215,7 @@ function detectNode(pkg: PackageJsonLike, signals: RepoSignals): Detection {
         buildStep: 'npm run build',
         startCmd: '["npm", "run", "start"]',
         port: 3000,
+        buildArgKeys,
       }),
     };
   }
@@ -209,7 +225,7 @@ function detectNode(pkg: PackageJsonLike, signals: RepoSignals): Detection {
     return {
       framework: 'Vite (static SPA)',
       port: 80,
-      dockerfile: staticSpaDockerfile('dist', signals.hasPackageLock),
+      dockerfile: staticSpaDockerfile('dist', signals.hasPackageLock, buildArgKeys),
     };
   }
 
@@ -218,7 +234,7 @@ function detectNode(pkg: PackageJsonLike, signals: RepoSignals): Detection {
     return {
       framework: 'Create React App (static SPA)',
       port: 80,
-      dockerfile: staticSpaDockerfile('build', signals.hasPackageLock),
+      dockerfile: staticSpaDockerfile('build', signals.hasPackageLock, buildArgKeys),
     };
   }
 
@@ -243,6 +259,7 @@ function detectNode(pkg: PackageJsonLike, signals: RepoSignals): Detection {
       buildStep,
       startCmd,
       port: 3000,
+      buildArgKeys,
     }),
   };
 }
@@ -322,10 +339,19 @@ function detectPython(signals: RepoSignals): Detection {
  * if nothing is recognized (caller surfaces a friendly "add a Dockerfile"
  * error). Detection order mirrors the precedence used by Railway/Fly: a concrete
  * framework wins over a generic per-language fallback.
+ *
+ * `opts.buildArgKeys` lists the project's build-time-public env var keys
+ * (`NEXT_PUBLIC_*`, `VITE_*`, …); for Node frameworks they're declared as `ARG`s
+ * before the build step so the bundler can inline them. Only Node templates use
+ * them — Go/Python/static recipes have no JS bundler and ignore the list.
  */
-export function detectFramework(signals: RepoSignals): Detection | null {
+export function detectFramework(
+  signals: RepoSignals,
+  opts: { buildArgKeys?: string[] } = {},
+): Detection | null {
+  const buildArgKeys = opts.buildArgKeys ?? [];
   if (signals.packageJson) {
-    return detectNode(signals.packageJson, signals);
+    return detectNode(signals.packageJson, signals, buildArgKeys);
   }
 
   if (signals.rootEntries.includes('go.mod')) {

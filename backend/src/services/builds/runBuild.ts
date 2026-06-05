@@ -32,6 +32,7 @@ import { decrypt } from '../../lib/crypto.js';
 import { logger } from '../../lib/logger.js';
 import { updateContainerApp } from '../azure/index.js';
 import { loadDecryptedEnvVars } from '../projectEnv.js';
+import { selectBuildArgs } from './buildArgs.js';
 import { runKaniko } from './kaniko.js';
 import { resolveDockerfile, type ResolvedDockerfile } from './resolveDockerfile.js';
 
@@ -39,6 +40,106 @@ const STUB_IMAGES = [
   'mcr.microsoft.com/k8se/quickstart:latest',
   'nginxdemos/hello:latest',
 ] as const;
+
+/**
+ * A commit SHA must be lowercase hex, 7–64 chars (short SHA → full SHA-1 or
+ * SHA-256). This is a security boundary: `commitSha` flows into `git fetch` /
+ * `git checkout` positionals below, and git parses a leading-dash positional as
+ * an option (e.g. `--upload-pack=<cmd>` → arbitrary command execution). The
+ * webhook route validates this too, but we re-assert here so ANY caller —
+ * manual trigger, seed script, future API — is protected, not just the webhook
+ * path. Defense in depth.
+ */
+const COMMIT_SHA_RE = /^[0-9a-f]{7,64}$/;
+
+/** Throws when `commitSha` isn't a plain hex SHA — see {@link COMMIT_SHA_RE}. */
+export function assertValidCommitSha(commitSha: string): void {
+  if (!COMMIT_SHA_RE.test(commitSha)) {
+    throw new Error(`refusing to build: invalid commit sha`);
+  }
+}
+
+/**
+ * A git-ref-safe branch name. Mirrors `branchSchema` in routes/projects.ts —
+ * the same security boundary, asserted again at the sink. `branch` flows into
+ * `git clone --branch <branch>`: rejecting a leading '-' (flag injection),
+ * '..' (ref escape), whitespace and control chars closes the argument-injection
+ * class. Re-asserted here (not just at create/patch) so legacy `Project.branch`
+ * rows written BEFORE branchSchema existed — and any future caller — can never
+ * drive a hostile value into git. Defense in depth, same rationale as
+ * {@link assertValidCommitSha}.
+ */
+const BRANCH_NAME_RE = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+
+/** Throws when `branch` isn't git-ref-safe — see {@link BRANCH_NAME_RE}. */
+export function assertValidBranchName(branch: string): void {
+  if (branch.length === 0 || branch.length > 255 || !BRANCH_NAME_RE.test(branch)) {
+    throw new Error(`refusing to build: invalid branch name`);
+  }
+}
+
+/**
+ * Build the argv for the authenticated/anonymous `git clone`. `--end-of-options`
+ * guards the user-controlled positionals (`url`, `intoDir`) so git can never
+ * reinterpret them as options. Pure so the arg shape is unit-testable without a
+ * git process. `authConfig` carries the per-call `-c http.<url>.extraheader=…`
+ * auth config (omitted on the anonymous retry).
+ */
+export function cloneArgs(opts: {
+  noCredHelper: string;
+  authConfig?: string;
+  branch: string;
+  url: string;
+  intoDir: string;
+}): string[] {
+  return [
+    '-c',
+    opts.noCredHelper,
+    ...(opts.authConfig !== undefined ? ['-c', opts.authConfig] : []),
+    'clone',
+    '--depth',
+    '1',
+    '--branch',
+    opts.branch,
+    '--end-of-options',
+    opts.url,
+    opts.intoDir,
+  ];
+}
+
+/**
+ * Build the argv for the single-SHA `git fetch`. `--end-of-options` immediately
+ * precedes the user-controlled `commitSha` positional.
+ */
+export function fetchArgs(opts: {
+  intoDir: string;
+  noCredHelper: string;
+  authConfig: string;
+  commitSha: string;
+}): string[] {
+  return [
+    '-C',
+    opts.intoDir,
+    '-c',
+    opts.noCredHelper,
+    '-c',
+    opts.authConfig,
+    'fetch',
+    '--depth',
+    '1',
+    'origin',
+    '--end-of-options',
+    opts.commitSha,
+  ];
+}
+
+/**
+ * Build the argv for `git checkout <sha>`. `--end-of-options` precedes the
+ * user-controlled `commitSha` positional.
+ */
+export function checkoutArgs(opts: { intoDir: string; commitSha: string }): string[] {
+  return ['-C', opts.intoDir, 'checkout', '--end-of-options', opts.commitSha];
+}
 
 const MAX_LOG_LINES_PER_BUILD = 50_000;
 const LOG_LINE_MAX_BYTES = 8 * 1024;
@@ -268,11 +369,28 @@ async function runRealBuild(
     },
   });
 
+  // Build-time-public env vars (`NEXT_PUBLIC_*`, `VITE_*`, …) are inlined into
+  // the client bundle by web frameworks at build time, so they must reach the
+  // build as `--build-arg`s AND be declared as `ARG`s in a generated Dockerfile.
+  // Everything else stays runtime-only (injected as Container App secrets at
+  // deploy). We log only the names — these values are public by design.
+  const buildArgs = selectBuildArgs(await loadDecryptedEnvVars(build.projectId));
+  if (buildArgs.length > 0) {
+    await ctx.logs.write(
+      'STEP',
+      `exposing ${buildArgs.length} public build var(s) to the build: ${buildArgs
+        .map((a) => a.name)
+        .join(', ')}`,
+    );
+  }
+
   // Pick the Dockerfile: the repo's own if present, otherwise detect the
   // framework and synthesize one (zero-Dockerfile auto-build). Throws a
   // user-facing error — surfaced as the FAILED build's message — when the repo
   // has neither a Dockerfile nor a recognizable framework.
-  const resolved = await resolveDockerfile(ctx.repoDir, ctx.logs);
+  const resolved = await resolveDockerfile(ctx.repoDir, ctx.logs, {
+    buildArgKeys: buildArgs.map((a) => a.name),
+  });
 
   // ACR repository name = container app name (lowercase, hyphens). Image
   // path = `${acr}.azurecr.io/${appName}:${sha}` — keeps tags grouped per
@@ -290,6 +408,7 @@ async function runRealBuild(
     authDir: ctx.authDir,
     dockerfile: resolved.dockerfilePath,
     destinations: [shaTag, latestTag],
+    buildArgs,
     timeoutMs: env.BUILD_TIMEOUT_MS,
     signal,
     onLine: (line, stream) => {
@@ -343,6 +462,13 @@ async function cloneRepo(opts: {
   // `GIT_TERMINAL_PROMPT=0` makes any credential prompt fail fast (exit 1)
   // rather than waiting on a non-existent TTY — surfaces auth issues as a
   // proper non-zero exit instead of a hang or noisy fallback.
+  // Defensive re-validation: even though the create/webhook boundaries reject a
+  // malformed SHA or branch, assert both here so no caller (incl. a legacy
+  // Project.branch row pre-dating branchSchema) can drive a hostile value into
+  // the git positionals below. Throws before any git process is spawned.
+  assertValidCommitSha(opts.commitSha);
+  assertValidBranchName(opts.branch);
+
   const url = `https://github.com/${opts.repoFullName}.git`;
   const authConfig = `http.${url}.extraheader=AUTHORIZATION: Basic ${basicAuth(opts.token)}`;
   // `credential.helper=` disables ALL credential helpers and
@@ -365,7 +491,7 @@ async function cloneRepo(opts: {
   try {
     await spawnLogged(
       'git',
-      ['-c', noCredHelper, '-c', authConfig, 'clone', '--depth', '1', '--branch', opts.branch, url, opts.intoDir],
+      cloneArgs({ noCredHelper, authConfig, branch: opts.branch, url, intoDir: opts.intoDir }),
       { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
     );
   } catch (err) {
@@ -375,7 +501,7 @@ async function cloneRepo(opts: {
     await rm(opts.intoDir, { recursive: true, force: true });
     await spawnLogged(
       'git',
-      ['-c', noCredHelper, 'clone', '--depth', '1', '--branch', opts.branch, url, opts.intoDir],
+      cloneArgs({ noCredHelper, branch: opts.branch, url, intoDir: opts.intoDir }),
       { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
     );
   }
@@ -384,26 +510,14 @@ async function cloneRepo(opts: {
   // the webhook fired. Fetch + checkout makes the build reproducible.
   await spawnLogged(
     'git',
-    [
-      '-C',
-      opts.intoDir,
-      '-c',
-      noCredHelper,
-      '-c',
-      authConfig,
-      'fetch',
-      '--depth',
-      '1',
-      'origin',
-      opts.commitSha,
-    ],
+    fetchArgs({ intoDir: opts.intoDir, noCredHelper, authConfig, commitSha: opts.commitSha }),
     { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
   ).catch(() => {
     // Older git servers reject single-sha fetch; the shallow clone above is
     // good enough when HEAD hasn't moved. Continue.
   });
   if (opts.signal?.aborted) throw new Error('cancelled');
-  await spawnLogged('git', ['-C', opts.intoDir, 'checkout', opts.commitSha], {
+  await spawnLogged('git', checkoutArgs({ intoDir: opts.intoDir, commitSha: opts.commitSha }), {
     onLine: gitOnLine,
     redact: opts.token,
     env: gitEnv,
