@@ -390,6 +390,33 @@ describe('POST /api/projects', () => {
     expect(createArgs.data.webhookId).toBeNull();
   });
 
+  it.each(['--upload-pack=x', '-foo', 'a b', 'a..b'])(
+    'rejects a malicious/unsafe branch name with 400: %s',
+    async (branch) => {
+      const app = createApp();
+      const res = await supertest(app)
+        .post('/api/projects')
+        .set('X-Requested-With', 'XMLHttpRequest')
+        .send({ repoUrl: 'https://github.com/octocat/hello', name: 'Hello', branch });
+      expect(res.status).toBe(400);
+      // Validation fails before any GitHub/Azure work is attempted.
+      expect(mocks.createContainerApp).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['main', 'feature/x', 'release-1.2.3'])(
+    'accepts a valid git-ref branch name (201): %s',
+    async (branch) => {
+      const app = createApp();
+      const res = await supertest(app)
+        .post('/api/projects')
+        .set('X-Requested-With', 'XMLHttpRequest')
+        .send({ repoUrl: 'https://github.com/octocat/hello', name: 'Hello', branch });
+      expect(res.status).toBe(201);
+      expect(res.body.branch).toBe(branch);
+    },
+  );
+
   it('rolls back the container app and returns 502 on hook 500', async () => {
     mocks.octokitRequest.mockImplementation(async (route: string) => {
       if (route.startsWith('GET /repos/')) {

@@ -11,6 +11,7 @@ import { env } from '../env.js';
 import { decrypt, encrypt } from '../lib/crypto.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
+import { buildTriggerLimiter, expensiveLimiter } from '../middleware/rateLimit.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 import { createContainerApp, deleteContainerApp } from '../services/azure/index.js';
 import { getAppMetrics, type MetricRange } from '../services/azure/metrics.js';
@@ -84,14 +85,21 @@ const deploymentsQuerySchema = z.object({
   cursor: z.string().min(1).max(40).optional(),
 });
 
+// Git-ref-safe branch name. `branch` flows downstream into `git clone --branch`,
+// so reject anything that could be read as a flag (leading `-`), break out of
+// the ref (`..`, whitespace, control chars), or fall outside a conservative
+// safe charset. Keeps the existing length bounds.
+const BRANCH_NAME_RE = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+const branchSchema = z.string().min(1).max(255).regex(BRANCH_NAME_RE, 'invalid branch name');
+
 const createBodySchema = z.object({
   repoUrl: z.string().min(1).max(2048),
-  branch: z.string().min(1).max(255).optional(),
+  branch: branchSchema.optional(),
   name: z.string().min(1).max(50),
 });
 
 const patchBodySchema = z.object({
-  branch: z.string().min(1).max(255).optional(),
+  branch: branchSchema.optional(),
   name: z.string().min(1).max(50).optional(),
   autoDeploy: z.boolean().optional(),
   envVars: z
@@ -467,7 +475,7 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
 
 // --- GET /:id/metrics (Azure Monitor: cpu/mem/replicas/requests) -----------
 
-router.get('/:id/metrics', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/:id/metrics', expensiveLimiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = idParamSchema.parse(req.params);
     const user = getUser(req);
@@ -488,7 +496,7 @@ router.get('/:id/metrics', async (req: Request, res: Response, next: NextFunctio
 // lines). The service degrades gracefully — `available:false` + a note rather
 // than a 500 — when the workspace isn't configured or the query fails.
 
-router.get('/:id/runtime/logs', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/:id/runtime/logs', expensiveLimiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = idParamSchema.parse(req.params);
     const user = getUser(req);
@@ -606,6 +614,7 @@ router.post(
 
 router.post(
   '/:id/rebuild',
+  buildTriggerLimiter,
   requireXRequestedWith,
   async (req: Request, res: Response, next: NextFunction) => {
     try {

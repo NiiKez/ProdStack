@@ -212,6 +212,64 @@ describe('getAppMetrics (real branch)', () => {
     expect(byKey.cpu!.points[0]!.v).toBe(1); // 1e9 nanocores → 1 core
   });
 
+  it('passes an AbortSignal (per-query timeout) to every metric query', async () => {
+    mocks.queryResource.mockResolvedValue({
+      metrics: [{ timeseries: [{ data: [] }] }],
+    });
+
+    const { getAppMetrics } = await import('./metrics.js');
+    await getAppMetrics({ containerAppName: 'demo-app', range: '1h' });
+
+    expect(mocks.queryResource).toHaveBeenCalledTimes(4);
+    for (const call of mocks.queryResource.mock.calls) {
+      const options = call[2] as { abortSignal?: AbortSignal };
+      expect(options.abortSignal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  it('degrades a metric to an empty series when its query rejects on the abort signal (timeout)', async () => {
+    // Simulate a hung Azure call that the per-query AbortSignal.timeout cancels:
+    // the client rejects with an AbortError once the signal it was handed fires.
+    // We shrink the deadline via a short race so the test resolves promptly
+    // instead of waiting the real 30s, while still proving the request can't
+    // hang indefinitely — getAppMetrics resolves (degraded) rather than tying up.
+    mocks.queryResource.mockImplementation(
+      (_uri: string, _names: string[], options: { abortSignal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          const signal = options.abortSignal;
+          if (signal?.aborted) {
+            const err = new Error('The operation was aborted.');
+            err.name = 'AbortError';
+            reject(err);
+            return;
+          }
+          signal?.addEventListener('abort', () => {
+            const err = new Error('The operation was aborted.');
+            err.name = 'AbortError';
+            reject(err);
+          });
+          // Belt-and-suspenders: also fail fast so the test never hangs if the
+          // abort wiring changes — proves the request resolves, not the timer.
+          setTimeout(() => {
+            const err = new Error('simulated timeout');
+            err.name = 'AbortError';
+            reject(err);
+          }, 50);
+        }),
+    );
+
+    const { getAppMetrics } = await import('./metrics.js');
+    const result = await getAppMetrics({ containerAppName: 'demo-app', range: '1h' });
+
+    // A hung-then-aborted query degrades to an empty-points series (not a hang,
+    // not a throw) — the existing per-metric resilience path. The overall call
+    // still reports available:true with all four series present.
+    expect(result.available).toBe(true);
+    for (const series of result.series) {
+      expect(series.points).toEqual([]);
+    }
+  });
+
   it('degrades to available:false (does not throw) when AZURE_SUBSCRIPTION_ID is missing', async () => {
     process.env.AZURE_SUBSCRIPTION_ID = '';
     const { getAppMetrics } = await import('./metrics.js');

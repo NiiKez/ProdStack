@@ -7,6 +7,7 @@ import { pinoHttp } from 'pino-http';
 import { env, isProd } from './env.js';
 import { errorMiddleware } from './lib/errors.js';
 import { logger } from './lib/logger.js';
+import { globalLimiter } from './middleware/rateLimit.js';
 import { requireAuth } from './middleware/requireAuth.js';
 import activityRouter from './routes/activity.js';
 import adminRouter from './routes/admin.js';
@@ -21,6 +22,12 @@ import webhooksRouter from './routes/webhooks.js';
 
 export function createApp(): Express {
   const app = express();
+
+  // Behind Azure Container Apps' Envoy ingress, the real client IP arrives in
+  // `X-Forwarded-For`. Trusting exactly one hop (numeric 1 — NOT `true`, which
+  // trips express-rate-limit's permissive-trust-proxy guard) makes `req.ip` and
+  // the per-IP rate limiters key on the actual client rather than the proxy.
+  app.set('trust proxy', 1);
 
   app.use(
     helmet({
@@ -61,6 +68,12 @@ export function createApp(): Express {
   );
 
   app.use(express.json({ limit: '1mb' }));
+
+  // Global per-IP rate limit — a backstop against a single client flooding the
+  // API. Mounted after body/cookie parsing and before the route handlers. It
+  // skips the health endpoints internally (ACA probes hammer them; a 429 there
+  // would mark the container unhealthy) and the test env.
+  app.use(globalLimiter);
 
   app.use('/healthz', healthRouter);
   app.use('/api/health', healthRouter);

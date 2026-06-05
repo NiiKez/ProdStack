@@ -327,6 +327,80 @@ describe('POST /api/webhooks/github', () => {
     }
   });
 
+  it('ignores a push whose commit id is a git-option injection and creates no build', async () => {
+    // Verified RCE: `--upload-pack=<cmd>` flows into `git fetch` as an option →
+    // arbitrary command execution on the builder identity. The boundary check
+    // must reject it before any Build row exists.
+    const body = pushPayload({
+      head_commit: {
+        id: '--upload-pack=touch /tmp/x',
+        message: 'pwn',
+        author: { name: 'Mallory' },
+      },
+    });
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/webhooks/github')
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-GitHub-Delivery', 'delivery-inject')
+      .set('X-Hub-Signature-256', sign(body))
+      .send(body);
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ ignored: 'invalid commit sha' });
+    expect(state.builds).toHaveLength(0);
+    // No idempotency/audit row either — we rejected before any DB write.
+    expect(state.webhookEvents.size).toBe(0);
+  });
+
+  it('ignores a push whose commit id is non-hex and creates no build', async () => {
+    const body = pushPayload({
+      head_commit: {
+        // Uppercase + non-hex chars — not a plain SHA.
+        id: 'ZZZZ-not-a-sha',
+        message: 'nope',
+        author: { name: 'Octo Cat' },
+      },
+    });
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/webhooks/github')
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-GitHub-Delivery', 'delivery-nonhex')
+      .set('X-Hub-Signature-256', sign(body))
+      .send(body);
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ ignored: 'invalid commit sha' });
+    expect(state.builds).toHaveLength(0);
+    expect(state.webhookEvents.size).toBe(0);
+  });
+
+  it('accepts a valid 40-char hex sha and enqueues a build as before', async () => {
+    // Belt-and-suspenders alongside the first test: confirm the validation
+    // doesn't reject a legitimate full SHA-1.
+    const sha = '0123456789abcdef0123456789abcdef01234567';
+    const body = pushPayload({
+      head_commit: { id: sha, message: 'real commit', author: { name: 'Octo Cat' } },
+    });
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/webhooks/github')
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-GitHub-Delivery', 'delivery-validsha')
+      .set('X-Hub-Signature-256', sign(body))
+      .send(body);
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ buildId: 'b1' });
+    expect(state.builds).toHaveLength(1);
+    expect(state.builds[0]).toMatchObject({ commitSha: sha, status: 'QUEUED' });
+    expect(state.webhookEvents.has('delivery-validsha')).toBe(true);
+  });
+
   it('returns 204 for an unrecognized event type', async () => {
     const body = JSON.stringify({ repository: { id: 12345 } });
     const app = createApp();

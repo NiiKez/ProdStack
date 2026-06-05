@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
+import { streamLimiter } from '../middleware/rateLimit.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 
 /**
@@ -222,7 +223,7 @@ router.post('/:id/cancel', requireXRequestedWith, async (req: Request, res: Resp
 
 // --- GET /api/builds/:id/logs/stream (SSE) ---------------------------------
 
-router.get('/:id/logs/stream', async (req: Request, res: Response) => {
+router.get('/:id/logs/stream', streamLimiter, async (req: Request, res: Response) => {
   const parsedParams = idParam.safeParse(req.params);
   if (!parsedParams.success) {
     res.status(400).json({ error: 'VALIDATION_FAILED' });

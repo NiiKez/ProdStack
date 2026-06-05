@@ -16,6 +16,12 @@
 frontend/node_modules
 frontend/dist
 infra
+# Local-only dev backdoor — must NEVER enter an image build context, even from a
+# dirty worktree. `devAuth.ts` mints a full session with no auth (bypassing the
+# OWNER_GITHUB_ID gate) and is guarded only by NODE_ENV; excluding the source
+# here is defense-in-depth so a baked image can't ship the backdoor at all.
+backend/src/routes/devAuth.ts
+backend/scripts/seed-dev.mjs
 *.png
 PLAN.md
 SPEC.md
