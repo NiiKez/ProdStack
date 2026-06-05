@@ -444,6 +444,25 @@ describe('POST /api/projects', () => {
   });
 });
 
+describe('PATCH /api/projects/:id', () => {
+  // branchSchema is shared between create and patch; this locks in the patch
+  // path so a regression that loosens only the patch schema (the value flows to
+  // `git clone --branch`) can't slip through unnoticed.
+  it.each(['--upload-pack=x', '-foo', 'a b', 'a..b'])(
+    'rejects a malicious/unsafe branch name with 400: %s',
+    async (branch) => {
+      const app = createApp();
+      const res = await supertest(app)
+        .patch('/api/projects/p1')
+        .set('X-Requested-With', 'XMLHttpRequest')
+        .send({ branch });
+      expect(res.status).toBe(400);
+      // Validation fails before any DB update is attempted.
+      expect(mocks.projectUpdate).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('DELETE /api/projects/:id', () => {
   function seedProject(overrides: Partial<ProjectRecord> = {}): ProjectRecord {
     const project: ProjectRecord = {

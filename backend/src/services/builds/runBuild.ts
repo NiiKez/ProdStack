@@ -60,10 +60,29 @@ export function assertValidCommitSha(commitSha: string): void {
 }
 
 /**
+ * A git-ref-safe branch name. Mirrors `branchSchema` in routes/projects.ts —
+ * the same security boundary, asserted again at the sink. `branch` flows into
+ * `git clone --branch <branch>`: rejecting a leading '-' (flag injection),
+ * '..' (ref escape), whitespace and control chars closes the argument-injection
+ * class. Re-asserted here (not just at create/patch) so legacy `Project.branch`
+ * rows written BEFORE branchSchema existed — and any future caller — can never
+ * drive a hostile value into git. Defense in depth, same rationale as
+ * {@link assertValidCommitSha}.
+ */
+const BRANCH_NAME_RE = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+
+/** Throws when `branch` isn't git-ref-safe — see {@link BRANCH_NAME_RE}. */
+export function assertValidBranchName(branch: string): void {
+  if (branch.length === 0 || branch.length > 255 || !BRANCH_NAME_RE.test(branch)) {
+    throw new Error(`refusing to build: invalid branch name`);
+  }
+}
+
+/**
  * Build the argv for the authenticated/anonymous `git clone`. `--end-of-options`
  * guards the user-controlled positionals (`url`, `intoDir`) so git can never
  * reinterpret them as options. Pure so the arg shape is unit-testable without a
- * git process. `extraConfig` carries the per-call `-c http.<url>.extraheader=…`
+ * git process. `authConfig` carries the per-call `-c http.<url>.extraheader=…`
  * auth config (omitted on the anonymous retry).
  */
 export function cloneArgs(opts: {
@@ -443,10 +462,12 @@ async function cloneRepo(opts: {
   // `GIT_TERMINAL_PROMPT=0` makes any credential prompt fail fast (exit 1)
   // rather than waiting on a non-existent TTY — surfaces auth issues as a
   // proper non-zero exit instead of a hang or noisy fallback.
-  // Defensive re-validation: even though the webhook boundary rejects a
-  // malformed SHA, assert it here so no caller can drive a non-hex value into
+  // Defensive re-validation: even though the create/webhook boundaries reject a
+  // malformed SHA or branch, assert both here so no caller (incl. a legacy
+  // Project.branch row pre-dating branchSchema) can drive a hostile value into
   // the git positionals below. Throws before any git process is spawned.
   assertValidCommitSha(opts.commitSha);
+  assertValidBranchName(opts.branch);
 
   const url = `https://github.com/${opts.repoFullName}.git`;
   const authConfig = `http.${url}.extraheader=AUTHORIZATION: Basic ${basicAuth(opts.token)}`;

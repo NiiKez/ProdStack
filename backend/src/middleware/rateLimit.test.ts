@@ -13,7 +13,7 @@ process.env.LOG_LEVEL ??= 'silent';
 import express from 'express';
 import { describe, expect, it } from 'vitest';
 
-import { makeRateLimiter } from './rateLimit.js';
+import { makeRateLimiter, userOrIpKey } from './rateLimit.js';
 
 const supertest = (await import('supertest')).default;
 
@@ -62,5 +62,43 @@ describe('makeRateLimiter', () => {
       const res = await supertest(app).get('/');
       expect(res.status).toBe(200);
     }
+  });
+});
+
+describe('userOrIpKey', () => {
+  it('keys on the authenticated user id when present', () => {
+    expect(userOrIpKey({ user: { id: 'abc' }, ip: '9.9.9.9' } as never)).toBe('u:abc');
+  });
+
+  it('falls back to a normalized IP key for anonymous requests', () => {
+    // No user → an ipKeyGenerator-normalized IP string (not the raw user id form).
+    const key = userOrIpKey({ ip: '203.0.113.7' } as never);
+    expect(key).not.toMatch(/^u:/);
+    expect(typeof key).toBe('string');
+    expect(key.length).toBeGreaterThan(0);
+  });
+
+  it('buckets per authenticated user, not per IP — one user cannot exhaust another', async () => {
+    // Post-auth limiters key on req.user.id (see userOrIpKey). Two users sharing
+    // one source IP (e.g. all browsers behind the frontend's nginx proxy) get
+    // INDEPENDENT buckets, and a spoofed X-Forwarded-For can't mint new ones.
+    const app = express();
+    app.use((req, _res, next) => {
+      const id = req.header('x-test-user');
+      if (id !== undefined) req.user = { id } as never;
+      next();
+    });
+    app.use(
+      makeRateLimiter({ windowMs: 60_000, max: 1, skip: () => false, keyGenerator: userOrIpKey }),
+    );
+    app.get('/', (_req, res) => {
+      res.json({ ok: true });
+    });
+
+    // alice burns her single slot...
+    expect((await supertest(app).get('/').set('x-test-user', 'alice')).status).toBe(200);
+    expect((await supertest(app).get('/').set('x-test-user', 'alice')).status).toBe(429);
+    // ...bob (same loopback IP) is unaffected — separate bucket.
+    expect((await supertest(app).get('/').set('x-test-user', 'bob')).status).toBe(200);
   });
 });

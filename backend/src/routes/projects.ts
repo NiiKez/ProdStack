@@ -358,7 +358,10 @@ router.post(
         });
         const slug = dedupedSlug(slugify(body.name), live.map((p) => p.slug));
         const appName = containerAppName(user.githubLogin, slug);
-        const branch = body.branch ?? repoData.default_branch ?? 'main';
+        // `default_branch` comes from the GitHub API, not the request body, so
+        // it skips createBodySchema. Run it through branchSchema anyway — it
+        // flows to `git clone --branch` like any user-supplied branch.
+        const branch = branchSchema.parse(body.branch ?? repoData.default_branch ?? 'main');
 
         const webhookSecret = randomBytes(32).toString('base64');
         const encryptedSecret = encrypt(webhookSecret);

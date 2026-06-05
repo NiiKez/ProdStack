@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  assertValidBranchName,
   assertValidCommitSha,
   checkoutArgs,
   cloneArgs,
@@ -45,6 +46,42 @@ describe('assertValidCommitSha', () => {
     expect(() => assertValidCommitSha('abc123')).toThrow(/invalid commit sha/); // 6 chars
     expect(() => assertValidCommitSha('a'.repeat(65))).toThrow(/invalid commit sha/);
     expect(() => assertValidCommitSha('')).toThrow(/invalid commit sha/);
+  });
+});
+
+describe('assertValidBranchName', () => {
+  it('accepts ordinary git-ref branch names', () => {
+    for (const ok of ['main', 'master', 'feature/x', 'release-1.2.3', 'v2', 'a_b.c']) {
+      expect(() => assertValidBranchName(ok)).not.toThrow();
+    }
+  });
+
+  it('throws on a flag-injection payload (leading dash → git option)', () => {
+    expect(() => assertValidBranchName('--upload-pack=touch /tmp/x')).toThrow(
+      /invalid branch name/,
+    );
+    expect(() => assertValidBranchName('-foo')).toThrow(/invalid branch name/);
+  });
+
+  it('throws on ref-escape, whitespace, control chars, and out-of-charset values', () => {
+    for (const bad of [
+      'a..b', // ref traversal
+      'a b', // space
+      'a\tb', // tab
+      'a\nb', // newline — JS `$` (no /m) must NOT let this through
+      'feat\nmain', // trailing-newline smuggling
+      'a\x00b', // NUL
+      'a;rm -rf /', // shell metachar (defense in depth)
+      'a:b',
+      'a~b',
+      'a^b',
+      'a?b',
+      'café', // non-ASCII
+      '', // empty
+      'a'.repeat(256), // over the length bound
+    ]) {
+      expect(() => assertValidBranchName(bad)).toThrow(/invalid branch name/);
+    }
   });
 });
 
