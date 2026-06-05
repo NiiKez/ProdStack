@@ -666,9 +666,11 @@ async function deployAndRecord(
     await ctx.logs.write('STEP', `applying ${envVars.length} env var(s) as secrets`);
   }
 
-  // For a generated Dockerfile we know the listen port; align the ingress
-  // target port with it so the app's `$PORT` and ingress stay in lockstep. A
-  // user-supplied Dockerfile leaves `port` null → ingress is left untouched.
+  // Align the ingress target port with the app's listen port: a generated
+  // Dockerfile reports its framework port, and a repo-supplied Dockerfile
+  // reports its `EXPOSE` port. Either way ingress stays in lockstep with the
+  // app. Only a Dockerfile with no parseable EXPOSE leaves `port` null →
+  // ingress untouched (stays at the create-time default of 80).
   const targetPort = resolved?.port ?? undefined;
   if (targetPort !== undefined) {
     await ctx.logs.write('STEP', `routing ingress → port ${targetPort}`);
