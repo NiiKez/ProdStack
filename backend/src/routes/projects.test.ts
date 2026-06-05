@@ -10,6 +10,7 @@ process.env.DATABASE_URL ??= 'postgresql://test/test';
 process.env.AZURE_STUB ??= 'true';
 process.env.LOG_LEVEL ??= 'silent';
 
+import { Prisma } from '@prisma/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { encrypt } from '../lib/crypto.js';
@@ -182,6 +183,22 @@ beforeEach(() => {
   );
   mocks.projectFindFirst.mockResolvedValue(null);
   mocks.projectCreate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
+    // Model the DB's *partial* unique index `project_user_slug_live`
+    // (UNIQUE (userId, slug) WHERE deletedAt IS NULL): a collision only happens
+    // against a *live* row. Soft-deleted tombstones don't participate — this is
+    // exactly what lets a project be recreated with the same slug after delete.
+    const liveCollision = state.projects.some(
+      (p) =>
+        p.deletedAt === null &&
+        p.userId === (data.userId as string) &&
+        p.slug === (data.slug as string),
+    );
+    if (liveCollision) {
+      throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+      });
+    }
     const project: ProjectRecord = {
       id: `p${state.projects.length + 1}`,
       userId: data.userId as string,
@@ -279,7 +296,11 @@ describe('POST /api/projects', () => {
     expect(res.body.slug).toBe('hello-2');
   });
 
-  it('reuses a slug whose project has been soft-deleted', async () => {
+  it('recreates a project with the same slug + app name after soft-delete', async () => {
+    // Regression: a soft-deleted row used to keep its (userId, slug) in a plain
+    // UNIQUE index, so recreating after delete collided (P2002 -> 500) and the
+    // single retry re-picked the same slug. The partial unique index — modeled
+    // by the projectCreate mock above — makes the tombstone stop participating.
     const app = createApp();
     await supertest(app)
       .post('/api/projects')
@@ -293,6 +314,40 @@ describe('POST /api/projects', () => {
       .send({ repoUrl: 'https://github.com/octocat/hello', name: 'Hello' });
     expect(res.status).toBe(201);
     expect(res.body.slug).toBe('hello');
+    // The clean slug is fully reclaimed — same container app name as the original.
+    expect(res.body.containerAppName).toBe('octocat-hello');
+  });
+
+  it('surfaces a live-slug collision that escapes dedup as 409, not 500', async () => {
+    // The create flow's dedup normally avoids live collisions, but if a P2002 on
+    // (userId, slug) ever reaches the error middleware it must be a clean 409.
+    // Force it: seed a live "hello" but hide it from the dedup's slug lookup.
+    state.projects.push({
+      id: 'p-pre',
+      userId: userRow.id,
+      name: 'Hello',
+      slug: 'hello',
+      githubRepoFullName: 'octocat/hello',
+      githubRepoId: 12345,
+      branch: 'main',
+      webhookId: 1,
+      containerAppName: 'octocat-hello',
+      liveUrl: null,
+      frameworkHint: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      deletedAt: null,
+    });
+    // Dedup sees no live slugs on *both* the initial attempt and the retry, so
+    // both pick "hello" and both hit P2002 — the retry can't mask it as hello-2.
+    mocks.projectFindMany.mockResolvedValue([]);
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/projects')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ repoUrl: 'https://github.com/octocat/hello', name: 'Hello' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('CONFLICT');
   });
 
   it('registers a push webhook and persists the returned webhookId', async () => {
