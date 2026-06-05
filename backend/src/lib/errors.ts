@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import type { NextFunction, Request, Response } from 'express';
 import { ZodError, type ZodIssue } from 'zod';
 
@@ -47,6 +48,15 @@ export function errorMiddleware(
       error: err.code,
       ...(err.message && err.message !== err.code ? { message: err.message } : {}),
     });
+    return;
+  }
+
+  // A unique-constraint violation that reaches here is a genuine conflict (route
+  // handlers that expect P2002 catch it themselves). Surface it as a clean 409
+  // instead of a generic 500 — e.g. recreating a project whose slug is still
+  // held by a live row.
+  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+    res.status(409).json({ error: 'CONFLICT' });
     return;
   }
 

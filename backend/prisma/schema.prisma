@@ -73,7 +73,16 @@ model Project {
   envVars                EnvVar[]
   webhookEvents          WebhookEvent[]
 
-  @@unique([userId, slug])
+  // NOTE: slug uniqueness is enforced by a hand-maintained *partial* unique
+  // index so it only applies to live projects: `CREATE UNIQUE INDEX
+  // project_user_slug_live ON "Project"("userId","slug") WHERE "deletedAt" IS
+  // NULL;` (migration 20260605200000). A plain `@@unique([userId, slug])` also
+  // counted soft-deleted rows, so recreating a project with the same name after
+  // a soft-delete collided with the tombstone row (P2002 -> 500). Prisma can't
+  // express a WHERE-filtered unique in the schema, so it's invisible here — DO
+  // NOT `prisma migrate dev` against a prod DB without re-checking it isn't
+  // dropped as "drift". Prod uses `migrate deploy` (committed SQL only, no
+  // introspection), so it's safe there.
   @@index([githubRepoId])
 }
 
