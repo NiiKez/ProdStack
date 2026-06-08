@@ -11,7 +11,9 @@
 # syntax=docker/dockerfile:1.7
 
 # --- Builder --------------------------------------------------------------
-FROM node:20-alpine AS builder
+# Base image digest-pinned (M3 hardening): immutable @sha256 so a retagged
+# upstream can't silently change the build. The digest is for node:20-alpine.
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json tsconfig.base.json ./
@@ -30,11 +32,27 @@ RUN npm prune --omit=dev
 
 # --- Kaniko binary --------------------------------------------------------
 # Pulling the official kaniko image just so we can copy its executor out.
-# Pinned to match the version `kaniko.ts` documents.
-FROM gcr.io/kaniko-project/executor:v1.23.2 AS kaniko
+# Pinned to match the version `kaniko.ts` documents, and digest-pinned (M3).
+# The digest is for gcr.io/kaniko-project/executor:v1.23.2.
+FROM gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f AS kaniko
 
 # --- Runtime --------------------------------------------------------------
-FROM node:20-alpine AS runner
+# Base image digest-pinned (M3 hardening) — see the builder stage note.
+#
+# M2 hardening exception — THIS STAGE INTENTIONALLY RUNS AS ROOT (uid 0):
+# the worker shells out to `/kaniko/executor`, and kaniko builds container
+# images by snapshotting the whole root filesystem in-place (it untars layers,
+# chowns/chmods arbitrary paths, and diffs `/` between stages). That requires
+# uid 0 — a non-root USER makes kaniko fail with permission errors on the FS
+# snapshot. The security reviewer flagged this as the known hard case; we keep
+# root here deliberately and explicitly rather than silently. Mitigations: the
+# builder has no ingress (unreachable from the internet), runs as a single
+# isolated Container App, and its inputs are git-arg-validated (see
+# docs/BUILD_PIPELINE.md §"Security: git argument-injection hardening").
+# A future rootless build engine (e.g. buildkit-rootless / kaniko user-ns) is
+# the only way to drop this; not in scope for this pass.
+# Base image digest-pinned (M3 hardening) — node:20-alpine; see builder note.
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV BUILD_RUNNER_MODE=kaniko

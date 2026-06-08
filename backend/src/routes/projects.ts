@@ -28,7 +28,7 @@ import {
   GithubWebhookError,
   octokitForUser,
 } from '../services/github.js';
-import { loadDecryptedEnvVars } from '../services/projectEnv.js';
+import { loadDecryptedEnvVars, loadEnvVarMeta } from '../services/projectEnv.js';
 import { containerAppName, dedupedSlug, slugify } from '../services/slug.js';
 
 const router = Router();
@@ -110,7 +110,13 @@ const patchBodySchema = z.object({
           .min(1)
           .max(128)
           .regex(ENV_KEY_RE, 'env var keys must match ^[A-Z_][A-Z0-9_]*$'),
-        value: z.string().max(MAX_ENV_VALUE_BYTES),
+        // Write-only: values are never returned to the client, so on save the
+        // client only sends a value for keys it actually edited/added. An
+        // omitted (or null) value means "keep the currently-stored encrypted
+        // value for this key". A key absent from the submitted list is deleted.
+        // Adding a brand-new key with no value is rejected (nothing to keep) —
+        // enforced in the handler since the schema can't see existing keys.
+        value: z.string().max(MAX_ENV_VALUE_BYTES).nullable().optional(),
       }),
     )
     .max(MAX_ENV_VARS_PER_PROJECT)
@@ -466,10 +472,13 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
     if (project === null) {
       throw new HttpError(404, 'PROJECT_NOT_FOUND');
     }
-    const envVars = await loadDecryptedEnvVars(project.id);
+    // Write-only secret values: never return a decrypted value in the response
+    // body. The client gets each key plus `hasValue` and renders a masked
+    // placeholder; replacing a value requires submitting a new one via PATCH.
+    const envVars = await loadEnvVarMeta(project.id);
     res.json({
       ...reshapeProject(project, { allBuilds: true }),
-      envVars: envVars.map((e) => ({ key: e.name, value: e.value })),
+      envVars,
     });
   } catch (err) {
     next(err);
@@ -750,20 +759,65 @@ router.patch(
       // When env vars are submitted, diff the desired set against what's stored
       // so we only trigger a config-only redeploy when something actually
       // changed (no-op saves shouldn't roll a new Azure revision).
+      //
+      // Values are write-only (the client never receives them), so the payload
+      // carries a value only for keys the user actually edited/added; an omitted
+      // value means "keep the stored value". We resolve the desired final set by
+      // overlaying the submitted values on top of the existing ones, then diff
+      // that against what's stored.
       const envVarsProvided = body.envVars !== undefined && body.envVars !== null;
       let envVarsChanged = false;
+      // The desired final value for each submitted key: a fresh value to encrypt,
+      // or `undefined` to signal "keep the stored ciphertext untouched". Built
+      // once here (it needs the decrypted existing set) and reused in the tx.
+      const desiredEnvValues = new Map<string, string | undefined>();
       if (envVarsProvided) {
         const existing = await loadDecryptedEnvVars(project.id);
         const desired = body.envVars!;
-        // Structural diff by (key → value): added/removed key or any value
-        // change triggers the redeploy; a no-op save doesn't. Compares maps
-        // directly rather than via a `KEY=value` string join so it doesn't
-        // lean on the key-charset invariant (keys can't contain `=`) to stay
-        // unambiguous — clearer and robust if that validation ever loosens.
         const existingMap = new Map(existing.map((e) => [e.name, e.value]));
+
+        // Reject up front: a brand-new key (not currently stored) with no value
+        // has nothing to keep. Duplicate keys are rejected inside the tx, but do
+        // it here too so this map is built from a clean, de-duped set.
+        const seen = new Set<string>();
+        for (const entry of desired) {
+          if (seen.has(entry.key)) {
+            throw new HttpError(400, 'DUPLICATE_ENV_KEY', `duplicate env key: ${entry.key}`);
+          }
+          seen.add(entry.key);
+          const hasNewValue = entry.value !== undefined && entry.value !== null;
+          // An explicit empty-string value is never valid: it would silently
+          // overwrite a stored secret with "" (the client can't see the value it
+          // would be clobbering). Omit the value to keep the stored one; remove
+          // the key to delete the var. Covers both new and stored-edited keys.
+          if (entry.value === '') {
+            throw new HttpError(
+              400,
+              'ENV_VALUE_REQUIRED',
+              `value must not be empty for env var: ${entry.key} (omit the value to keep it, or remove the key to delete it)`,
+            );
+          }
+          if (!hasNewValue && !existingMap.has(entry.key)) {
+            throw new HttpError(
+              400,
+              'ENV_VALUE_REQUIRED',
+              `a value is required for new env var: ${entry.key}`,
+            );
+          }
+          desiredEnvValues.set(entry.key, hasNewValue ? entry.value! : undefined);
+        }
+
+        // Structural diff by (key → final value): added/removed key or any value
+        // change triggers the redeploy; a no-op save doesn't. A kept value (no
+        // new value submitted) matches the existing one by definition, so it
+        // never on its own marks the set as changed.
         envVarsChanged =
-          existingMap.size !== desired.length ||
-          desired.some((e) => !existingMap.has(e.key) || existingMap.get(e.key) !== e.value);
+          existingMap.size !== desiredEnvValues.size ||
+          Array.from(desiredEnvValues.entries()).some(([key, newValue]) => {
+            if (!existingMap.has(key)) return true; // added key
+            if (newValue === undefined) return false; // kept → unchanged
+            return existingMap.get(key) !== newValue; // edited → changed iff different
+          });
       }
 
       const refreshed = await prisma.$transaction(async (tx) => {
@@ -771,34 +825,35 @@ router.patch(
           await tx.project.update({ where: { id: project.id }, data: updates });
         }
 
-        if (body.envVars !== undefined && body.envVars !== null) {
-          const desired = body.envVars;
-          const seen = new Set<string>();
-          for (const entry of desired) {
-            if (seen.has(entry.key)) {
-              throw new HttpError(400, 'DUPLICATE_ENV_KEY', `duplicate env key: ${entry.key}`);
-            }
-            seen.add(entry.key);
-          }
+        if (envVarsProvided) {
+          // `desiredEnvValues` was built above (deduped + validated): each key
+          // maps to a fresh value to encrypt, or `undefined` to keep the stored
+          // ciphertext untouched. Keys absent from the map are deleted.
+          const submittedKeys = Array.from(desiredEnvValues.keys());
 
-          if (desired.length === 0) {
+          if (submittedKeys.length === 0) {
             await tx.envVar.deleteMany({ where: { projectId: project.id } });
           } else {
             await tx.envVar.deleteMany({
               where: {
                 projectId: project.id,
-                key: { notIn: Array.from(seen) },
+                key: { notIn: submittedKeys },
               },
             });
           }
 
-          for (const entry of desired) {
-            const enc = encrypt(entry.value);
+          for (const [key, newValue] of desiredEnvValues) {
+            // `undefined` → the user didn't submit a new value, so keep the
+            // currently-stored encrypted value: skip the write entirely. This is
+            // what makes the write-only contract safe — the client can save the
+            // project without ever holding (or being able to wipe) the secret.
+            if (newValue === undefined) continue;
+            const enc = encrypt(newValue);
             await tx.envVar.upsert({
-              where: { projectId_key: { projectId: project.id, key: entry.key } },
+              where: { projectId_key: { projectId: project.id, key } },
               create: {
                 projectId: project.id,
-                key: entry.key,
+                key,
                 valueCiphertext: enc.ciphertext,
                 valueIv: enc.iv,
                 valueAuthTag: enc.authTag,
@@ -853,8 +908,14 @@ router.patch(
         }
       }
 
+      // When env vars were saved, return the refreshed masked set ({key,hasValue})
+      // so the client can re-sync its editor — values stay write-only, never
+      // echoed back.
+      const envVarsResult = envVarsProvided ? await loadEnvVarMeta(project.id) : undefined;
+
       res.json({
         ...reshapeProject(refreshed, { allBuilds: true }),
+        ...(envVarsResult ? { envVars: envVarsResult } : {}),
         ...(redeploySummary ? { redeploy: redeploySummary } : {}),
       });
     } catch (err) {

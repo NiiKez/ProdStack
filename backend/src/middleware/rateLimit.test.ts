@@ -13,7 +13,16 @@ process.env.LOG_LEVEL ??= 'silent';
 import express from 'express';
 import { describe, expect, it } from 'vitest';
 
-import { makeRateLimiter, userOrIpKey } from './rateLimit.js';
+import {
+  authLimiter,
+  buildTriggerLimiter,
+  expensiveLimiter,
+  globalLimiter,
+  makeRateLimiter,
+  streamLimiter,
+  userOrIpKey,
+  webhookLimiter,
+} from './rateLimit.js';
 
 const supertest = (await import('supertest')).default;
 
@@ -59,6 +68,41 @@ describe('makeRateLimiter', () => {
     const app = appWith(makeRateLimiter({ windowMs: 60_000, max: 1 }));
 
     for (let i = 0; i < 4; i++) {
+      const res = await supertest(app).get('/');
+      expect(res.status).toBe(200);
+    }
+  });
+});
+
+describe('exported limiters', () => {
+  it('exports the webhook limiter (M7) alongside the existing family', () => {
+    // M7: the GitHub webhook receiver mounts before express.json() / the global
+    // limiter, so it needs its own dedicated per-IP limiter. Assert it exists
+    // and looks like an express middleware (a 3-arg request handler) just like
+    // its siblings.
+    for (const limiter of [
+      globalLimiter,
+      authLimiter,
+      expensiveLimiter,
+      buildTriggerLimiter,
+      streamLimiter,
+      webhookLimiter,
+    ]) {
+      expect(typeof limiter).toBe('function');
+    }
+  });
+
+  it('webhookLimiter skips under NODE_ENV=test so the suite is not throttled', async () => {
+    // The factory default skip (`() => env.NODE_ENV === 'test'`) must apply to
+    // the webhook limiter — otherwise the webhook test suite (many POSTs from
+    // the same loopback IP) would start getting 429s. Fire well past any sane
+    // ceiling and confirm every request passes.
+    const app = express();
+    app.use(webhookLimiter);
+    app.get('/', (_req, res) => {
+      res.json({ ok: true });
+    });
+    for (let i = 0; i < 200; i++) {
       const res = await supertest(app).get('/');
       expect(res.status).toBe(200);
     }

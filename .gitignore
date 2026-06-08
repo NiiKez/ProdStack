@@ -43,5 +43,10 @@ coverage/
 .DS_Store
 Thumbs.db
 
+# Local-only dev backdoor — must NEVER be committed (mints an unauthenticated
+# session bypassing the OWNER_GITHUB_ID gate; also excluded in .dockerignore).
+backend/src/routes/devAuth.ts
+backend/scripts/seed-dev.mjs
+
 # Internal docs (not published to GitHub)
 docs/

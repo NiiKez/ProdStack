@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   fetchBranchHeadCommit: vi.fn(),
   redeployWithCurrentEnv: vi.fn(),
   loadDecryptedEnvVars: vi.fn(),
+  loadEnvVarMeta: vi.fn(),
 }));
 
 vi.mock('../db.js', () => ({
@@ -58,6 +59,7 @@ vi.mock('../services/deploy.js', () => ({
 
 vi.mock('../services/projectEnv.js', () => ({
   loadDecryptedEnvVars: mocks.loadDecryptedEnvVars,
+  loadEnvVarMeta: mocks.loadEnvVarMeta,
 }));
 
 vi.mock('../services/azure/index.js', () => ({
@@ -133,11 +135,36 @@ beforeEach(() => {
     author: 'octocat',
   });
   mocks.loadDecryptedEnvVars.mockResolvedValue([]);
+  mocks.loadEnvVarMeta.mockResolvedValue([]);
   mocks.redeployWithCurrentEnv.mockResolvedValue({ redeployed: false });
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe('GET /api/projects/:id env-var masking', () => {
+  it('returns {key,hasValue} and never a decrypted value', async () => {
+    mocks.projectFindFirst.mockResolvedValue({ ...project, builds: [], deployments: [] });
+    mocks.loadEnvVarMeta.mockResolvedValue([
+      { key: 'API_KEY', hasValue: true },
+      { key: 'DB_URL', hasValue: true },
+    ]);
+
+    const res = await supertest(createApp()).get('/api/projects/p1');
+
+    expect(res.status).toBe(200);
+    expect(res.body.envVars).toEqual([
+      { key: 'API_KEY', hasValue: true },
+      { key: 'DB_URL', hasValue: true },
+    ]);
+    // The cleartext value must never appear in the response body.
+    for (const ev of res.body.envVars) {
+      expect(ev).not.toHaveProperty('value');
+    }
+    // The decrypting loader is never reached on the read path.
+    expect(mocks.loadDecryptedEnvVars).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/projects/:id/rebuild', () => {
@@ -217,7 +244,11 @@ describe('POST /api/projects/:id/rebuild', () => {
 });
 
 describe('PATCH /api/projects/:id env-var redeploy summary', () => {
+  // Returns the env-var write spies so tests can assert exactly which keys were
+  // (re)encrypted vs. kept untouched.
   function mockPatchTx() {
+    const upsert = vi.fn();
+    const deleteMany = vi.fn();
     // The handler runs a $transaction(cb) then awaits the env-var write +
     // findFirstOrThrow inside. We only need it to return a reshaped project.
     mocks.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) =>
@@ -230,12 +261,10 @@ describe('PATCH /api/projects/:id env-var redeploy summary', () => {
             deployments: [],
           }),
         },
-        envVar: {
-          deleteMany: vi.fn(),
-          upsert: vi.fn(),
-        },
+        envVar: { deleteMany, upsert },
       }),
     );
+    return { upsert, deleteMany };
   }
 
   it('reports redeploy.redeployed=true when there is an active READY deployment', async () => {
@@ -367,5 +396,199 @@ describe('PATCH /api/projects/:id env-var redeploy summary', () => {
     expect(res.status).toBe(200);
     expect(res.body).not.toHaveProperty('redeploy');
     expect(mocks.redeployWithCurrentEnv).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH /api/projects/:id write-only env-var semantics', () => {
+  // Re-declare the tx helpers in this block's scope (mirrors the sibling block).
+  function mockPatchTx() {
+    const upsert = vi.fn();
+    const deleteMany = vi.fn();
+    mocks.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) =>
+      cb({
+        project: {
+          update: vi.fn(),
+          findFirstOrThrow: vi.fn().mockResolvedValue({ ...project, builds: [], deployments: [] }),
+        },
+        envVar: { deleteMany, upsert },
+      }),
+    );
+    return { upsert, deleteMany };
+  }
+  function upsertedKeys(upsert: ReturnType<typeof vi.fn>): string[] {
+    return upsert.mock.calls
+      .map((c) => (c[0] as { where: { projectId_key: { key: string } } }).where.projectId_key.key)
+      .sort();
+  }
+
+  it('keeps the stored value (no write) when a key is submitted with no value', async () => {
+    const { upsert } = mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([{ name: 'API_KEY', value: 'secret' }]);
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      // No `value` → keep the existing encrypted value.
+      .send({ envVars: [{ key: 'API_KEY' }] });
+
+    expect(res.status).toBe(200);
+    // The key was NOT re-encrypted/written, so the stored ciphertext is untouched.
+    expect(upsertedKeys(upsert)).toEqual([]);
+    // Nothing changed → no redeploy.
+    expect(res.body.redeploy).toEqual({ redeployed: false });
+    expect(mocks.redeployWithCurrentEnv).not.toHaveBeenCalled();
+  });
+
+  it('treats an explicit null value the same as omitted (keeps stored value)', async () => {
+    const { upsert } = mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([{ name: 'API_KEY', value: 'secret' }]);
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ envVars: [{ key: 'API_KEY', value: null }] });
+
+    expect(res.status).toBe(200);
+    expect(upsertedKeys(upsert)).toEqual([]);
+    expect(mocks.redeployWithCurrentEnv).not.toHaveBeenCalled();
+  });
+
+  it('encrypts + writes only the edited key, keeping an untouched sibling', async () => {
+    const { upsert } = mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([
+      { name: 'API_KEY', value: 'secret' },
+      { name: 'DB_URL', value: 'postgres://old' },
+    ]);
+    mocks.redeployWithCurrentEnv.mockResolvedValue({ redeployed: true });
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      // API_KEY kept (no value), DB_URL edited (new value).
+      .send({ envVars: [{ key: 'API_KEY' }, { key: 'DB_URL', value: 'postgres://new' }] });
+
+    expect(res.status).toBe(200);
+    // Only the edited key is re-encrypted; the kept one is never touched.
+    expect(upsertedKeys(upsert)).toEqual(['DB_URL']);
+    expect(res.body.redeploy).toEqual({ redeployed: true });
+  });
+
+  it('writes a brand-new key when submitted with a value', async () => {
+    const { upsert } = mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([{ name: 'API_KEY', value: 'secret' }]);
+    mocks.redeployWithCurrentEnv.mockResolvedValue({ redeployed: true });
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      // API_KEY kept, NEW_VAR added with a value.
+      .send({ envVars: [{ key: 'API_KEY' }, { key: 'NEW_VAR', value: 'v' }] });
+
+    expect(res.status).toBe(200);
+    expect(upsertedKeys(upsert)).toEqual(['NEW_VAR']);
+    expect(res.body.redeploy).toEqual({ redeployed: true });
+  });
+
+  it('deletes a previously-present key omitted from the submitted list', async () => {
+    const { upsert, deleteMany } = mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([
+      { name: 'API_KEY', value: 'secret' },
+      { name: 'OLD', value: 'gone' },
+    ]);
+    mocks.redeployWithCurrentEnv.mockResolvedValue({ redeployed: true });
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      // OLD is absent → deleted. API_KEY kept.
+      .send({ envVars: [{ key: 'API_KEY' }] });
+
+    expect(res.status).toBe(200);
+    // The delete scopes to keys NOT in the submitted set, so OLD is removed.
+    expect(deleteMany).toHaveBeenCalledWith({
+      where: { projectId: 'p1', key: { notIn: ['API_KEY'] } },
+    });
+    // API_KEY kept → not re-written.
+    expect(upsertedKeys(upsert)).toEqual([]);
+    // The set shrank → changed → redeploy.
+    expect(res.body.redeploy).toEqual({ redeployed: true });
+  });
+
+  it('deletes everything when an empty list is submitted', async () => {
+    const { deleteMany } = mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([{ name: 'API_KEY', value: 'secret' }]);
+    mocks.redeployWithCurrentEnv.mockResolvedValue({ redeployed: true });
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ envVars: [] });
+
+    expect(res.status).toBe(200);
+    expect(deleteMany).toHaveBeenCalledWith({ where: { projectId: 'p1' } });
+    expect(res.body.redeploy).toEqual({ redeployed: true });
+  });
+
+  it('400 ENV_VALUE_REQUIRED when a brand-new key is submitted with no value', async () => {
+    const { upsert } = mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([{ name: 'API_KEY', value: 'secret' }]);
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      // NEW_VAR has never been stored and carries no value → nothing to keep.
+      .send({ envVars: [{ key: 'API_KEY' }, { key: 'NEW_VAR' }] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('ENV_VALUE_REQUIRED');
+    expect(upsert).not.toHaveBeenCalled();
+    expect(mocks.redeployWithCurrentEnv).not.toHaveBeenCalled();
+  });
+
+  it('400 ENV_VALUE_REQUIRED when a stored key is submitted with an empty value (never silently wipes it)', async () => {
+    const { upsert } = mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([{ name: 'API_KEY', value: 'secret' }]);
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      // Editing a stored secret to "" must be rejected, not encrypt "" over the
+      // real value (the client can't see the secret it would be clobbering).
+      .send({ envVars: [{ key: 'API_KEY', value: '' }] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('ENV_VALUE_REQUIRED');
+    expect(upsert).not.toHaveBeenCalled();
+    expect(mocks.redeployWithCurrentEnv).not.toHaveBeenCalled();
+  });
+
+  it('400 DUPLICATE_ENV_KEY for a repeated key', async () => {
+    mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([{ name: 'API_KEY', value: 'secret' }]);
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ envVars: [{ key: 'API_KEY' }, { key: 'API_KEY', value: 'x' }] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('DUPLICATE_ENV_KEY');
+  });
+
+  it('PATCH response returns masked {key,hasValue} env vars, never a value', async () => {
+    mockPatchTx();
+    mocks.loadDecryptedEnvVars.mockResolvedValue([{ name: 'API_KEY', value: 'secret' }]);
+    mocks.loadEnvVarMeta.mockResolvedValue([{ key: 'API_KEY', hasValue: true }]);
+
+    const res = await supertest(createApp())
+      .patch('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ envVars: [{ key: 'API_KEY', value: 'rotated' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.envVars).toEqual([{ key: 'API_KEY', hasValue: true }]);
+    for (const ev of res.body.envVars) {
+      expect(ev).not.toHaveProperty('value');
+    }
   });
 });

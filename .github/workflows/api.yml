@@ -50,10 +50,10 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Setup Node 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -96,14 +96,14 @@ jobs:
         run: |
           docker build -f backend/Dockerfile \
             -t prodstack.azurecr.io/prodstack-api:${{ github.sha }} \
-            -t prodstack.azurecr.io/prodstack-api:latest \
             .
-          # Push the two explicit tags (not `--all-tags`, which would also push
-          # any stale local tag of this repo on a non-ephemeral runner). The
-          # deploy below pins the immutable :<sha>; :latest is a human convenience
-          # only and is NOT authoritative.
+          # Push ONLY the immutable :<sha> tag (the deploy below pins it). We do
+          # NOT build/push a mutable :latest: nothing consumes it (the deploy
+          # references the :<sha>), and a floating :latest is an attack surface
+          # (anyone who could repoint it could redirect a careless `docker pull`).
+          # Explicit tag, not `--all-tags` (which would also push any stale local
+          # tag of this repo on a non-ephemeral runner).
           docker push prodstack.azurecr.io/prodstack-api:${{ github.sha }}
-          docker push prodstack.azurecr.io/prodstack-api:latest
 
       # Trigger the revision roll by POSTing to the protected self-deploy endpoint
       # on the running API. The API holds Azure RBAC via its managed identity and

@@ -7,8 +7,9 @@ import { pinoHttp } from 'pino-http';
 import { env, isProd } from './env.js';
 import { errorMiddleware } from './lib/errors.js';
 import { logger } from './lib/logger.js';
-import { globalLimiter } from './middleware/rateLimit.js';
+import { globalLimiter, webhookLimiter } from './middleware/rateLimit.js';
 import { requireAuth } from './middleware/requireAuth.js';
+import { requireXRequestedWith } from './middleware/requireXRequestedWith.js';
 import activityRouter from './routes/activity.js';
 import adminRouter from './routes/admin.js';
 import authRouter from './routes/auth.js';
@@ -60,9 +61,15 @@ export function createApp(): Express {
   app.use(cookieParser(env.COOKIE_SECRET));
 
   // GitHub webhook receiver must mount before `express.json()` so HMAC
-  // verification sees the exact bytes GitHub signed.
+  // verification sees the exact bytes GitHub signed — which also puts it ahead
+  // of the app-wide `globalLimiter`. A dedicated per-IP `webhookLimiter` mounts
+  // ON this sub-path so an unauthenticated flood of forged deliveries can't burn
+  // an indexed lookup + AES-GCM decrypt + HMAC-over-1MB unthrottled. Note: no
+  // CSRF (`requireXRequestedWith`) guard here — webhooks are HMAC-authenticated
+  // and GitHub never sends `X-Requested-With`.
   app.use(
     '/api/webhooks',
+    webhookLimiter,
     express.raw({ type: 'application/json', limit: '1mb' }),
     webhooksRouter,
   );
@@ -77,16 +84,35 @@ export function createApp(): Express {
 
   app.use('/healthz', healthRouter);
   app.use('/api/health', healthRouter);
-  app.use('/api/auth', authRouter);
+
+  // CSRF gate for the cookie/session-authenticated routers, applied CENTRALLY
+  // (at the router-group level) rather than ad-hoc per handler — so a future
+  // mutating route on any of these routers can't silently forget it. The guard
+  // no-ops on safe methods (GET/HEAD/OPTIONS) and only requires
+  // `X-Requested-With: XMLHttpRequest` on state-changing requests, which the SPA
+  // always sends and a cross-site form/image cannot. The per-route guards still
+  // in those routers are harmless redundancy.
+  //
+  // Deliberately NOT applied to:
+  //   - `/api/webhooks` (mounted above, before express.json): HMAC-authenticated;
+  //     GitHub does not send X-Requested-With.
+  //   - `/api/admin` (below): authenticated by X-Deploy-Token / X-Admin-Token
+  //     (not the session cookie) and called by the CI GitHub Action, which does
+  //     not send X-Requested-With — guarding it would break CI self-deploy.
+  app.use('/api/auth', requireXRequestedWith, authRouter);
+
   // Machine-to-machine CI/CD self-deploy. Token-authenticated (not the user
-  // session), so it mounts OUTSIDE requireAuth — see routes/admin.ts.
+  // session), so it mounts OUTSIDE requireAuth — see routes/admin.ts — and
+  // OUTSIDE the CSRF guard (the CI runner is not a browser, sends no
+  // X-Requested-With).
   app.use('/api/admin', adminRouter);
-  app.use('/api/projects', requireAuth, projectsRouter);
-  app.use('/api/github', requireAuth, githubRouter);
-  app.use('/api/builds', requireAuth, buildsRouter);
-  app.use('/api/deployments', requireAuth, deploymentsRouter);
-  app.use('/api/activity', requireAuth, activityRouter);
-  app.use('/api/account', requireAuth, meRouter);
+
+  app.use('/api/projects', requireAuth, requireXRequestedWith, projectsRouter);
+  app.use('/api/github', requireAuth, requireXRequestedWith, githubRouter);
+  app.use('/api/builds', requireAuth, requireXRequestedWith, buildsRouter);
+  app.use('/api/deployments', requireAuth, requireXRequestedWith, deploymentsRouter);
+  app.use('/api/activity', requireAuth, requireXRequestedWith, activityRouter);
+  app.use('/api/account', requireAuth, requireXRequestedWith, meRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ error: 'NOT_FOUND' });

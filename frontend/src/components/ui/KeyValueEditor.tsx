@@ -1,17 +1,15 @@
 import { useState } from 'react';
 import { Eye, EyeOff, Plus, Trash2, ClipboardPaste } from 'lucide-react';
 import { cn } from '@/lib/cn';
+import type { EnvRow } from '@/lib/envVars';
 import { Button } from './Button';
 import { IconButton } from './IconButton';
 
-export interface KeyValuePair {
-  key: string;
-  value: string;
-}
+export type { EnvRow } from '@/lib/envVars';
 
 export interface KeyValueEditorProps {
-  value: KeyValuePair[];
-  onChange: (next: KeyValuePair[]) => void;
+  value: EnvRow[];
+  onChange: (next: EnvRow[]) => void;
   disabled?: boolean;
 }
 
@@ -26,20 +24,34 @@ const FIELD =
   'transition-colors focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/40 ' +
   'disabled:opacity-50 disabled:cursor-not-allowed';
 
+/** Placeholder shown in the value field of an unedited stored secret. The
+ * server never sends the cleartext (values are write-only), so an existing
+ * secret can't be revealed — only replaced by typing a new value. */
+const STORED_PLACEHOLDER = '•••••••• (set)';
+
 /**
- * Env-var rows editor. Keys are validated against the
- * backend's `^[A-Z_][A-Z0-9_]*$` rule with inline error styling; values are
- * masked by default with a per-row reveal toggle. "Paste .env" expands a
- * textarea that parses `KEY=VALUE` lines (ignoring blanks + `#` comments) and
- * merges them in, overwriting existing keys.
+ * Env-var rows editor. Keys are validated against the backend's
+ * `^[A-Z_][A-Z0-9_]*$` rule with inline error styling. Values are write-only:
+ * a row that came from the server shows a masked "(set)" placeholder and holds
+ * no cleartext — the user replaces a value by typing a new one (no reveal of an
+ * existing secret, by design). New/edited values are masked by default with a
+ * per-row reveal toggle. "Paste .env" expands a textarea that parses
+ * `KEY=VALUE` lines (ignoring blanks + `#` comments) and merges them in,
+ * overwriting existing keys.
  */
 export function KeyValueEditor({ value, onChange, disabled = false }: KeyValueEditorProps) {
   const [revealed, setRevealed] = useState<Set<number>>(new Set());
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState('');
 
-  const updateRow = (index: number, patch: Partial<KeyValuePair>) => {
+  const updateRow = (index: number, patch: Partial<EnvRow>) => {
     onChange(value.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  };
+
+  // Typing into the value field marks the row edited — that's the signal the
+  // save logic uses to send a replacement value (vs. keeping the stored one).
+  const setRowValue = (index: number, next: string) => {
+    updateRow(index, { value: next, edited: true });
   };
 
   const removeRow = (index: number) => {
@@ -54,7 +66,7 @@ export function KeyValueEditor({ value, onChange, disabled = false }: KeyValueEd
     });
   };
 
-  const addRow = () => onChange([...value, { key: '', value: '' }]);
+  const addRow = () => onChange([...value, { key: '', value: '', stored: false, edited: false }]);
 
   const toggleReveal = (index: number) => {
     setRevealed((prev) => {
@@ -66,7 +78,7 @@ export function KeyValueEditor({ value, onChange, disabled = false }: KeyValueEd
   };
 
   const importEnv = () => {
-    const parsed: KeyValuePair[] = [];
+    const parsed: { key: string; value: string }[] = [];
     for (const rawLine of pasteText.split('\n')) {
       const line = rawLine.trim();
       if (line.length === 0 || line.startsWith('#')) continue;
@@ -82,14 +94,12 @@ export function KeyValueEditor({ value, onChange, disabled = false }: KeyValueEd
     }
     if (parsed.length > 0) {
       // Merge in place: overwrite an existing row with the same (non-empty) key,
-      // otherwise append. Building a Map keyed by `key` would collapse multiple
-      // in-progress blank-key rows into one, silently discarding the user's
-      // unsaved edits — so we splice instead of rebuilding from a Map.
+      // otherwise append. A pasted value is always a real (edited) value.
       const next = [...value];
       for (const p of parsed) {
         const idx = next.findIndex((r) => r.key.length > 0 && r.key === p.key);
-        if (idx >= 0) next[idx] = { key: p.key, value: p.value };
-        else next.push({ key: p.key, value: p.value });
+        if (idx >= 0) next[idx] = { ...next[idx]!, key: p.key, value: p.value, edited: true };
+        else next.push({ key: p.key, value: p.value, stored: false, edited: true });
       }
       onChange(next);
     }
@@ -109,6 +119,9 @@ export function KeyValueEditor({ value, onChange, disabled = false }: KeyValueEd
         <div className="flex flex-col gap-2">
           {value.map((row, index) => {
             const keyInvalid = row.key.length > 0 && !isValidEnvKey(row.key);
+            // An unedited stored row holds no cleartext — show the masked
+            // "(set)" placeholder instead and don't let it be revealed.
+            const isStoredMasked = row.stored && !row.edited;
             return (
               <div key={index} className="flex items-start gap-2">
                 <div className="w-2/5">
@@ -130,22 +143,27 @@ export function KeyValueEditor({ value, onChange, disabled = false }: KeyValueEd
                   <input
                     aria-label={`Variable ${index + 1} value`}
                     className={cn(FIELD, 'border-slate-700 pr-9 font-mono')}
-                    placeholder="value"
-                    type={revealed.has(index) ? 'text' : 'password'}
+                    placeholder={isStoredMasked ? STORED_PLACEHOLDER : 'value'}
+                    // A stored-masked row has an empty value field with a "(set)"
+                    // placeholder; it stays type=text so the placeholder reads as
+                    // plain text. Edited/new values mask unless revealed.
+                    type={isStoredMasked || revealed.has(index) ? 'text' : 'password'}
                     value={row.value}
                     disabled={disabled}
                     autoComplete="off"
                     spellCheck={false}
-                    onChange={(e) => updateRow(index, { value: e.target.value })}
+                    onChange={(e) => setRowValue(index, e.target.value)}
                   />
-                  <button
-                    type="button"
-                    aria-label={revealed.has(index) ? 'Hide value' : 'Reveal value'}
-                    onClick={() => toggleReveal(index)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded text-slate-500 hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
-                  >
-                    {revealed.has(index) ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </button>
+                  {!isStoredMasked && (
+                    <button
+                      type="button"
+                      aria-label={revealed.has(index) ? 'Hide value' : 'Reveal value'}
+                      onClick={() => toggleReveal(index)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded text-slate-500 hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
+                    >
+                      {revealed.has(index) ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  )}
                 </div>
                 <IconButton
                   label={`Remove ${row.key || 'variable'}`}

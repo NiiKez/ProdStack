@@ -45,9 +45,10 @@ import {
   isValidEnvKey,
   useToast,
 } from '@/components/ui';
-import type { KeyValuePair } from '@/components/ui';
+import type { EnvRow } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { api } from '@/lib/api';
+import { buildEnvPayload, envRowsDirty, rowsFromServer } from '@/lib/envVars';
 import { isInFlight } from '@/lib/status';
 import { useProject } from '@/hooks/useProject';
 import { useDeleteProject } from '@/hooks/useDeleteProject';
@@ -1055,15 +1056,15 @@ function SettingsTab({ project }: SettingsTabProps) {
     setAutoDeploy(project.autoDeploy);
   }, [project.name, project.branch, project.autoDeploy]);
 
-  // Env vars: seed from the server, re-sync only when the saved content
-  // actually changes (keyed on the serialized list) so a background refetch
-  // doesn't clobber unsaved edits.
+  // Env vars: seed masked rows from the server (values are write-only — the
+  // server sends only {key,hasValue}, so a stored secret shows a "(set)"
+  // placeholder until the user types a replacement). Re-sync only when the
+  // saved content actually changes (keyed on the serialized list) so a
+  // background refetch doesn't clobber unsaved edits.
   const savedEnvKey = JSON.stringify(project.envVars ?? []);
-  const [envVars, setEnvVars] = useState<KeyValuePair[]>(
-    () => (project.envVars ?? []).map((e) => ({ key: e.key, value: e.value })),
-  );
+  const [envVars, setEnvVars] = useState<EnvRow[]>(() => rowsFromServer(project.envVars));
   useEffect(() => {
-    setEnvVars((project.envVars ?? []).map((e) => ({ key: e.key, value: e.value })));
+    setEnvVars(rowsFromServer(project.envVars));
     // Intentionally keyed on `savedEnvKey` (the serialized content), not the
     // `project.envVars` array reference: refetches return a fresh array each
     // time and would otherwise wipe in-progress edits on every poll.
@@ -1077,7 +1078,7 @@ function SettingsTab({ project }: SettingsTabProps) {
     name !== project.name || branch !== project.branch || autoDeploy !== project.autoDeploy;
   const canSave = dirty && name.trim().length > 0 && branch.trim().length > 0;
 
-  const envDirty = JSON.stringify(envVars) !== savedEnvKey;
+  const envDirty = envRowsDirty(envVars, project.envVars);
   const envError = useMemo<string | null>(() => {
     const seen = new Set<string>();
     for (const row of envVars) {
@@ -1085,6 +1086,13 @@ function SettingsTab({ project }: SettingsTabProps) {
       if (!isValidEnvKey(row.key)) return `Invalid key "${row.key}" — use A–Z, 0–9, _.`;
       if (seen.has(row.key)) return `Duplicate key "${row.key}".`;
       seen.add(row.key);
+      // Reject an empty value for any new OR edited row: a new key has nothing
+      // to save, and clearing a stored secret to "" would silently destroy it.
+      // The backend enforces the same rule (ENV_VALUE_REQUIRED); to actually
+      // remove a variable, delete the row.
+      if ((row.edited || !row.stored) && row.value === '') {
+        return `Value can't be empty for "${row.key}" — remove the row to delete it.`;
+      }
     }
     return null;
   }, [envVars]);
@@ -1093,7 +1101,15 @@ function SettingsTab({ project }: SettingsTabProps) {
   const handleSaveEnv = async () => {
     if (!canSaveEnv) return;
     try {
-      const result = await updateProject.mutateAsync({ envVars });
+      // Write-only contract: send a value only for new/edited rows; omit it for
+      // untouched stored rows so the backend keeps the existing secret.
+      const result = await updateProject.mutateAsync({ envVars: buildEnvPayload(envVars) });
+      // Re-seed the editor from the masked server result so every row resets to
+      // {stored:true, edited:false, value:''} and the form clears its dirty
+      // state. Without this a value-only rotation leaves the editor permanently
+      // "dirty": the masked payload ({key,hasValue}) is byte-identical before and
+      // after, so the savedEnvKey-keyed re-sync effect never fires.
+      setEnvVars(rowsFromServer(result.envVars));
       const redeploy = result.redeploy;
       if (redeploy?.redeployed) {
         toast({

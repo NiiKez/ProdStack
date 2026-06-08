@@ -56,7 +56,7 @@ The whole pipeline is queue-driven and crash-tolerant: the database *is* the bui
 ### Manage
 
 - **One-click rollback** — re-deploy the image from any previous successful build.
-- **Per-project environment variables** — stored **AES-256-GCM encrypted at rest**, surfaced to the running app as Container App secrets, with automatic redeploy on change.
+- **Per-project environment variables** — stored **AES-256-GCM encrypted at rest** and **write-only** (the API returns only key names, never decrypted values), surfaced to the running app as Container App secrets, with automatic redeploy on change.
 - **Manual rebuild** — trigger a build without pushing to Git.
 - **Build cancellation** — fast-cancel a queued build, or cooperatively abort an in-flight build via `AbortController`.
 
@@ -118,15 +118,15 @@ ProdStack is three first-party components, each its own Azure Container App in a
 4. The worker **polls every ~2s** and atomically claims a row:
    ```sql
    UPDATE "Build" SET ... WHERE id = (
-     SELECT id FROM "Build" WHERE status = 'QUEUED'
-     ORDER BY "createdAt" FOR UPDATE SKIP LOCKED LIMIT 1
+     SELECT id FROM "Build" WHERE status = 'QUEUED' AND "claimedAt" IS NULL
+     ORDER BY "createdAt" ASC FOR UPDATE SKIP LOCKED LIMIT 1
    )
    ```
-5. The worker runs `git clone --depth 1` (the user's GitHub token is decrypted and injected via `http.<url>.extraheader`, never written to disk in plaintext).
+5. The worker runs `git clone --depth 1` (the user's GitHub token is decrypted and passed to git as an `http.<url>.extraheader` config through the child process's `GIT_CONFIG_*` environment — kept off the command line / `/proc/<pid>/cmdline` and never written to disk in plaintext).
 6. The worker runs **`/kaniko/executor`**, building the image and pushing the tags to the registry.
 7. The worker calls `updateContainerApp({ name, image })` (Azure SDK) to roll the **user's app** to a new revision.
 8. In one transaction it writes a `Deployment` row, flips the previous deployment inactive, and updates the project's live URL.
-9. Status transitions (`CLONING → BUILDING → PUSHING → DEPLOYING → READY`) and log lines are written to Postgres. The SSE endpoint **tails those Postgres rows** and pushes them to the browser — Postgres is the message bus precisely because the worker is a separate process.
+9. Status transitions (`QUEUED → CLONING → BUILDING → PUSHING → DEPLOYING → READY`) and log lines are written to Postgres. The SSE endpoint **tails those Postgres rows** and pushes them to the browser — Postgres is the message bus precisely because the worker is a separate process.
 
 ---
 
@@ -137,7 +137,7 @@ ProdStack is three first-party components, each its own Azure Container App in a
 | **Backend** | Node 20 · TypeScript 5.7 · Express 4.21 · Prisma 6.19 + PostgreSQL 16 · Zod · `jsonwebtoken` · helmet · cors · cookie-parser · pino + pino-http · node-cron · `@octokit/rest` · Azure SDKs (`@azure/identity` `DefaultAzureCredential`, `@azure/arm-appcontainers`, `@azure/arm-containerregistry`, `@azure/keyvault-secrets`, `@azure/storage-blob`) · SSE over plain HTTP |
 | **Frontend** | React 19 · Vite 6 · TypeScript 5.7 · Tailwind CSS 4 · `react-router-dom` 7 · `@tanstack/react-query` 5 · Radix UI primitives · `lucide-react` · `react-hook-form` + Zod |
 | **Build & runtime** | Kaniko · Docker · nginx · Azure Container Apps · Azure Container Registry · Azure Database for PostgreSQL Flexible Server · Azure Key Vault |
-| **Tooling** | npm workspaces · ESLint 9 · Prettier 3 · Vitest + Supertest · GitHub Actions (CI + self-deploy) |
+| **Tooling** | npm workspaces · ESLint 9 · Prettier 3 · Vitest 4 + Supertest · GitHub Actions (CI + self-deploy) |
 
 ---
 
@@ -149,7 +149,7 @@ ProdStack is three first-party components, each its own Azure Container App in a
 │                       #   + services + tests. Dockerfile runs `prisma migrate
 │                       #   deploy` on boot.
 ├── frontend/           # React 19 + Vite SPA (Tailwind). Served by nginx in
-│                       #   prod (nginx.conf serves the SPA + reverse-proxies
+│                       #   prod (nginx.conf.template serves the SPA + reverse-proxies
 │                       #   /api + /builds).
 ├── worker/             # Build-worker image: Node 20 + git + /kaniko/executor
 │                       #   + the compiled backend/dist.
@@ -285,10 +285,13 @@ Idempotent provisioning and deploy scripts live in `infra/`. They are the source
 
 - **GitHub OAuth** sign-in; the session is a JWT in an `HttpOnly` / `Secure` / `SameSite=Lax` cookie.
 - **HMAC-verified webhooks** — incoming GitHub deliveries are signature-checked before any work is queued, and de-duplicated by delivery id.
-- **Encryption at rest** — GitHub tokens, per-project environment variables, and webhook secrets are **AES-256-GCM encrypted** in the database (with a key-version column for rotation).
+- **Input validation as a trust boundary** — webhook commit SHAs (`^[0-9a-f]{7,64}$`) and git branch names are validated before they reach `git`, and every user-controlled git positional is passed after `--end-of-options`, closing argument-injection (e.g. `--upload-pack=…` RCE) paths. The builder's GitHub token is passed off the command line via `GIT_CONFIG_*`, so it can't be read from `/proc/<pid>/cmdline`.
+- **Encryption at rest** — GitHub tokens, per-project environment variables, and webhook secrets are **AES-256-GCM encrypted** in the database (with a key-version column for rotation). Environment-variable values are **write-only**: the API returns only key names, never decrypted values.
 - **Secrets at runtime** live in Azure Key Vault and are surfaced to apps as Container App secrets, never baked into images.
 - **Least-privilege managed identity** for all Azure operations.
-- **CSRF protection** — state-changing routes require an `X-Requested-With` header, and `helmet` sets security headers.
+- **Per-IP rate limiting** on the API — a global limiter plus tighter limiters on auth, the webhook receiver, expensive Azure-fan-out reads, build triggers, and SSE streams — to blunt abuse and Azure-cost amplification.
+- **CSRF protection** — cookie-authed state-changing routes require an `X-Requested-With` header (webhooks use HMAC and admin endpoints use a bearer token, so both are correctly exempt).
+- **Hardened delivery** — `helmet` on the API and a strict CSP + HSTS / `X-Frame-Options` / … on the nginx-served SPA; container images run **non-root** (`USER node`) where the runtime allows and **pin every base image by digest**; GitHub Actions are pinned to commit SHAs and only immutable `:<git-sha>` image tags are pushed.
 
 ---
 
