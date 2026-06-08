@@ -21,12 +21,22 @@ import cron, { type ScheduledTask } from 'node-cron';
 import { env } from '../../env.js';
 import { logger } from '../../lib/logger.js';
 import { cleanupBuilds } from './cleanupBuilds.js';
+import { cleanupDemo } from './cleanupDemo.js';
 import { cleanupImages } from './cleanupImages.js';
 
 const log = logger.child({ component: 'cleanup-scheduler' });
 
 /** ~03:17 daily. Offset off :00 to dodge other top-of-hour jobs. */
 const CRON_SCHEDULE = '17 3 * * *';
+
+/**
+ * Demo-session reaper cadence: hourly at :42. The demo TTL is short
+ * (DEMO_TTL_MINUTES, default 120) so the daily CRON_SCHEDULE would let an
+ * expired sandbox linger up to ~24h; an hourly sweep keeps the lag under an
+ * hour. Offset off :00 (same convention as CRON_SCHEDULE) to dodge other
+ * top-of-hour jobs.
+ */
+const DEMO_CRON_SCHEDULE = '42 * * * *';
 
 export interface CleanupSchedulerHandle {
   stop: () => void;
@@ -52,13 +62,25 @@ async function runBuildCleanup(): Promise<void> {
   }
 }
 
+async function runDemoCleanup(): Promise<void> {
+  log.info('demo cleanup job starting');
+  try {
+    const res = await cleanupDemo();
+    log.info({ ...res }, 'demo cleanup job finished');
+  } catch (err) {
+    log.error({ err }, 'demo cleanup job failed');
+  }
+}
+
 export function startCleanupScheduler(): CleanupSchedulerHandle {
   log.info(
     {
       schedule: CRON_SCHEDULE,
+      demoSchedule: DEMO_CRON_SCHEDULE,
       retentionDaysImages: env.RETENTION_DAYS_IMAGES,
       retentionDaysLogs: env.RETENTION_DAYS_LOGS,
       retentionDaysBuilds: env.RETENTION_DAYS_BUILDS,
+      demoTtlMinutes: env.DEMO_TTL_MINUTES,
     },
     'cleanup scheduler starting',
   );
@@ -69,6 +91,9 @@ export function startCleanupScheduler(): CleanupSchedulerHandle {
     }),
     cron.schedule(CRON_SCHEDULE, () => {
       void runBuildCleanup();
+    }),
+    cron.schedule(DEMO_CRON_SCHEDULE, () => {
+      void runDemoCleanup();
     }),
   ];
 

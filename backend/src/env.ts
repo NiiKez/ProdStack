@@ -138,6 +138,26 @@ const EnvSchema = z.object({
   // 16 chars so a misconfigured short/empty value can't enable a weak gate.
   ADMIN_TOKEN: z.string().min(16, 'ADMIN_TOKEN must be at least 16 chars').optional(),
 
+  // Demo mode (docs/DEMO_MODE.md). Sandboxed public "Try ProdStack" sessions:
+  // an ephemeral demo User per session, pre-seeded fake projects, and build
+  // logs that are a *replay* of a captured real build — nothing touches Azure /
+  // ACR / git / Kaniko. All optional with safe defaults; the master switch
+  // (ENABLE_DEMO) defaults false so the surface is fully off (demo-login 404s)
+  // unless explicitly enabled. Demo safety is INDEPENDENT of AZURE_STUB — it
+  // comes from routing + pre-claimed builds, so ENABLE_DEMO=true is safe under
+  // the intended prod config (NODE_ENV=production, AZURE_STUB=false).
+  ENABLE_DEMO: boolFromString(false),
+  // Demo session lifetime (minutes). A demo cookie/User older than this is
+  // treated as unauthenticated and reaped by the hourly cleanup job.
+  DEMO_TTL_MINUTES: z.coerce.number().int().positive().default(120),
+  // Hard cap on concurrent (unexpired) demo users; demo-login returns 503 when
+  // exceeded so a flood of sandbox sessions can't balloon the DB.
+  DEMO_MAX_ACTIVE: z.coerce.number().int().positive().default(50),
+  // Replay time-compression factor for the demo build driver. The captured
+  // build is ~90s; 6× replays it in ~15s so a visitor sees the whole pipeline
+  // without a long wait. 1× = real-time fidelity.
+  DEMO_REPLAY_SPEED: z.coerce.number().positive().default(6),
+
   // Feature gates
   ENABLE_WORKER: boolFromString(false),
   // Starts the in-process node-cron cleanup scheduler (image GC + build/log

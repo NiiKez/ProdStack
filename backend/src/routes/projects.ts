@@ -14,8 +14,13 @@ import { logger } from '../lib/logger.js';
 import { buildTriggerLimiter, expensiveLimiter } from '../middleware/rateLimit.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 import { createContainerApp, deleteContainerApp } from '../services/azure/index.js';
-import { getAppMetrics, type MetricRange } from '../services/azure/metrics.js';
-import { queryRuntimeLogs } from '../services/azure/logs.js';
+import { getAppMetrics, stubMetrics, type MetricRange } from '../services/azure/metrics.js';
+import { queryRuntimeLogs, stubRuntimeLogs } from '../services/azure/logs.js';
+import {
+  createDemoProject,
+  rollbackDemoDeployment,
+  startDemoBuild,
+} from '../services/demo/demoOrchestrator.js';
 import {
   IN_FLIGHT_BUILD_STATUSES,
   redeployWithCurrentEnv,
@@ -325,6 +330,26 @@ router.post(
     try {
       const user = getUser(req);
       const body = createBodySchema.parse(req.body);
+
+      // Demo sessions: dispatch to the DB-only orchestrator BEFORE any GitHub
+      // (`octokitForUser`) or Azure (`createContainerApp`) call — the demo
+      // session is structurally unable to reach a real external service
+      // (docs/DEMO_MODE.md §4 layer 3). The orchestrator creates the project +
+      // kicks a replay build; we re-fetch + reshape so the HTTP response is
+      // byte-identical to a real create.
+      if (req.user?.isDemo === true) {
+        const { projectId } = await createDemoProject(
+          { id: user.id, githubLogin: user.githubLogin },
+          { name: body.name, repoUrl: body.repoUrl, ...(body.branch ? { branch: body.branch } : {}) },
+        );
+        const created = await prisma.project.findUniqueOrThrow({
+          where: { id: projectId },
+          include: projectWithRelations.include,
+        });
+        res.status(201).json(reshapeProject(created));
+        return;
+      }
+
       const { owner, repo } = parseRepoUrl(body.repoUrl);
 
       const userRow = await prisma.user.findUnique({ where: { id: user.id } });
@@ -495,7 +520,12 @@ router.get('/:id/metrics', expensiveLimiter, async (req: Request, res: Response,
     const project = await requireOwnedProject(id, user.id);
 
     const range: MetricRange = q.range ?? '1h';
-    const metrics = await getAppMetrics({ containerAppName: project.containerAppName, range });
+    // Demo projects have no real Azure resource to query, so synthesize a series
+    // from the stub generator regardless of AZURE_STUB (docs/DEMO_MODE.md §6.5).
+    const metrics =
+      req.user?.isDemo === true
+        ? stubMetrics({ containerAppName: project.containerAppName, range })
+        : await getAppMetrics({ containerAppName: project.containerAppName, range });
     res.json(metrics);
   } catch (err) {
     next(err);
@@ -515,12 +545,16 @@ router.get('/:id/runtime/logs', expensiveLimiter, async (req: Request, res: Resp
     const q = runtimeLogsQuerySchema.parse(req.query);
     const project = await requireOwnedProject(id, user.id);
 
-    const result = await queryRuntimeLogs({
+    const logsOpts = {
       containerAppName: project.containerAppName,
       ...(q.sinceMinutes !== undefined ? { sinceMinutes: q.sinceMinutes } : {}),
       ...(q.afterTs !== undefined ? { afterTs: q.afterTs } : {}),
       ...(q.limit !== undefined ? { limit: q.limit } : {}),
-    });
+    };
+    // Demo projects have no real Log Analytics data, so synthesize lines from
+    // the stub generator regardless of AZURE_STUB (docs/DEMO_MODE.md §6.5).
+    const result =
+      req.user?.isDemo === true ? stubRuntimeLogs(logsOpts) : await queryRuntimeLogs(logsOpts);
     res.json(result);
   } catch (err) {
     next(err);
@@ -608,6 +642,22 @@ router.post(
     try {
       const { id, deploymentId } = rollbackParamSchema.parse(req.params);
       const user = getUser(req);
+
+      // Demo sessions: roll back DB-only via the orchestrator BEFORE the real
+      // `rollbackToDeployment` → `updateContainerApp` (Azure) call — a demo
+      // project has no real Container App, so the real path would issue a live
+      // ARM request for a demo session (CORE INVARIANT breach, docs/DEMO_MODE.md
+      // §4 layer 3). Same guards/response shape as the real path.
+      if (req.user?.isDemo === true) {
+        const demoDeployment = await rollbackDemoDeployment({
+          projectId: id,
+          deploymentId,
+          userId: user.id,
+        });
+        res.status(201).json(serializeDeploymentRow(demoDeployment));
+        return;
+      }
+
       // Ownership is enforced inside the service (scoped to the user's live
       // project), which also 404s a foreign/unknown deployment.
       const deployment = await rollbackToDeployment({
@@ -656,6 +706,21 @@ router.post(
       });
       if (inFlight !== null) {
         throw new HttpError(409, 'BUILD_IN_PROGRESS', 'A build is already running for this project.');
+      }
+
+      // Demo sessions: enqueue a pre-claimed replay build via the orchestrator
+      // BEFORE the GitHub commit-lookup block (`octokitForUser`/
+      // `fetchBranchHeadCommit`) — no real GitHub call (docs/DEMO_MODE.md §4
+      // layer 3). The KILL_SWITCH + in-flight guards above are DB-only and still
+      // apply to demo (harmless, keeps behavior uniform).
+      if (req.user?.isDemo === true) {
+        const { buildId } = await startDemoBuild({
+          id: project.id,
+          branch: project.branch,
+          githubRepoFullName: project.githubRepoFullName,
+        });
+        res.status(202).json({ buildId });
+        return;
       }
 
       // Resolve the commit to build: prefer the live branch head from GitHub,
@@ -886,7 +951,12 @@ router.patch(
       // ROLLBACK_CONFLICT) is reported in the response but never fails the save.
       let redeploySummary: { redeployed: boolean; reason?: string } | undefined;
       if (envVarsProvided) {
-        if (!envVarsChanged) {
+        if (req.user?.isDemo === true) {
+          // Demo sessions never trigger a real redeploy (`redeployWithCurrentEnv`
+          // → Azure); the env-var rows are persisted in the tx above, which is
+          // all a demo needs (docs/DEMO_MODE.md §4 layer 3).
+          redeploySummary = { redeployed: false, reason: 'DEMO' };
+        } else if (!envVarsChanged) {
           // Nothing changed → nothing to roll.
           redeploySummary = { redeployed: false };
         } else {
@@ -943,18 +1013,26 @@ router.delete(
         data: { deletedAt: new Date() },
       });
 
-      try {
-        await deleteContainerApp(project.containerAppName);
-      } catch (err) {
-        logger.warn(
-          { err, containerAppName: project.containerAppName },
-          'deleteContainerApp failed during project delete',
-        );
+      // Demo projects have no real Azure resource and no real webhook (their
+      // `webhookId` is always null), so a demo delete is DB-only: skip both the
+      // Azure `deleteContainerApp` and the GitHub `deleteRepoWebhook`/
+      // `octokitForUser` calls entirely (docs/DEMO_MODE.md §4 layer 3).
+      const isDemo = req.user?.isDemo === true;
+
+      if (!isDemo) {
+        try {
+          await deleteContainerApp(project.containerAppName);
+        } catch (err) {
+          logger.warn(
+            { err, containerAppName: project.containerAppName },
+            'deleteContainerApp failed during project delete',
+          );
+        }
       }
 
       // Unregister the webhook last. We've already soft-deleted the project, so
       // failing here would leave the DB in a worse state than a stale hook.
-      if (project.webhookId !== null) {
+      if (!isDemo && project.webhookId !== null) {
         try {
           const userRow = await prisma.user.findUnique({ where: { id: user.id } });
           if (userRow === null) {

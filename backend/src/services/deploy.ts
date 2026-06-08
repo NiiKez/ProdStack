@@ -22,7 +22,7 @@ import { updateContainerApp } from './azure/index.js';
 import { loadDecryptedEnvVars } from './projectEnv.js';
 
 const deploymentWithBuild = {
-  include: { build: true, project: true },
+  include: { build: true, project: { include: { user: { select: { isDemo: true } } } } },
 } satisfies Prisma.DeploymentDefaultArgs;
 
 /**
@@ -63,6 +63,13 @@ export async function rollbackToDeployment(opts: {
 
   if (target === null) {
     throw new HttpError(404, 'DEPLOYMENT_NOT_FOUND');
+  }
+  // Defense-in-depth: this function calls `updateContainerApp` (real Azure). A
+  // demo session must never reach it — the route branches to the DB-only
+  // `rollbackDemoDeployment` first, so reaching here for a demo user means a
+  // route forgot to branch. Fail closed loudly. (docs/DEMO_MODE.md §4.)
+  if (target.project.user.isDemo) {
+    throw new HttpError(403, 'DEMO_NOT_SUPPORTED', 'Demo sessions cannot deploy to Azure.');
   }
   if (target.active) {
     throw new HttpError(409, 'ALREADY_ACTIVE', 'That deployment is already live.');
@@ -196,6 +203,14 @@ export async function redeployWithCurrentEnv(opts: {
   // Nothing live to redeploy — the env vars will apply on the first build.
   if (active === null) {
     return { redeployed: false, reason: 'NO_ACTIVE_DEPLOYMENT' };
+  }
+
+  // Defense-in-depth (see rollbackToDeployment): this path calls
+  // `updateContainerApp` (real Azure). The env-save route branches demo to a
+  // DB-only summary before calling this, so a demo user reaching here is a bug —
+  // fail closed. (docs/DEMO_MODE.md §4.)
+  if (active.project.user.isDemo) {
+    throw new HttpError(403, 'DEMO_NOT_SUPPORTED', 'Demo sessions cannot deploy to Azure.');
   }
 
   // The active deployment must point at a build whose image actually shipped to

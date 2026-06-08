@@ -219,6 +219,29 @@ describe('GET /api/builds/:id/logs/stream (SSE)', () => {
     expect(body).toContain('event: done');
   }, 10_000);
 
+  it('streams a demo build byte-identically (the SSE path does not branch on isDemo)', async () => {
+    // docs/DEMO_MODE.md §5: a demo build is just LogLine rows + Build.status the
+    // demo driver wrote; the SSE endpoint reads them like any other build, so the
+    // replayed stream is indistinguishable from a real deploy. No demo branch
+    // exists in the stream handler — this pins that "zero SSE changes" claim.
+    mocks.buildFindFirst.mockResolvedValue({ ...ownedBuild, isDemo: true });
+    mocks.buildFindUnique.mockResolvedValue({ status: 'READY', durationMs: 15_000, errorMessage: null });
+    mocks.logLineFindMany
+      .mockResolvedValueOnce([
+        { seq: 1, level: 'STEP', message: 'cloning repository at HEAD', ts: new Date() },
+        { seq: 2, level: 'SUCCESS', message: 'deployed → https://demo-app.demo.prodstack.live', ts: new Date() },
+      ])
+      .mockResolvedValue([]);
+
+    const port = await startServer();
+    const body = await readStream(port, 'build-1');
+
+    expect(body).toContain('event: log');
+    expect(body).toContain('"message":"deployed → https://demo-app.demo.prodstack.live"');
+    expect(body).toContain('"status":"READY"');
+    expect(body).toContain('event: done');
+  }, 10_000);
+
   it('resumes from Last-Event-ID, skipping already-seen lines', async () => {
     mocks.buildFindFirst.mockResolvedValue(ownedBuild);
     mocks.buildFindUnique.mockResolvedValue({ status: 'READY', durationMs: 1, errorMessage: null });

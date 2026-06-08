@@ -4,6 +4,16 @@ import type { LogLine } from '@/types/api';
 
 export type StreamPhase = 'connecting' | 'streaming' | 'done' | 'error';
 
+/**
+ * How long we tolerate being stuck "connecting" (initial connect or a mid-build
+ * reconnect) before giving up and surfacing the error phase + Reconnect button.
+ * EventSource retries forever on its own, so without this a server/proxy drop
+ * *before* the terminal `done` event would pin the UI on "Connecting…" with no
+ * manual recovery. It's cleared on every `open`/`log`, so it only ever measures
+ * time spent failing to (re)establish the stream — never gaps between log lines.
+ */
+const STALL_TIMEOUT_MS = 15_000;
+
 export interface UseBuildLogsResult {
   lines: LogLine[];
   /** Latest build status pushed over the stream (UPPERCASE enum), or null. */
@@ -48,7 +58,29 @@ export function useBuildLogs(buildId: string | undefined): UseBuildLogsResult {
     const url = `${env.apiBaseUrl || ''}/api/builds/${buildId}/logs/stream`;
     const es = new EventSource(url, { withCredentials: true });
 
-    es.addEventListener('open', () => setPhase('streaming'));
+    // Bounded "stuck connecting" guard (see STALL_TIMEOUT_MS). Armed while we're
+    // trying to (re)connect; cleared the moment the stream is live or done.
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearStall = () => {
+      if (stallTimer !== null) {
+        clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+    };
+    const armStall = () => {
+      if (stallTimer !== null) return;
+      stallTimer = setTimeout(() => {
+        stallTimer = null;
+        es.close(); // stop the infinite auto-retry so Reconnect is the only path forward
+        setPhase((p) => (p === 'done' ? p : 'error'));
+      }, STALL_TIMEOUT_MS);
+    };
+    armStall();
+
+    es.addEventListener('open', () => {
+      clearStall();
+      setPhase('streaming');
+    });
 
     es.addEventListener('log', (ev) => {
       try {
@@ -56,6 +88,7 @@ export function useBuildLogs(buildId: string | undefined): UseBuildLogsResult {
         if (seenSeq.current.has(line.seq)) return;
         seenSeq.current.add(line.seq);
         setLines((prev) => [...prev, line]);
+        clearStall();
         setPhase('streaming');
       } catch {
         // ignore malformed frame
@@ -78,21 +111,29 @@ export function useBuildLogs(buildId: string | undefined): UseBuildLogsResult {
       } catch {
         // ignore
       }
+      clearStall();
       setPhase('done');
       es.close();
     });
 
     es.addEventListener('error', () => {
       // EventSource auto-reconnects unless we've already closed it. Surface a
-      // transient "connecting" state; only mark hard error if it's closed.
+      // transient "connecting" state; only mark hard error if it's closed. The
+      // stall timer (re-armed here) converts a never-recovering reconnect loop
+      // into the error phase so the Reconnect button eventually appears.
       if (es.readyState === EventSource.CLOSED) {
+        clearStall();
         setPhase((p) => (p === 'done' ? p : 'error'));
       } else {
         setPhase('connecting');
+        armStall();
       }
     });
 
-    return () => es.close();
+    return () => {
+      clearStall();
+      es.close();
+    };
   }, [buildId, nonce]);
 
   return { lines, status, phase, reconnect };

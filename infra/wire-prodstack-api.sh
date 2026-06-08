@@ -13,6 +13,13 @@
 # (ACR admin creds) authenticate the image GC to the registry data-plane API.
 # Cleanup is gated by ENABLE_CLEANUP_JOBS — NOT ENABLE_WORKER — so it runs on the
 # API (ENABLE_WORKER stays false here) and not the dedicated builder.
+#
+# Demo mode (M8, docs/DEMO_MODE.md): ENABLE_DEMO=true exposes the public
+# "Launch demo" sandbox (GET /api/auth/demo-login). SAFE under AZURE_STUB=false —
+# demo safety is structural (routing + pre-claimed builds), not the stub. Override
+# any DEMO_* by exporting it before running (e.g. `ENABLE_DEMO=false bash …` to
+# back the feature out without a redeploy). The demo reaper rides on the same
+# ENABLE_CLEANUP_JOBS scheduler above.
 set -euo pipefail
 
 APP="--name prodstack-api --resource-group prodstack"
@@ -106,6 +113,10 @@ az containerapp update $APP --set-env-vars \
   RETENTION_DAYS_IMAGES=30 \
   RETENTION_DAYS_LOGS=30 \
   RETENTION_DAYS_BUILDS=90 \
+  ENABLE_DEMO="${ENABLE_DEMO:-true}" \
+  DEMO_TTL_MINUTES="${DEMO_TTL_MINUTES:-120}" \
+  DEMO_MAX_ACTIVE="${DEMO_MAX_ACTIVE:-50}" \
+  DEMO_REPLAY_SPEED="${DEMO_REPLAY_SPEED:-6}" \
   DATABASE_URL=secretref:database-url \
   JWT_SECRET=secretref:jwt-secret \
   COOKIE_SECRET=secretref:cookie-secret \

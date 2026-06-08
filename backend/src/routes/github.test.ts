@@ -18,6 +18,7 @@ const tokenField = encrypt('ghp_dummy_token');
 
 const state = vi.hoisted(() => ({
   stubAuth: true,
+  isDemo: false,
 }));
 
 const userRow = {
@@ -67,6 +68,7 @@ vi.mock('../middleware/requireAuth.js', () => ({
         githubLogin: 'octocat',
         email: 'octo@example.com',
         avatarUrl: null,
+        isDemo: state.isDemo,
       };
       next();
       return;
@@ -103,6 +105,7 @@ const ghRepoRows = [
 
 beforeEach(() => {
   state.stubAuth = true;
+  state.isDemo = false;
 
   mocks.userFindUnique.mockReset();
   mocks.octokitForUser.mockReset();
@@ -279,5 +282,81 @@ describe('POST /api/github/detect', () => {
     const res = await detect(app, 'https://github.com/octocat/private');
     expect(res.status).toBe(502);
     expect(res.body.error).toBe('GITHUB_UNAVAILABLE');
+  });
+});
+
+// --- Demo mode canned data (docs/DEMO_MODE.md §6.5) ------------------------
+// A demo session holds only a fake placeholder token, so the real GitHub paths
+// would 502. Both endpoints must serve fixed canned data BEFORE any
+// decrypt/octokit call — the demo session can never reach the real GitHub API.
+describe('demo mode canned data', () => {
+  beforeEach(() => {
+    state.isDemo = true;
+  });
+
+  it('GET /api/github/repos returns canned repos without an octokit call', async () => {
+    const app = createApp();
+    const res = await supertest(app).get('/api/github/repos');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.repos)).toBe(true);
+    expect(res.body.repos.length).toBeGreaterThan(0);
+    // Canned, not the GitHub fixture.
+    expect(res.body.repos[0].fullName.startsWith('prodstack-demo/')).toBe(true);
+    // Each row carries the picker's contract shape.
+    for (const r of res.body.repos) {
+      expect(r).toEqual(
+        expect.objectContaining({
+          fullName: expect.any(String),
+          url: expect.any(String),
+          defaultBranch: expect.any(String),
+          private: expect.any(Boolean),
+        }),
+      );
+    }
+    // Fail-closed: no token decrypt, no octokit.
+    expect(mocks.userFindUnique).not.toHaveBeenCalled();
+    expect(mocks.octokitForUser).not.toHaveBeenCalled();
+    expect(mocks.octokitPaginate).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/github/detect returns a canned result without an octokit call', async () => {
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/github/detect')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ repoUrl: 'https://github.com/prodstack-demo/express-api' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ hasDockerfile: false, framework: 'Express', port: 3000 });
+    expect(mocks.userFindUnique).not.toHaveBeenCalled();
+    expect(mocks.octokitForUser).not.toHaveBeenCalled();
+    expect(mocks.octokitRequest).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/github/detect varies the canned framework by the picked repo', async () => {
+    const app = createApp();
+    const cases: Array<[string, string, number]> = [
+      ['https://github.com/prodstack-demo/next-storefront', 'Next.js', 3000],
+      ['https://github.com/prodstack-demo/go-url-shortener', 'Go', 8080],
+      ['https://github.com/prodstack-demo/fastapi-notes', 'FastAPI', 8000],
+    ];
+    for (const [repoUrl, framework, port] of cases) {
+      const res = await supertest(app)
+        .post('/api/github/detect')
+        .set('X-Requested-With', 'XMLHttpRequest')
+        .send({ repoUrl });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ hasDockerfile: false, framework, port });
+    }
+    expect(mocks.octokitForUser).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/github/detect still 400s a non-GitHub URL before the demo branch', async () => {
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/github/detect')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ repoUrl: 'https://gitlab.com/x/y' });
+    expect(res.status).toBe(400);
+    expect(mocks.octokitRequest).not.toHaveBeenCalled();
   });
 });

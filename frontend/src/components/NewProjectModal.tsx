@@ -8,6 +8,7 @@ import { ApiError } from '@/lib/api';
 import { REPO_URL_PATTERN, slugify, deriveNameFromRepoUrl, mapApiError } from '@/lib/repo';
 import { filterRepos, repoToFormValues } from '@/lib/githubRepos';
 import { useCreateProject } from '@/hooks/useCreateProject';
+import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useDetectFramework } from '@/hooks/useDetectFramework';
 import { useGithubRepos } from '@/hooks/useGithubRepos';
 import type { DetectFrameworkResult, GithubRepo, ProjectSummary } from '@/types/api';
@@ -31,6 +32,7 @@ export interface NewProjectModalProps {
 export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectModalProps) {
   const { toast } = useToast();
   const createProject = useCreateProject();
+  const { data: currentUser } = useCurrentUser();
   // Best-effort "what we'd build" preview. Failures are non-fatal (e.g. the
   // dev-login user has no GitHub token → 502); the preview just stays hidden.
   const detect = useDetectFramework();
@@ -169,7 +171,12 @@ export function NewProjectModal({ open, onOpenChange, onCreated }: NewProjectMod
     try {
       const project = await createProject.mutateAsync(values);
       toast({
-        title: 'Project created. Push a commit to deploy.',
+        // Demo sessions can't `git push` (the repo is fake), so point them at
+        // the "Trigger build" button on the project overview instead of the
+        // push-to-deploy hint a real project gets.
+        title: currentUser?.isDemo
+          ? 'Project created. Trigger a build to deploy.'
+          : 'Project created. Push a commit to deploy.',
         variant: 'success',
       });
       onCreated?.(project);

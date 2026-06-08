@@ -36,6 +36,7 @@ const tokenField = encrypt('ghp_dummy_token');
 
 const state = vi.hoisted(() => ({
   stubAuth: true,
+  isDemo: false,
   projects: [] as Array<{
     id: string;
     userId: string;
@@ -76,15 +77,27 @@ const mocks = vi.hoisted(() => ({
   userFindUnique: vi.fn(),
   projectFindMany: vi.fn(),
   projectFindFirst: vi.fn(),
+  projectFindUniqueOrThrow: vi.fn(),
   projectCreate: vi.fn(),
   projectUpdate: vi.fn(),
   projectCount: vi.fn(),
+  buildFindFirst: vi.fn(),
   queryRaw: vi.fn(),
   octokitForUser: vi.fn(),
   octokitRequest: vi.fn(),
   createContainerApp: vi.fn(),
   updateContainerApp: vi.fn(),
   deleteContainerApp: vi.fn(),
+  fetchBranchHeadCommit: vi.fn(),
+  createDemoProject: vi.fn(),
+  startDemoBuild: vi.fn(),
+  rollbackDemoDeployment: vi.fn(),
+  transaction: vi.fn(),
+  loadDecryptedEnvVars: vi.fn(),
+  loadEnvVarMeta: vi.fn(),
+  redeployWithCurrentEnv: vi.fn(),
+  getAppMetrics: vi.fn(),
+  queryRuntimeLogs: vi.fn(),
 }));
 
 vi.mock('../db.js', () => ({
@@ -93,13 +106,53 @@ vi.mock('../db.js', () => ({
     project: {
       findMany: mocks.projectFindMany,
       findFirst: mocks.projectFindFirst,
+      findUniqueOrThrow: mocks.projectFindUniqueOrThrow,
       create: mocks.projectCreate,
       update: mocks.projectUpdate,
       count: mocks.projectCount,
     },
+    build: { findFirst: mocks.buildFindFirst },
     $queryRaw: mocks.queryRaw,
+    $transaction: mocks.transaction,
   },
 }));
+
+// projectEnv + deploy are mocked so the PATCH env-var path can be exercised
+// without a real DB tx / Azure redeploy. `IN_FLIGHT_BUILD_STATUSES` and
+// `rollbackToDeployment` keep their real exports (the route imports them).
+vi.mock('../services/projectEnv.js', () => ({
+  loadDecryptedEnvVars: mocks.loadDecryptedEnvVars,
+  loadEnvVarMeta: mocks.loadEnvVarMeta,
+}));
+
+vi.mock('../services/deploy.js', async () => {
+  const actual = (await vi.importActual('../services/deploy.js')) as Record<string, unknown>;
+  return {
+    ...actual,
+    redeployWithCurrentEnv: mocks.redeployWithCurrentEnv,
+  };
+});
+
+// The demo orchestrator owns all demo write behavior; mock it so the demo
+// branches in the route can be asserted to dispatch to it (and the fail-closed
+// suite can assert the real GitHub/Azure mocks were NOT called).
+vi.mock('../services/demo/demoOrchestrator.js', () => ({
+  createDemoProject: mocks.createDemoProject,
+  startDemoBuild: mocks.startDemoBuild,
+  rollbackDemoDeployment: mocks.rollbackDemoDeployment,
+}));
+
+// Azure metrics/logs: keep the real `stub*` generators (the demo branch uses
+// them) but spy on the real `getAppMetrics`/`queryRuntimeLogs` so a demo request
+// can assert it NEVER reaches the real Azure-Monitor/Log-Analytics path.
+vi.mock('../services/azure/metrics.js', async () => {
+  const actual = (await vi.importActual('../services/azure/metrics.js')) as Record<string, unknown>;
+  return { ...actual, getAppMetrics: mocks.getAppMetrics };
+});
+vi.mock('../services/azure/logs.js', async () => {
+  const actual = (await vi.importActual('../services/azure/logs.js')) as Record<string, unknown>;
+  return { ...actual, queryRuntimeLogs: mocks.queryRuntimeLogs };
+});
 
 // Re-export the real `GithubWebhookError` class so `instanceof` checks in the
 // route resolve to the same constructor as the helpers throw from. The
@@ -111,6 +164,9 @@ vi.mock('../services/github.js', async () => {
   return {
     ...actual,
     octokitForUser: mocks.octokitForUser,
+    // Overridden so the fail-closed suite can assert the demo rebuild path
+    // never reaches GitHub for the branch-head commit.
+    fetchBranchHeadCommit: mocks.fetchBranchHeadCommit,
   };
 });
 
@@ -132,6 +188,7 @@ vi.mock('../middleware/requireAuth.js', () => ({
         githubLogin: 'octocat',
         email: 'octo@example.com',
         avatarUrl: null,
+        isDemo: state.isDemo,
       };
       next();
       return;
@@ -150,20 +207,33 @@ const supertest = (await import('supertest')).default;
 
 beforeEach(() => {
   state.stubAuth = true;
+  state.isDemo = false;
   state.projects.length = 0;
 
   mocks.userFindUnique.mockReset();
   mocks.projectFindMany.mockReset();
   mocks.projectFindFirst.mockReset();
+  mocks.projectFindUniqueOrThrow.mockReset();
   mocks.projectCreate.mockReset();
   mocks.projectUpdate.mockReset();
   mocks.projectCount.mockReset();
+  mocks.buildFindFirst.mockReset();
   mocks.queryRaw.mockReset();
   mocks.octokitForUser.mockReset();
   mocks.octokitRequest.mockReset();
   mocks.createContainerApp.mockReset();
   mocks.updateContainerApp.mockReset();
   mocks.deleteContainerApp.mockReset();
+  mocks.fetchBranchHeadCommit.mockReset();
+  mocks.createDemoProject.mockReset();
+  mocks.startDemoBuild.mockReset();
+  mocks.rollbackDemoDeployment.mockReset();
+  mocks.transaction.mockReset();
+  mocks.loadDecryptedEnvVars.mockReset();
+  mocks.loadEnvVarMeta.mockReset();
+  mocks.redeployWithCurrentEnv.mockReset();
+  mocks.getAppMetrics.mockReset();
+  mocks.queryRuntimeLogs.mockReset();
 
   mocks.userFindUnique.mockResolvedValue(userRow);
   mocks.projectFindMany.mockImplementation(
@@ -241,6 +311,94 @@ beforeEach(() => {
     liveUrl: `https://${name}.example.com`,
   }));
   mocks.deleteContainerApp.mockResolvedValue(undefined);
+
+  // No in-flight build by default (rebuild path's in-flight guard).
+  mocks.buildFindFirst.mockResolvedValue(null);
+
+  // Demo orchestrator: create returns ids; the route re-fetches via
+  // findUniqueOrThrow, so seed a matching project row to reshape into a 201.
+  mocks.createDemoProject.mockImplementation(async () => ({
+    projectId: 'demo-p1',
+  }));
+  mocks.startDemoBuild.mockResolvedValue({ buildId: 'demo-b1' });
+  mocks.rollbackDemoDeployment.mockResolvedValue({
+    id: 'demo-dep2',
+    revisionName: 'octocat-demo-app--demo-old',
+    active: true,
+    rolledBack: true,
+    createdAt: new Date(),
+    build: {
+      id: 'demo-b0',
+      status: 'READY',
+      commitSha: 'a1b2c3d',
+      commitMessage: 'demo deploy',
+      commitAuthor: 'demo-abc',
+      branch: 'main',
+      imageTag: 'demo-a1b2c3d',
+    },
+  });
+
+  // Real Azure metrics/logs paths must never run for a demo request; default to
+  // a sentinel resolve so the demo tests' `.not.toHaveBeenCalled()` is the gate.
+  mocks.getAppMetrics.mockResolvedValue({ available: false, series: [] });
+  mocks.queryRuntimeLogs.mockResolvedValue({ available: false, lines: [] });
+
+  // PATCH env-var path: no existing vars; the tx callback runs against a fake
+  // `tx` and returns the refreshed project; masked meta echoed back.
+  mocks.loadDecryptedEnvVars.mockResolvedValue([]);
+  mocks.loadEnvVarMeta.mockResolvedValue([]);
+  mocks.redeployWithCurrentEnv.mockResolvedValue({ redeployed: true });
+  mocks.transaction.mockImplementation(
+    async (cb: (tx: unknown) => Promise<unknown>) => {
+      const refreshed = {
+        id: 'demo-p1',
+        name: 'Demo App',
+        slug: 'demo-app',
+        githubRepoFullName: 'prodstack-demo/express-api',
+        githubRepoId: 4242,
+        branch: 'main',
+        webhookId: null,
+        containerAppName: 'octocat-demo-app',
+        liveUrl: null,
+        frameworkHint: null,
+        autoDeploy: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        builds: [],
+        deployments: [],
+      };
+      const tx = {
+        project: {
+          update: vi.fn().mockResolvedValue(refreshed),
+          findFirstOrThrow: vi.fn().mockResolvedValue(refreshed),
+        },
+        envVar: {
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+          upsert: vi.fn().mockResolvedValue({}),
+        },
+      };
+      return cb(tx);
+    },
+  );
+
+  mocks.projectFindUniqueOrThrow.mockResolvedValue({
+    id: 'demo-p1',
+    userId: 'u1',
+    name: 'Demo App',
+    slug: 'demo-app',
+    githubRepoFullName: 'prodstack-demo/express-api',
+    githubRepoId: 4242,
+    branch: 'main',
+    webhookId: null,
+    containerAppName: 'octocat-demo-app',
+    liveUrl: null,
+    frameworkHint: null,
+    autoDeploy: true,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    builds: [],
+    deployments: [],
+  });
 });
 
 afterEach(() => {
@@ -588,5 +746,189 @@ describe('DELETE /api/projects/:id', () => {
       (c) => c[0] === 'DELETE /repos/{owner}/{repo}/hooks/{hook_id}',
     );
     expect(deleteCall).toBeUndefined();
+  });
+});
+
+// --- Demo mode (docs/DEMO_MODE.md) -----------------------------------------
+// CORE INVARIANT: an `isDemo` session must be PHYSICALLY UNABLE to reach
+// Azure/ACR/git/real-GitHub. These tests assert each demo branch dispatches to
+// the orchestrator / canned data BEFORE any external call, and that the real
+// external mocks are never touched.
+describe('demo mode', () => {
+  /** A demo-owned project row for the per-project sub-resource routes. */
+  function seedDemoProject(overrides: Partial<ProjectRecord> = {}): ProjectRecord {
+    const project: ProjectRecord = {
+      id: 'demo-p1',
+      userId: 'u1',
+      name: 'Demo App',
+      slug: 'demo-app',
+      githubRepoFullName: 'prodstack-demo/express-api',
+      githubRepoId: 4242,
+      branch: 'main',
+      webhookId: null,
+      containerAppName: 'octocat-demo-app',
+      liveUrl: null,
+      frameworkHint: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      deletedAt: null,
+      ...overrides,
+    };
+    state.projects.push(project);
+    mocks.projectFindFirst.mockResolvedValue(project);
+    mocks.projectUpdate.mockResolvedValue({ ...project, deletedAt: new Date() });
+    return project;
+  }
+
+  beforeEach(() => {
+    state.isDemo = true;
+  });
+
+  describe('POST /api/projects (create)', () => {
+    it('dispatches to the orchestrator and never calls GitHub/Azure (201)', async () => {
+      const app = createApp();
+      const res = await supertest(app)
+        .post('/api/projects')
+        .set('X-Requested-With', 'XMLHttpRequest')
+        .send({ repoUrl: 'https://github.com/prodstack-demo/express-api', name: 'Demo App' });
+
+      expect(res.status).toBe(201);
+      // Response is reshaped from the re-fetched row — byte-identical to a real create.
+      expect(res.body.slug).toBe('demo-app');
+      expect(res.body).not.toHaveProperty('webhookSecretCiphertext');
+
+      // Dispatched to the orchestrator…
+      expect(mocks.createDemoProject).toHaveBeenCalledTimes(1);
+      // …and NEVER touched the real external paths (fail-closed).
+      expect(mocks.octokitForUser).not.toHaveBeenCalled();
+      expect(mocks.createContainerApp).not.toHaveBeenCalled();
+      expect(mocks.projectCreate).not.toHaveBeenCalled();
+    });
+
+    it('accepts a non-GitHub / fake repo URL (the orchestrator tolerates it)', async () => {
+      const app = createApp();
+      const res = await supertest(app)
+        .post('/api/projects')
+        .set('X-Requested-With', 'XMLHttpRequest')
+        .send({ repoUrl: 'not-a-real-url', name: 'Demo App' });
+      expect(res.status).toBe(201);
+      expect(mocks.createDemoProject).toHaveBeenCalledTimes(1);
+      expect(mocks.octokitForUser).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /api/projects/:id/rebuild', () => {
+    it('dispatches to startDemoBuild and never calls GitHub (202)', async () => {
+      seedDemoProject();
+      const app = createApp();
+      const res = await supertest(app)
+        .post('/api/projects/demo-p1/rebuild')
+        .set('X-Requested-With', 'XMLHttpRequest');
+
+      expect(res.status).toBe(202);
+      expect(res.body.buildId).toBe('demo-b1');
+
+      expect(mocks.startDemoBuild).toHaveBeenCalledTimes(1);
+      expect(mocks.startDemoBuild).toHaveBeenCalledWith({
+        id: 'demo-p1',
+        branch: 'main',
+        githubRepoFullName: 'prodstack-demo/express-api',
+      });
+      // Fail-closed: no GitHub commit lookup.
+      expect(mocks.octokitForUser).not.toHaveBeenCalled();
+      expect(mocks.fetchBranchHeadCommit).not.toHaveBeenCalled();
+    });
+
+    it('still honors the in-flight guard for demo (409, no orchestrator call)', async () => {
+      seedDemoProject();
+      mocks.buildFindFirst.mockResolvedValueOnce({ id: 'b-running' });
+      const app = createApp();
+      const res = await supertest(app)
+        .post('/api/projects/demo-p1/rebuild')
+        .set('X-Requested-With', 'XMLHttpRequest');
+      expect(res.status).toBe(409);
+      expect(mocks.startDemoBuild).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GET /api/projects/:id/metrics', () => {
+    it('returns synthesized metrics without an Azure Monitor call', async () => {
+      seedDemoProject();
+      const app = createApp();
+      const res = await supertest(app).get('/api/projects/demo-p1/metrics');
+      expect(res.status).toBe(200);
+      expect(res.body.available).toBe(true);
+      expect(Array.isArray(res.body.series)).toBe(true);
+      expect(res.body.series.length).toBeGreaterThan(0);
+      // Fail-closed: the real Azure-Monitor path was never entered (regression
+      // guard — without the demo branch this stub would not be used).
+      expect(mocks.getAppMetrics).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GET /api/projects/:id/runtime/logs', () => {
+    it('returns synthesized runtime logs without a Log Analytics call', async () => {
+      seedDemoProject();
+      const app = createApp();
+      const res = await supertest(app).get('/api/projects/demo-p1/runtime/logs');
+      expect(res.status).toBe(200);
+      expect(res.body.available).toBe(true);
+      expect(Array.isArray(res.body.lines)).toBe(true);
+      expect(res.body.lines.length).toBeGreaterThan(0);
+      // Fail-closed: the real Log-Analytics path was never entered.
+      expect(mocks.queryRuntimeLogs).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /api/projects/:id/deployments/:deploymentId/rollback', () => {
+    it('dispatches to the DB-only orchestrator and never calls updateContainerApp (201)', async () => {
+      seedDemoProject();
+      const app = createApp();
+      const res = await supertest(app)
+        .post('/api/projects/demo-p1/deployments/demo-dep1/rollback')
+        .set('X-Requested-With', 'XMLHttpRequest');
+
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({ active: true, rolledBack: true });
+      expect(mocks.rollbackDemoDeployment).toHaveBeenCalledWith({
+        projectId: 'demo-p1',
+        deploymentId: 'demo-dep1',
+        userId: 'u1',
+      });
+      // Fail-closed: the real rollback service (→ updateContainerApp) is never hit.
+      expect(mocks.updateContainerApp).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('PATCH /api/projects/:id (env vars)', () => {
+    it('saves env vars but never triggers a real redeploy for demo', async () => {
+      seedDemoProject();
+      const app = createApp();
+      const res = await supertest(app)
+        .patch('/api/projects/demo-p1')
+        .set('X-Requested-With', 'XMLHttpRequest')
+        .send({ envVars: [{ key: 'API_KEY', value: 'secret-123' }] });
+
+      expect(res.status).toBe(200);
+      // The env-var rows are persisted (the tx ran) but the redeploy is skipped.
+      expect(mocks.redeployWithCurrentEnv).not.toHaveBeenCalled();
+      expect(res.body.redeploy).toEqual({ redeployed: false, reason: 'DEMO' });
+    });
+  });
+
+  describe('DELETE /api/projects/:id', () => {
+    it('soft-deletes but never calls deleteContainerApp / GitHub (204)', async () => {
+      // A demo project never has a real webhook, but seed one to prove the guard
+      // skips the octokit path regardless.
+      seedDemoProject({ webhookId: 77 });
+      const app = createApp();
+      const res = await supertest(app)
+        .delete('/api/projects/demo-p1')
+        .set('X-Requested-With', 'XMLHttpRequest');
+      expect(res.status).toBe(204);
+      expect(mocks.projectUpdate).toHaveBeenCalledTimes(1); // soft-delete happened
+      expect(mocks.deleteContainerApp).not.toHaveBeenCalled();
+      expect(mocks.octokitForUser).not.toHaveBeenCalled();
+    });
   });
 });

@@ -36,10 +36,20 @@ model User {
   githubTokenIv          Bytes
   githubTokenAuthTag     Bytes
   githubTokenKeyVersion  Int       @default(1)
+  // Demo mode (sandboxed public "Try ProdStack" sessions). A demo session is
+  // its own ephemeral User row — per-session isolation reuses the existing
+  // userId-scoping for free (see docs/DEMO_MODE.md §2). Real users have
+  // isDemo=false, demoExpiresAt=null.
+  isDemo                 Boolean   @default(false)
+  demoExpiresAt          DateTime?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
   projects               Project[]
+
+  // Drives the hourly demo reaper (cleanupDemo): purge expired demo users
+  // (cascade removes all their projects/builds/deployments/logs/env vars).
+  @@index([isDemo, demoExpiresAt])
 }
 
 model Project {
@@ -127,6 +137,11 @@ model Build {
   // QUEUED build is cancelled directly by the API without this flag (it just
   // flips status to CANCELLED before any worker can claim it).
   cancelRequested Boolean    @default(false)
+  // Demo mode: denormalized from the owning user's isDemo. The worker's
+  // claim/recovery queries are hot and index-sensitive, so we avoid a join to
+  // User and filter on this flag directly (defense-in-depth — demo builds are
+  // also pre-claimed so the worker never sees them). See docs/DEMO_MODE.md §4.
+  isDemo         Boolean     @default(false)
   startedAt      DateTime?
   finishedAt     DateTime?
   durationMs     Int?

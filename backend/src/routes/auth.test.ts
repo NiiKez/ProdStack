@@ -131,6 +131,7 @@ describe('requireAuth middleware', () => {
       githubLogin: 'octocat',
       email: 'octo@example.com',
       avatarUrl: 'https://example.com/a.png',
+      isDemo: false,
     };
     (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(fakeUser);
 
@@ -148,8 +149,76 @@ describe('requireAuth middleware', () => {
     expect(res.body).toEqual({ user: fakeUser });
     expect(prisma.user.findUnique).toHaveBeenCalledWith({
       where: { id: 'user_123' },
-      select: { id: true, githubLogin: true, email: true, avatarUrl: true },
+      select: {
+        id: true,
+        githubLogin: true,
+        email: true,
+        avatarUrl: true,
+        isDemo: true,
+        demoExpiresAt: true,
+      },
     });
+  });
+});
+
+describe('GET /api/auth/me', () => {
+  it('echoes the current user including isDemo', async () => {
+    const app = buildApp();
+
+    const fakeUser = {
+      id: 'user_456',
+      githubLogin: 'octocat',
+      email: 'octo@example.com',
+      avatarUrl: 'https://example.com/a.png',
+      isDemo: false,
+    };
+    (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(fakeUser);
+
+    const token = jwt.sign({ sub: fakeUser.id }, JWT_SECRET, {
+      algorithm: 'HS256',
+      expiresIn: '7d',
+    });
+    const signedSession = signCookieValue(token, COOKIE_SECRET);
+
+    const res = await request(app)
+      .get('/api/auth/me')
+      .set('Cookie', [`session=s:${signedSession}`]);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      id: 'user_456',
+      githubLogin: 'octocat',
+      email: 'octo@example.com',
+      avatarUrl: 'https://example.com/a.png',
+      isDemo: false,
+    });
+  });
+
+  it('reports isDemo=true for a demo session', async () => {
+    const app = buildApp();
+
+    const demoUser = {
+      id: 'demo_789',
+      githubLogin: 'demo-abc123',
+      email: null,
+      avatarUrl: null,
+      isDemo: true,
+      demoExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    };
+    (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(demoUser);
+
+    const token = jwt.sign({ sub: demoUser.id }, JWT_SECRET, {
+      algorithm: 'HS256',
+      expiresIn: '7d',
+    });
+    const signedSession = signCookieValue(token, COOKIE_SECRET);
+
+    const res = await request(app)
+      .get('/api/auth/me')
+      .set('Cookie', [`session=s:${signedSession}`]);
+
+    expect(res.status).toBe(200);
+    expect(res.body.isDemo).toBe(true);
   });
 });
 

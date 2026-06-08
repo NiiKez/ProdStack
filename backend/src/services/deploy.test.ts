@@ -48,7 +48,13 @@ function targetRow(over: Record<string, unknown> = {}) {
     active: false,
     rolledBack: false,
     build: { id: 'b1', status: 'READY', imageTag: 'prodstack.azurecr.io/app:sha', ...((over.build as object) ?? {}) },
-    project: { id: 'p1', userId: 'u1', containerAppName: 'octocat-app', deletedAt: null },
+    project: {
+      id: 'p1',
+      userId: 'u1',
+      containerAppName: 'octocat-app',
+      deletedAt: null,
+      user: { isDemo: false },
+    },
     ...over,
   };
 }
@@ -85,6 +91,22 @@ describe('rollbackToDeployment', () => {
   it('409s when the target is already active', async () => {
     mocks.deploymentFindFirst.mockResolvedValue(targetRow({ active: true }));
     await expectHttp(rollbackToDeployment(ARGS), 409, 'ALREADY_ACTIVE');
+    expect(mocks.updateContainerApp).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a demo-owned project before any Azure call (defense-in-depth)', async () => {
+    mocks.deploymentFindFirst.mockResolvedValue(
+      targetRow({
+        project: {
+          id: 'p1',
+          userId: 'u1',
+          containerAppName: 'demo-app',
+          deletedAt: null,
+          user: { isDemo: true },
+        },
+      }),
+    );
+    await expectHttp(rollbackToDeployment(ARGS), 403, 'DEMO_NOT_SUPPORTED');
     expect(mocks.updateContainerApp).not.toHaveBeenCalled();
   });
 
@@ -152,6 +174,22 @@ describe('redeployWithCurrentEnv', () => {
     mocks.deploymentFindFirst.mockResolvedValue(null);
     const result = await redeployWithCurrentEnv(RD_ARGS);
     expect(result).toEqual({ redeployed: false, reason: 'NO_ACTIVE_DEPLOYMENT' });
+    expect(mocks.updateContainerApp).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a demo-owned project before any Azure call (defense-in-depth)', async () => {
+    mocks.deploymentFindFirst.mockResolvedValue(
+      activeRow({
+        project: {
+          id: 'p1',
+          userId: 'u1',
+          containerAppName: 'demo-app',
+          deletedAt: null,
+          user: { isDemo: true },
+        },
+      }),
+    );
+    await expectHttp(redeployWithCurrentEnv(RD_ARGS), 403, 'DEMO_NOT_SUPPORTED');
     expect(mocks.updateContainerApp).not.toHaveBeenCalled();
   });
 

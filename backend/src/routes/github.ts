@@ -25,6 +25,53 @@ const detectBodySchema = z.object({
   ref: z.string().min(1).max(255).optional(),
 });
 
+// --- Canned data for demo sessions -----------------------------------------
+// A demo user holds only a fake encrypted placeholder token, so the real
+// `listUserRepos`/`listRepoSignals` paths would 502. Instead we serve fixed,
+// plausible canned data BEFORE any decrypt/octokit call so the New-Project repo
+// picker + detect preview work unchanged. CORE INVARIANT (docs/DEMO_MODE.md §3,
+// §6.5): a demo session never reaches the real GitHub API.
+const DEMO_REPOS = [
+  {
+    fullName: 'prodstack-demo/express-api',
+    url: 'https://github.com/prodstack-demo/express-api',
+    defaultBranch: 'main',
+    private: false,
+  },
+  {
+    fullName: 'prodstack-demo/next-storefront',
+    url: 'https://github.com/prodstack-demo/next-storefront',
+    defaultBranch: 'main',
+    private: false,
+  },
+  {
+    fullName: 'prodstack-demo/go-url-shortener',
+    url: 'https://github.com/prodstack-demo/go-url-shortener',
+    defaultBranch: 'main',
+    private: true,
+  },
+  {
+    fullName: 'prodstack-demo/fastapi-notes',
+    url: 'https://github.com/prodstack-demo/fastapi-notes',
+    defaultBranch: 'main',
+    private: false,
+  },
+] as const;
+
+/**
+ * Canned framework-detect result for a demo session, keyed off the picked repo
+ * name so the New-Project preview stays believable when a visitor selects the
+ * Next.js / Go / FastAPI canned repo instead of always claiming "Express".
+ * Shape matches the real `/detect` response exactly. (docs/DEMO_MODE.md §6.5.)
+ */
+function demoDetectFor(repo: string): { hasDockerfile: boolean; framework: string; port: number } {
+  const name = repo.toLowerCase();
+  if (name.includes('next')) return { hasDockerfile: false, framework: 'Next.js', port: 3000 };
+  if (name.startsWith('go-')) return { hasDockerfile: false, framework: 'Go', port: 8080 };
+  if (name.includes('fastapi')) return { hasDockerfile: false, framework: 'FastAPI', port: 8000 };
+  return { hasDockerfile: false, framework: 'Express', port: 3000 };
+}
+
 /**
  * Map any failure that means "we can't reach GitHub on the user's behalf" — a
  * missing token, a decryption failure, or a GitHub auth error (401) — to a
@@ -43,6 +90,13 @@ router.get('/repos', expensiveLimiter, async (req: Request, res: Response, next:
     const user = req.user;
     if (user === undefined || typeof user.id !== 'string') {
       throw new HttpError(401, 'UNAUTHENTICATED');
+    }
+
+    // Demo sessions get canned repos before any decrypt/octokit call (§6.5):
+    // a demo user's placeholder token would otherwise 502.
+    if (user.isDemo === true) {
+      res.json({ repos: DEMO_REPOS });
+      return;
     }
 
     const userRow = await prisma.user.findUnique({ where: { id: user.id } });
@@ -112,6 +166,13 @@ router.post(
       }
       const owner = match[1]!;
       const repo = match[2]!;
+
+      // Demo sessions get a canned detect result before any decrypt/octokit
+      // call (§6.5): a demo user's placeholder token can't inspect a real repo.
+      if (user.isDemo === true) {
+        res.json(demoDetectFor(repo));
+        return;
+      }
 
       const userRow = await prisma.user.findUnique({ where: { id: user.id } });
       if (userRow === null) {

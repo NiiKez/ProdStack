@@ -51,6 +51,7 @@ import { api } from '@/lib/api';
 import { buildEnvPayload, envRowsDirty, rowsFromServer } from '@/lib/envVars';
 import { isInFlight } from '@/lib/status';
 import { useProject } from '@/hooks/useProject';
+import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useDeleteProject } from '@/hooks/useDeleteProject';
 import { useProjectBuilds, type BuildFilters } from '@/hooks/useProjectBuilds';
 import { useProjectDeployments } from '@/hooks/useProjectDeployments';
@@ -301,6 +302,7 @@ function OverviewTab({ project }: OverviewTabProps) {
   const rebuild = useRebuildProject();
   const cancelBuild = useCancelBuild();
   const [cancelOpen, setCancelOpen] = useState(false);
+  const isDemo = useCurrentUser().data?.isDemo ?? false;
 
   const latest = project.latestBuild;
   const active = project.activeDeployment;
@@ -398,7 +400,9 @@ function OverviewTab({ project }: OverviewTabProps) {
             </>
           ) : (
             <p className="text-sm text-slate-400">
-              No builds yet. Push a commit to your repo to trigger the first build.
+              {isDemo
+                ? 'No builds yet. Hit “Trigger build” below to deploy your first build.'
+                : 'No builds yet. Push a commit to your repo to trigger the first build.'}
             </p>
           )}
         </Card>
@@ -548,6 +552,7 @@ function BuildsTab({ project }: BuildsTabProps) {
   const [groups, setGroups] = useState<Set<string>>(new Set());
   const [range, setRange] = useState('all');
   const [sort, setSort] = useState('created:desc');
+  const isDemo = useCurrentUser().data?.isDemo ?? false;
 
   const filters = useMemo<BuildFilters>(() => {
     const statuses = STATUS_GROUPS.filter((g) => groups.has(g.label)).flatMap((g) => g.statuses);
@@ -617,7 +622,9 @@ function BuildsTab({ project }: BuildsTabProps) {
           description={
             anyFilter
               ? 'Try clearing a filter or widening the date range.'
-              : 'Push a commit to your repo to trigger the first build.'
+              : isDemo
+                ? 'Hit “Trigger build” on the Overview tab to deploy your first build.'
+                : 'Push a commit to your repo to trigger the first build.'
           }
         />
       ) : (
@@ -923,7 +930,7 @@ function LogsTab({ project }: { project: ProjectDetailType }) {
           ))}
         </div>
       )}
-      <p className="text-[11px] text-slate-600">
+      <p className="text-xs text-slate-400">
         Streamed from Azure Log Analytics — a short ingestion delay (~1–2 min) is normal.
       </p>
     </Card>
@@ -1027,15 +1034,17 @@ function useUpdateProject(id: string) {
     onError: (_err, _input, ctx) => {
       if (ctx?.prev) qc.setQueryData(['project', id], ctx.prev);
     },
-    // Saving env vars can trigger a config-only redeploy server-side, which
-    // creates a new Deployment row — so also refresh the deployment + activity
-    // lists, not just the project itself.
-    onSettled: () => {
+    onSettled: (_data, _err, input) => {
       qc.invalidateQueries({ queryKey: ['project', id] });
       qc.invalidateQueries({ queryKey: ['projects'] });
-      qc.invalidateQueries({ queryKey: ['project-deployments', id] });
-      qc.invalidateQueries({ queryKey: ['deployments'] });
-      qc.invalidateQueries({ queryKey: ['activity'] });
+      // Only an env-var save can trigger a config-only redeploy server-side (new
+      // Deployment + activity row). A name/branch/autoDeploy edit can't, so don't
+      // refetch the deployment/activity lists it didn't touch.
+      if (input.envVars !== undefined && input.envVars !== null) {
+        qc.invalidateQueries({ queryKey: ['project-deployments', id] });
+        qc.invalidateQueries({ queryKey: ['deployments'] });
+        qc.invalidateQueries({ queryKey: ['activity'] });
+      }
     },
   });
 }

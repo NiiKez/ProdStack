@@ -22,6 +22,10 @@ export function useRuntimeLogs(
     queryFn: () =>
       api<RuntimeLogsResult>(`/api/projects/${id}/runtime/logs?sinceMinutes=${sinceMinutes}`),
     enabled: Boolean(id) && (opts.enabled ?? true),
-    refetchInterval: 8_000,
+    // Poll every 8s while logs are actually available. If the backend reports
+    // `available:false` (no Log Analytics workspace, app scaled to zero, …) stop
+    // polling — each query has a per-workspace cost and the answer won't change
+    // until the user reopens the tab (which refetches on mount anyway).
+    refetchInterval: (query) => (query.state.data?.available === false ? false : 8_000),
   });
 }

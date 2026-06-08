@@ -177,7 +177,14 @@ function stubValueFor(key: MetricKey, index: number): number {
   }
 }
 
-function stubMetrics(opts: GetAppMetricsOpts): AppMetrics {
+/**
+ * Exported so the demo path (`routes/projects.ts`) can synthesize a metrics
+ * series for a demo project regardless of `AZURE_STUB` (prod runs
+ * `AZURE_STUB=false`, but a demo project has no real Azure resource to query).
+ * Behavior is unchanged — this is the same deterministic generator the
+ * `AZURE_STUB=true` branch uses. See docs/DEMO_MODE.md §6.5.
+ */
+export function stubMetrics(opts: GetAppMetricsOpts): AppMetrics {
   const range = resolveRange(opts.range);
   const cfg = RANGE_CONFIG[range];
   const stepMs = cfg.intervalMinutes * 60_000;
