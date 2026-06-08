@@ -45,7 +45,12 @@ export interface BuildSummary {
 
 export interface ProjectDetail extends ProjectSummary {
   builds: BuildSummary[];
-  /** Present on `GET /api/projects/:id`; decrypted key/value pairs. */
+  /**
+   * Present on `GET /api/projects/:id` and on the PATCH response when env vars
+   * were saved. Values are write-only — the server returns only the key and a
+   * `hasValue` flag, never the decrypted secret, so a leaked session/HAR can't
+   * exfiltrate it.
+   */
   envVars?: ProjectEnvVar[];
 }
 
@@ -79,9 +84,27 @@ export interface BuildDetail {
   };
 }
 
+/**
+ * An env var as the API returns it: write-only, so the value is masked. The
+ * server only ever sends the key and whether a value is stored; the cleartext
+ * never crosses the wire. `hasValue` is effectively always `true` (a key can't
+ * exist without a value) — it's explicit so the UI can render a "(set)"
+ * placeholder and reason about the contract.
+ */
 export interface ProjectEnvVar {
   key: string;
-  value: string;
+  hasValue: boolean;
+}
+
+/**
+ * One entry of a PATCH `envVars` save. The value is optional: send a (non-empty)
+ * `value` only for a key the user added or edited; omit it to keep the stored
+ * encrypted value. Keys absent from the submitted list are deleted; a brand-new
+ * key with no value is rejected (400).
+ */
+export interface UpdateEnvVar {
+  key: string;
+  value?: string;
 }
 
 /** Cursor-paginated list envelope returned by the M5 list endpoints. */
@@ -166,7 +189,8 @@ export interface UpdateProjectInput {
   branch?: string;
   name?: string;
   autoDeploy?: boolean;
-  envVars?: ProjectEnvVar[] | null;
+  /** Partial save: see `UpdateEnvVar`. `null`/absent = leave env vars untouched. */
+  envVars?: UpdateEnvVar[] | null;
 }
 
 /** A line of the running container's stdout/stderr (`GET …/runtime/logs`). */

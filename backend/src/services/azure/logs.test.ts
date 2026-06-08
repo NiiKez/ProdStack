@@ -42,10 +42,15 @@ beforeEach(() => {
   mocks.LogsQueryClient.mockReset();
   mocks.DefaultAzureCredential.mockReset();
 
-  mocks.DefaultAzureCredential.mockImplementation(() => ({ kind: 'default-cred' }));
-  mocks.LogsQueryClient.mockImplementation(() => ({
-    queryWorkspace: mocks.queryWorkspace,
-  }));
+  // Regular `function` (not an arrow): these mocks are invoked with `new` in
+  // the source (`new DefaultAzureCredential()`, `new LogsQueryClient()`), and
+  // vitest 4 refuses to construct an arrow-function mock implementation.
+  mocks.DefaultAzureCredential.mockImplementation(function () {
+    return { kind: 'default-cred' };
+  });
+  mocks.LogsQueryClient.mockImplementation(function () {
+    return { queryWorkspace: mocks.queryWorkspace };
+  });
 
   delete process.env.LOG_ANALYTICS_WORKSPACE_ID;
 });

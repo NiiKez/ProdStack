@@ -55,7 +55,7 @@ export { ConfirmDialog } from './ConfirmDialog';
 export type { ConfirmDialogProps } from './ConfirmDialog';
 
 export { KeyValueEditor, isValidEnvKey } from './KeyValueEditor';
-export type { KeyValueEditorProps, KeyValuePair } from './KeyValueEditor';
+export type { KeyValueEditorProps, EnvRow } from './KeyValueEditor';
 
 export { Table, THead, TBody, TR, TH, TD, SortableTH } from './Table';
 export type { SortableTHProps, SortDirection } from './Table';

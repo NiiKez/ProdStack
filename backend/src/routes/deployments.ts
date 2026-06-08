@@ -15,6 +15,18 @@ const router = Router();
 
 const BUILD_STATUSES = new Set<string>(Object.values(BuildStatus));
 
+// Upper bound on how many project ids a single feed request may filter on. The
+// query is already user-scoped (`project.userId`), so this is a DB-load guard,
+// not a security boundary: a 2000-char CSV could otherwise fan out to ~650 ids
+// in one Prisma `IN (...)`. A user with more projects than this can page/filter
+// in smaller batches.
+const MAX_PROJECT_ID_FILTERS = 50;
+
+// cuid-ish id shape, matching `idParamSchema` used by the other routers
+// (z.string().min(1).max(40), lowercase-alnum). Malformed ids (anything outside
+// this charset/length) are dropped before they reach Prisma.
+const PROJECT_ID_RE = /^[a-z0-9]{1,40}$/;
+
 const querySchema = z.object({
   // Comma-separated project ids to narrow the feed.
   projectId: z.string().max(2000).optional(),
@@ -45,6 +57,22 @@ function parseCsv(raw: string | undefined): string[] | undefined {
   return values.length > 0 ? values : undefined;
 }
 
+/**
+ * Parse the comma-separated `projectId` filter into a BOUNDED, VALIDATED list:
+ * drop any token that isn't a well-formed cuid-ish id and cap the result at
+ * {@link MAX_PROJECT_ID_FILTERS} so a single request can't fan out into a huge
+ * Prisma `IN (...)`. Returns undefined when nothing valid remains (so the feed
+ * falls back to the user-scoped default).
+ */
+function parseProjectIds(raw: string | undefined): string[] | undefined {
+  const values = parseCsv(raw);
+  if (values === undefined) return undefined;
+  const valid = values
+    .filter((id) => PROJECT_ID_RE.test(id))
+    .slice(0, MAX_PROJECT_ID_FILTERS);
+  return valid.length > 0 ? valid : undefined;
+}
+
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = getUserId(req);
@@ -53,7 +81,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const where: Prisma.DeploymentWhereInput = {
       project: { userId, deletedAt: null },
     };
-    const projectIds = parseCsv(q.projectId);
+    const projectIds = parseProjectIds(q.projectId);
     if (projectIds) where.projectId = { in: projectIds };
     if (q.activeOnly) where.active = true;
 

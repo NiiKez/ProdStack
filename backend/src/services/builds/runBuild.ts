@@ -82,12 +82,17 @@ export function assertValidBranchName(branch: string): void {
  * Build the argv for the authenticated/anonymous `git clone`. `--end-of-options`
  * guards the user-controlled positionals (`url`, `intoDir`) so git can never
  * reinterpret them as options. Pure so the arg shape is unit-testable without a
- * git process. `authConfig` carries the per-call `-c http.<url>.extraheader=…`
- * auth config (omitted on the anonymous retry).
+ * git process.
+ *
+ * Security: the auth credential is NEVER an argv element. The
+ * `http.<url>.extraheader=AUTHORIZATION: Basic <base64>` config is applied via
+ * the child process's `GIT_CONFIG_*` environment (see {@link authConfigEnv} /
+ * {@link cloneRepo}), so the secret can't be read from `/proc/<pid>/cmdline` or
+ * `ps` by any other process sharing the container. Only the non-secret
+ * `credential.helper=` disable stays as an argv `-c` flag.
  */
 export function cloneArgs(opts: {
   noCredHelper: string;
-  authConfig?: string;
   branch: string;
   url: string;
   intoDir: string;
@@ -95,7 +100,6 @@ export function cloneArgs(opts: {
   return [
     '-c',
     opts.noCredHelper,
-    ...(opts.authConfig !== undefined ? ['-c', opts.authConfig] : []),
     'clone',
     '--depth',
     '1',
@@ -109,12 +113,12 @@ export function cloneArgs(opts: {
 
 /**
  * Build the argv for the single-SHA `git fetch`. `--end-of-options` immediately
- * precedes the user-controlled `commitSha` positional.
+ * precedes the user-controlled `commitSha` positional. As with {@link cloneArgs},
+ * the auth extraheader is applied off-argv via `GIT_CONFIG_*` env, never here.
  */
 export function fetchArgs(opts: {
   intoDir: string;
   noCredHelper: string;
-  authConfig: string;
   commitSha: string;
 }): string[] {
   return [
@@ -122,8 +126,6 @@ export function fetchArgs(opts: {
     opts.intoDir,
     '-c',
     opts.noCredHelper,
-    '-c',
-    opts.authConfig,
     'fetch',
     '--depth',
     '1',
@@ -470,7 +472,16 @@ async function cloneRepo(opts: {
   assertValidBranchName(opts.branch);
 
   const url = `https://github.com/${opts.repoFullName}.git`;
-  const authConfig = `http.${url}.extraheader=AUTHORIZATION: Basic ${basicAuth(opts.token)}`;
+  // The auth header value (`AUTHORIZATION: Basic <base64(x-access-token:<token>)>`)
+  // is a secret. It is applied via the git child's `GIT_CONFIG_*` environment
+  // (NOT argv) so it can't be read from /proc/<pid>/cmdline or `ps` by another
+  // process in the container. We keep both the raw token and this exact header
+  // value in the redact set so neither can leak into a build log.
+  const extraHeaderValue = authHeaderValue(opts.token);
+  // The bare base64 credential blob — `basicAuth(token)` — is the actual
+  // secret; redact it on its own too, in case it surfaces in a log line
+  // without the `AUTHORIZATION: Basic ` prefix.
+  const credentialBlob = basicAuth(opts.token);
   // `credential.helper=` disables ALL credential helpers and
   // `GIT_TERMINAL_PROMPT=0` makes any prompt attempt fail fast. Even with
   // both, git 2.x still prints one `fatal: could not read Username for
@@ -479,7 +490,11 @@ async function cloneRepo(opts: {
   // outcome is captured by the exit code; the line is cosmetic noise we
   // drop in `gitOnLine` below.
   const noCredHelper = 'credential.helper=';
-  const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  const baseGitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  // Env carrying the secret extraheader as git config (off-argv). Used for the
+  // authenticated clone + the fetch; the anonymous retry and checkout omit it.
+  const authGitEnv = { ...baseGitEnv, ...authConfigEnv(url, extraHeaderValue) };
+  const redactSecrets = [opts.token, extraHeaderValue, credentialBlob];
   const gitOnLine = (line: string): void => {
     if (line.includes('could not read Username')) return;
     opts.onLine(line);
@@ -491,18 +506,27 @@ async function cloneRepo(opts: {
   try {
     await spawnLogged(
       'git',
-      cloneArgs({ noCredHelper, authConfig, branch: opts.branch, url, intoDir: opts.intoDir }),
-      { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
+      cloneArgs({ noCredHelper, branch: opts.branch, url, intoDir: opts.intoDir }),
+      { onLine: gitOnLine, redact: redactSecrets, env: authGitEnv, signal: opts.signal },
     );
   } catch (err) {
     // Don't retry anonymously on a cancel — the user asked to stop.
     if (opts.signal?.aborted) throw err;
-    opts.onLine(`git: authenticated clone failed (${(err as Error).message}); retrying anonymously`);
+    // Redact before logging: this path bypasses `gitOnLine`/`spawnLogged`'s own
+    // redaction, and although git's spawn error message carries no secret today,
+    // routing it through `redact` keeps the credential out of the log if that
+    // ever changes.
+    opts.onLine(
+      redact(
+        `git: authenticated clone failed (${(err as Error).message}); retrying anonymously`,
+        redactSecrets,
+      ),
+    );
     await rm(opts.intoDir, { recursive: true, force: true });
     await spawnLogged(
       'git',
       cloneArgs({ noCredHelper, branch: opts.branch, url, intoDir: opts.intoDir }),
-      { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
+      { onLine: gitOnLine, redact: redactSecrets, env: baseGitEnv, signal: opts.signal },
     );
   }
 
@@ -510,8 +534,8 @@ async function cloneRepo(opts: {
   // the webhook fired. Fetch + checkout makes the build reproducible.
   await spawnLogged(
     'git',
-    fetchArgs({ intoDir: opts.intoDir, noCredHelper, authConfig, commitSha: opts.commitSha }),
-    { onLine: gitOnLine, redact: opts.token, env: gitEnv, signal: opts.signal },
+    fetchArgs({ intoDir: opts.intoDir, noCredHelper, commitSha: opts.commitSha }),
+    { onLine: gitOnLine, redact: redactSecrets, env: authGitEnv, signal: opts.signal },
   ).catch(() => {
     // Older git servers reject single-sha fetch; the shallow clone above is
     // good enough when HEAD hasn't moved. Continue.
@@ -519,8 +543,8 @@ async function cloneRepo(opts: {
   if (opts.signal?.aborted) throw new Error('cancelled');
   await spawnLogged('git', checkoutArgs({ intoDir: opts.intoDir, commitSha: opts.commitSha }), {
     onLine: gitOnLine,
-    redact: opts.token,
-    env: gitEnv,
+    redact: redactSecrets,
+    env: baseGitEnv,
     signal: opts.signal,
   }).catch(() => {
     // Same fallback — if checkout fails the shallow HEAD is what we'll build.
@@ -528,8 +552,45 @@ async function cloneRepo(opts: {
   if (opts.signal?.aborted) throw new Error('cancelled');
 }
 
-function basicAuth(token: string): string {
+/** base64(`x-access-token:<token>`) — the credential blob for HTTP Basic auth. */
+export function basicAuth(token: string): string {
   return Buffer.from(`x-access-token:${token}`, 'utf8').toString('base64');
+}
+
+/**
+ * The exact `extraheader` config VALUE git sends as the `Authorization` header.
+ * This — not the raw token — is the string that actually appears in argv/config,
+ * so the redactor strips it too (see {@link redact}). Reused by {@link cloneRepo}
+ * and the redact set so the two can never drift.
+ */
+export function authHeaderValue(token: string): string {
+  return `AUTHORIZATION: Basic ${basicAuth(token)}`;
+}
+
+/**
+ * Apply the per-repo auth extraheader as git config via the child process's
+ * ENVIRONMENT rather than argv. Git ≥2.31 reads `GIT_CONFIG_COUNT` + the
+ * indexed `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` pairs and treats them
+ * exactly like `-c key=value` — but the secret stays out of `/proc/<pid>/cmdline`
+ * and `ps`. node:20-alpine ships git ≥2.43, so this is supported in the worker.
+ *
+ * Pure + exported so the env shape is unit-testable. Only the secret header
+ * moves here; the non-secret `credential.helper=` disable remains an argv `-c`.
+ */
+export function authConfigEnv(url: string, headerValue: string): NodeJS.ProcessEnv {
+  // Build the indexed env from a pairs array and derive GIT_CONFIG_COUNT from its
+  // length, so the count can never drift from the actual pairs: git reads exactly
+  // GIT_CONFIG_COUNT entries, so a hand-maintained literal that lagged an added
+  // pair would silently drop config (and auth would half-break with no error).
+  const pairs: ReadonlyArray<readonly [string, string]> = [
+    [`http.${url}.extraheader`, headerValue],
+  ];
+  const env: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(pairs.length) };
+  pairs.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
 }
 
 function spawnLogged(
@@ -537,7 +598,8 @@ function spawnLogged(
   args: string[],
   opts: {
     onLine: (line: string) => void;
-    redact: string;
+    /** Secret(s) to strip from every emitted line — see {@link redact}. */
+    redact: string | string[];
     env?: NodeJS.ProcessEnv;
     signal?: AbortSignal;
   },
@@ -594,9 +656,22 @@ function spawnLogged(
   });
 }
 
-function redact(line: string, secret: string): string {
-  if (secret.length === 0) return line;
-  return line.split(secret).join('***');
+/**
+ * Strip every secret in `secret` from a log line before it's persisted. We pass
+ * BOTH forms the GitHub token can take: the raw token AND the
+ * `AUTHORIZATION: Basic <base64(x-access-token:<token>)>` header value that git
+ * actually emits (constructed via {@link authHeaderValue}, so the two can't
+ * drift). Without the base64 form, a leaked `Authorization` header would slip
+ * through redaction even though it's a working credential. Longest-first so a
+ * raw-token substring of the header doesn't pre-empt redacting the wider blob.
+ */
+export function redact(line: string, secret: string | string[]): string {
+  const secrets = (Array.isArray(secret) ? secret : [secret])
+    .filter((s) => s.length > 0)
+    .sort((a, b) => b.length - a.length);
+  let out = line;
+  for (const s of secrets) out = out.split(s).join('***');
+  return out;
 }
 
 // --- Stub path (mirrors M2.5) ---------------------------------------------

@@ -7,7 +7,9 @@
 # syntax=docker/dockerfile:1.7
 
 # --- Builder --------------------------------------------------------------
-FROM node:20-alpine AS builder
+# Base image digest-pinned (M3 hardening): immutable @sha256 so a retagged
+# upstream can't silently change the build. The digest is for node:20-alpine.
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
 WORKDIR /app
 
 # Install deps with the workspace lockfile. Copy only manifests first so
@@ -32,7 +34,8 @@ RUN npm run build --workspace=@prodstack/api
 RUN npm prune --omit=dev
 
 # --- Runtime --------------------------------------------------------------
-FROM node:20-alpine AS runner
+# Base image digest-pinned (M3 hardening) — node:20-alpine; see builder note.
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
@@ -48,15 +51,33 @@ RUN apk add --no-cache tini openssl
 # per-workspace folder. Running from /app means Node's module resolution
 # finds @prisma/client and friends via the standard walk-up. `prisma` is a
 # runtime dependency (not pruned) so `prisma migrate deploy` works here.
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/backend/dist ./backend/dist
-COPY --from=builder /app/backend/prisma ./backend/prisma
-COPY --from=builder /app/backend/package.json ./backend/package.json
+#
+# M2 hardening: run as the built-in non-root `node` user (uid 1000, shipped by
+# node:*-alpine). Every copied artifact is --chown=node:node so the non-root
+# runtime can READ what it needs — node_modules (incl. the Prisma client + engine
+# binaries under node_modules/.prisma) and the migrations dir. The entrypoint's
+# `prisma migrate deploy` takes an in-DB Postgres advisory lock (see
+# docker-entrypoint.sh), not a filesystem lock — it writes nothing under /app at
+# runtime. The app binds :3000 (>1024) so no root privilege is required for the
+# listen socket.
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/backend/dist ./backend/dist
+COPY --from=builder --chown=node:node /app/backend/prisma ./backend/prisma
+COPY --from=builder --chown=node:node /app/backend/package.json ./backend/package.json
 
 # Entrypoint runs `prisma migrate deploy` on boot, then execs the CMD. See the
 # script header for why migrations run here and not in the GitHub workflow.
-COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY --chown=node:node backend/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
+
+# `WORKDIR /app` created /app as root:root; the COPY --chown only chowned the
+# contents, not the directory itself. Make the cwd node-owned so any future code
+# (a temp file, crash dump, or a Prisma version that writes relative to cwd) can't
+# EACCES-crash-loop the non-root container.
+RUN chown node:node /app
+
+# Drop root: everything below (entrypoint migrate + node server) runs as `node`.
+USER node
 
 EXPOSE 3000
 ENTRYPOINT ["/sbin/tini", "--", "/app/docker-entrypoint.sh"]

@@ -42,6 +42,13 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # --- Security response headers --------------------------------------
+    # Covers the HTML document + JS bundle the browser renders (the backend
+    # helmet CSP only rides on API JSON responses, never this page). See H1.
+    # nginx does NOT inherit `add_header` into a location that sets its own —
+    # so this snippet is re-included in /assets/ and /index.html below too.
+    include /etc/nginx/snippets/prodstack-security-headers.conf;
+
     # Azure-provided DNS; needed because proxy_pass uses a variable hostname.
     resolver 168.63.129.16 valid=30s;
     resolver_timeout 5s;
@@ -151,6 +158,10 @@ server {
     location /assets/ {
         try_files $uri =404;
         access_log off;
+        # This location declares its own add_header, so nginx STOPS inheriting the
+        # server-level headers here — re-include the security headers or the hashed
+        # JS/CSS responses would ship with none.
+        include /etc/nginx/snippets/prodstack-security-headers.conf;
         # Single explicit Cache-Control (no `expires`, which would emit a second
         # Cache-Control header). Hashed filenames make these safe to cache forever.
         add_header Cache-Control "public, max-age=31536000, immutable";
@@ -160,6 +171,11 @@ server {
     # index.html references the hashed assets, so it must always be revalidated
     # or users get stuck on a stale bundle after a deploy.
     location = /index.html {
+        # Same inheritance gotcha as /assets/ — this add_header turns off
+        # inheritance of the server-level security headers, so re-include them
+        # here, otherwise the SPA shell (the document the browser renders) would
+        # have no CSP/X-Frame-Options/etc.
+        include /etc/nginx/snippets/prodstack-security-headers.conf;
         add_header Cache-Control "no-cache, no-store, must-revalidate";
         expires off;
     }

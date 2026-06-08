@@ -55,10 +55,10 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Setup Node 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -101,11 +101,11 @@ jobs:
         run: |
           docker build -f frontend/Dockerfile \
             -t prodstack.azurecr.io/prodstack-web:${{ github.sha }} \
-            -t prodstack.azurecr.io/prodstack-web:latest \
             .
-          # Explicit tags, not `--all-tags` (see api.yml). Deploy pins :<sha>.
+          # Push ONLY the immutable :<sha> tag (the deploy pins it). No mutable
+          # :latest — nothing consumes it and a floating tag is an attack surface
+          # (see api.yml). Explicit tag, not `--all-tags`.
           docker push prodstack.azurecr.io/prodstack-web:${{ github.sha }}
-          docker push prodstack.azurecr.io/prodstack-web:latest
 
       # Roll the web revision via the API's self-deploy endpoint. Note app="web";
       # the immutable ${{ github.sha }} tag is sent (never `latest`).

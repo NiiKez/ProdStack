@@ -46,18 +46,25 @@ beforeEach(() => {
   mocks.DefaultAzureCredential.mockReset();
   mocks.ContainerAppsAPIClient.mockReset();
 
-  mocks.DefaultAzureCredential.mockImplementation(() => ({ kind: 'default-cred' }));
+  // Regular `function` (not an arrow): these mocks are invoked with `new` in
+  // the source (`new DefaultAzureCredential()`, `new ContainerAppsAPIClient()`),
+  // and vitest 4 refuses to construct an arrow-function mock implementation.
+  mocks.DefaultAzureCredential.mockImplementation(function () {
+    return { kind: 'default-cred' };
+  });
   // Default: app has no pre-existing secrets. Individual tests override.
   mocks.listSecrets.mockResolvedValue({ value: [] });
-  mocks.ContainerAppsAPIClient.mockImplementation(() => ({
-    containerApps: {
-      beginCreateOrUpdateAndWait: mocks.beginCreateOrUpdateAndWait,
-      beginCreateOrUpdate: mocks.beginCreateOrUpdate,
-      beginDeleteAndWait: mocks.beginDeleteAndWait,
-      get: mocks.get,
-      listSecrets: mocks.listSecrets,
-    },
-  }));
+  mocks.ContainerAppsAPIClient.mockImplementation(function () {
+    return {
+      containerApps: {
+        beginCreateOrUpdateAndWait: mocks.beginCreateOrUpdateAndWait,
+        beginCreateOrUpdate: mocks.beginCreateOrUpdate,
+        beginDeleteAndWait: mocks.beginDeleteAndWait,
+        get: mocks.get,
+        listSecrets: mocks.listSecrets,
+      },
+    };
+  });
 });
 
 describe('createContainerApp (real branch)', () => {

@@ -61,10 +61,12 @@ export function userOrIpKey(req: Request): string {
 /** Paths the global limiter must never throttle: ACA liveness/readiness probes
  *  hit them constantly and a 429 there would mark the container unhealthy. */
 function isHealthPath(req: Request): boolean {
-  // `req.path` is relative to the app mount (always '/' here), so match the
-  // original URL's pathname. Health is mounted at both `/healthz` and
-  // `/api/health`.
-  const path = req.path;
+  // Match the FULL request pathname (req.originalUrl with the query stripped),
+  // not req.path: req.path is relative to the middleware's mount point, so this
+  // skip would silently stop matching if globalLimiter were ever remounted under
+  // a prefix — 429-ing the ACA probes. originalUrl is always the un-stripped
+  // target. Health is mounted at both `/healthz` and `/api/health`.
+  const path = req.originalUrl.split('?')[0];
   return (
     path === '/healthz' ||
     path.startsWith('/healthz/') ||
@@ -97,6 +99,26 @@ export const authLimiter: RateLimitRequestHandler = makeRateLimiter({
   windowMs: 15 * 60 * 1000, // 15 min
   max: 40,
   name: 'auth',
+});
+
+/**
+ * Pre-auth limiter for the GitHub webhook receiver (`/api/webhooks/github`).
+ * That endpoint is unauthenticated at the IP layer (it authenticates each
+ * delivery by HMAC over the raw body) and — because HMAC needs the exact bytes
+ * GitHub signed — mounts BEFORE `express.json()` and therefore BEFORE the
+ * app-wide `globalLimiter`, so it would otherwise sit outside every throttle.
+ * Each forged POST still costs an indexed project lookup + AES-GCM decrypt +
+ * HMAC over up to 1MB before it's rejected, so an unthrottled flood is a cheap
+ * DB/CPU-amplification vector. Keyed on IP (no session exists here). The ceiling
+ * is deliberately generous — GitHub fans many real deliveries from a small,
+ * stable set of source IPs — but far below the 300/15m global backstop, and it
+ * blunts automated hammering from a single forging client. Like every limiter
+ * it skips the test env (see {@link makeRateLimiter}).
+ */
+export const webhookLimiter: RateLimitRequestHandler = makeRateLimiter({
+  windowMs: 60 * 1000, // 1 min
+  max: 120,
+  name: 'webhook',
 });
 
 /**

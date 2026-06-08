@@ -36,10 +36,15 @@ beforeEach(() => {
   mocks.DefaultAzureCredential.mockReset();
   mocks.MetricsQueryClient.mockReset();
 
-  mocks.DefaultAzureCredential.mockImplementation(() => ({ kind: 'default-cred' }));
-  mocks.MetricsQueryClient.mockImplementation(() => ({
-    queryResource: mocks.queryResource,
-  }));
+  // Regular `function` (not an arrow): these mocks are invoked with `new` in
+  // the source (`new DefaultAzureCredential()`, `new MetricsQueryClient()`),
+  // and vitest 4 refuses to construct an arrow-function mock implementation.
+  mocks.DefaultAzureCredential.mockImplementation(function () {
+    return { kind: 'default-cred' };
+  });
+  mocks.MetricsQueryClient.mockImplementation(function () {
+    return { queryResource: mocks.queryResource };
+  });
 });
 
 afterEach(() => {

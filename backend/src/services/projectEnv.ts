@@ -29,3 +29,29 @@ export async function loadDecryptedEnvVars(projectId: string): Promise<EnvVarInp
     }),
   }));
 }
+
+/** A project env var with its value masked — the only env-var shape the API ever
+ * returns to the client. A value is always stored (a key can't exist without one),
+ * so `hasValue` is effectively `true` for every row; it's kept explicit so the
+ * client can render a "(set)" placeholder and reason about the write-only contract. */
+export interface EnvVarMeta {
+  key: string;
+  hasValue: boolean;
+}
+
+/**
+ * Load a project's env-var *keys* without decrypting any value. This is the
+ * read side the API surfaces: env-var values are write-only — the encrypted
+ * plaintext is never returned in an HTTP response, so a leaked session/HAR or
+ * an XSS can't exfiltrate the project's secrets. Editing a value requires the
+ * client to submit a replacement; an untouched value is kept server-side
+ * (see the project PATCH handler's partial-update semantics).
+ */
+export async function loadEnvVarMeta(projectId: string): Promise<EnvVarMeta[]> {
+  const rows = await prisma.envVar.findMany({
+    where: { projectId },
+    orderBy: { key: 'asc' },
+    select: { key: true },
+  });
+  return rows.map((row) => ({ key: row.key, hasValue: true }));
+}
