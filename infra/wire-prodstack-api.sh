@@ -14,6 +14,13 @@
 # Cleanup is gated by ENABLE_CLEANUP_JOBS — NOT ENABLE_WORKER — so it runs on the
 # API (ENABLE_WORKER stays false here) and not the dedicated builder.
 #
+# TRUST_PROXY_HOPS=3: requests reach the API through 3 proxy hops on the
+# prodstack.live path (web-Envoy → prodstack-web nginx → api-Envoy), so Express's
+# `trust proxy` must skip 3 X-Forwarded-For entries for `req.ip` to be the real
+# visitor. Too low and every client collapses into one shared upstream IP and the
+# per-IP rate limiters throttle everyone at once (the demo-login 429 incident).
+# See backend/src/env.ts. If a hop count ever changes, retune this var (no rebuild).
+#
 # Demo mode (M8, docs/DEMO_MODE.md): ENABLE_DEMO=true exposes the public
 # "Launch demo" sandbox (GET /api/auth/demo-login). SAFE under AZURE_STUB=false —
 # demo safety is structural (routing + pre-claimed builds), not the stub. Override
@@ -100,6 +107,7 @@ az containerapp update $APP --set-env-vars \
   NODE_ENV=production \
   WEB_ORIGIN=$WEB \
   PUBLIC_API_URL=$API \
+  TRUST_PROXY_HOPS=3 \
   GITHUB_OAUTH_CALLBACK_URL=$WEB/api/auth/github/callback \
   AZURE_STUB=false \
   AZURE_SUBSCRIPTION_ID=$SUB \

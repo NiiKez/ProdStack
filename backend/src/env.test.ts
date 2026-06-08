@@ -10,7 +10,7 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { assertSafeEnvCombination } from './env.js';
+import { assertSafeEnvCombination, env } from './env.js';
 
 describe('assertSafeEnvCombination (dev-backdoor fail-closed guard)', () => {
   it('throws for development + real Azure (AZURE_STUB=false)', () => {
@@ -41,6 +41,15 @@ describe('assertSafeEnvCombination (dev-backdoor fail-closed guard)', () => {
     expect(() =>
       assertSafeEnvCombination({ NODE_ENV: 'test', AZURE_STUB: true }),
     ).not.toThrow();
+  });
+});
+
+describe('TRUST_PROXY_HOPS', () => {
+  // setup.ts does not set TRUST_PROXY_HOPS, so the schema default applies. This
+  // pins the default (correct for dev/test/direct-FQDN) and that the var is a
+  // coerced integer feeding Express's `trust proxy`; prod overrides it to 3.
+  it('defaults to 1 when unset', () => {
+    expect(env.TRUST_PROXY_HOPS).toBe(1);
   });
 });
 

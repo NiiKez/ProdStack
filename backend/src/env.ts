@@ -56,6 +56,17 @@ const EnvSchema = z.object({
     .default('info'),
   WEB_ORIGIN: z.string().url(),
   PUBLIC_API_URL: z.string().url().default('http://localhost:3000'),
+  // Number of reverse-proxy hops in front of the app, fed to Express's
+  // `trust proxy`. `req.ip` — and therefore every per-IP rate limiter — is
+  // derived by skipping this many right-most `X-Forwarded-For` entries, so it
+  // MUST equal the real chain length or all clients collapse into a single
+  // shared upstream IP and the limiters throttle everyone at once. A direct hit
+  // on the ACA Envoy is 1 hop; via the prodstack-web nginx reverse proxy (the
+  // custom domain prodstack.live) the chain is web-Envoy → nginx → api-Envoy =
+  // 3. Default 1 keeps dev/test and direct-FQDN access correct; prod sets 3.
+  // Numeric (NOT `true`, which trips express-rate-limit's permissive-trust-proxy
+  // guard).
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(1),
 
   // Database
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),

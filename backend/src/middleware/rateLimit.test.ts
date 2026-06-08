@@ -102,10 +102,11 @@ describe('exported limiters', () => {
     }
   });
 
-  it('demoLoginLimiter config throttles after 5 hits per window (skip overridden)', async () => {
-    // The real limiter skips in test; rebuild its config (5 / 15min) with skip
-    // forced on to prove the cap. Each demo-login mints a User + seeds a
-    // workspace, so the cap is the cheap-to-fire DB-amplification guard.
+  it('a demoLogin-style limiter throttles once its per-window cap is hit (skip overridden)', async () => {
+    // The real limiter skips in test; rebuild a small (max 5) config with skip
+    // forced on to prove the throttle MECHANISM, independent of the real
+    // demoLoginLimiter ceiling (20/15min). Each demo-login mints a User + seeds
+    // a workspace, so the cap is the cheap-to-fire DB-amplification guard.
     const app = appWith(makeRateLimiter({ windowMs: 15 * 60 * 1000, max: 5, skip: () => false }));
     for (let i = 0; i < 5; i++) {
       expect((await supertest(app).get('/')).status).toBe(200);
