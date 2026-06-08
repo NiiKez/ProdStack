@@ -33,7 +33,11 @@ export async function claimNextBuild(workerId: string): Promise<ClaimedBuild | n
         "attempts"  = "attempts" + 1
     WHERE id = (
       SELECT id FROM "Build"
-      WHERE status = 'QUEUED' AND "claimedAt" IS NULL
+      -- Demo builds are created pre-claimed (claimedAt set) so the IS NULL guard
+      -- already hides them; the explicit "isDemo" = false is defense-in-depth
+      -- per docs/DEMO_MODE.md §4 layer 2 — a demo build can never be claimed by
+      -- the real Kaniko worker even if its pre-claim were somehow released.
+      WHERE status = 'QUEUED' AND "claimedAt" IS NULL AND "isDemo" = false
       ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
@@ -70,7 +74,14 @@ export async function recoverOwnClaims(
   const staleBefore = new Date(Date.now() - staleAfterMs);
   const finishedAt = new Date();
   const inFlight: BuildStatus[] = ['CLONING', 'BUILDING', 'PUSHING', 'DEPLOYING'];
-  const mine = { OR: [{ claimedBy: workerId }, { claimedAt: { lt: staleBefore } }] };
+  // `isDemo: false` keeps the boot stale-reaper from ever flipping a demo build
+  // to FAILED/CANCELLED — demo builds are driven in-process by the API, not the
+  // worker, so they must be invisible to this recovery path. Defense-in-depth
+  // per docs/DEMO_MODE.md §4 layer 2.
+  const mine = {
+    isDemo: false,
+    OR: [{ claimedBy: workerId }, { claimedAt: { lt: staleBefore } }],
+  };
 
   const released = await prisma.build.updateMany({
     where: { status: 'QUEUED', ...mine },

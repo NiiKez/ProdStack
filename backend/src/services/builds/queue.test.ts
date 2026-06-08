@@ -14,19 +14,21 @@ process.env.GITHUB_OAUTH_CALLBACK_URL = 'http://localhost:3000/api/auth/github/c
 process.env.AZURE_STUB = 'true';
 process.env.LOG_LEVEL = 'silent';
 
+import { Prisma } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ buildUpdateMany: vi.fn() }));
+const mocks = vi.hoisted(() => ({ buildUpdateMany: vi.fn(), queryRaw: vi.fn() }));
 
 vi.mock('../../db.js', () => ({
-  prisma: { build: { updateMany: mocks.buildUpdateMany } },
+  prisma: { build: { updateMany: mocks.buildUpdateMany }, $queryRaw: mocks.queryRaw },
 }));
 
-const { recoverOwnClaims } = await import('./queue.js');
+const { claimNextBuild, recoverOwnClaims } = await import('./queue.js');
 
 interface WhereArg {
   status: unknown;
   cancelRequested?: boolean;
+  isDemo?: boolean;
 }
 interface UpdateManyArg {
   where: WhereArg;
@@ -35,6 +37,26 @@ interface UpdateManyArg {
 
 beforeEach(() => {
   mocks.buildUpdateMany.mockReset();
+  mocks.queryRaw.mockReset();
+});
+
+describe('claimNextBuild', () => {
+  it('excludes demo builds (isDemo = false) from the claim SELECT', async () => {
+    // Defense-in-depth per docs/DEMO_MODE.md §4 layer 2: a pre-claimed demo
+    // build is already invisible via `claimedAt IS NULL`, but the worker's claim
+    // query must also carry the explicit `isDemo = false` guard.
+    mocks.queryRaw.mockResolvedValue([]);
+    await claimNextBuild('worker-1');
+
+    expect(mocks.queryRaw).toHaveBeenCalledTimes(1);
+    const sql = mocks.queryRaw.mock.calls[0]![0] as Prisma.Sql;
+    // The literal `"isDemo" = false` lives in the static SQL text (it's not a
+    // parameterized value), so it appears in the joined query fragments.
+    const text = sql.strings.join('');
+    expect(text).toContain('"isDemo" = false');
+    expect(text).toContain("status = 'QUEUED'");
+    expect(text).toContain('"claimedAt" IS NULL');
+  });
 });
 
 describe('recoverOwnClaims', () => {
@@ -61,5 +83,11 @@ describe('recoverOwnClaims', () => {
     // 3) In-flight + not cancelRequested → FAILED.
     expect(calls[2]!.where.cancelRequested).toBe(false);
     expect(calls[2]!.data.status).toBe('FAILED');
+
+    // Every recovery query must exclude demo builds (§4 layer 2) so the boot
+    // stale-reaper never flips an in-process-driven demo build to FAILED.
+    for (const call of calls) {
+      expect(call.where.isDemo).toBe(false);
+    }
   });
 });

@@ -72,7 +72,14 @@ const stubLog = pino({ name: 'azure-logs-stub' });
 
 // --- Stub branch -----------------------------------------------------------
 
-function stubRuntimeLogs(opts: QueryRuntimeLogsOpts): RuntimeLogsResult {
+/**
+ * Exported so the demo path (`routes/projects.ts`) can synthesize runtime log
+ * lines for a demo project regardless of `AZURE_STUB` (prod runs
+ * `AZURE_STUB=false`, but a demo project has no real Log Analytics data).
+ * Behavior is unchanged — the same deterministic generator the
+ * `AZURE_STUB=true` branch uses. See docs/DEMO_MODE.md §6.5.
+ */
+export function stubRuntimeLogs(opts: QueryRuntimeLogsOpts): RuntimeLogsResult {
   stubLog.info(
     {
       op: 'queryRuntimeLogs',

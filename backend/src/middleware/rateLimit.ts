@@ -102,6 +102,21 @@ export const authLimiter: RateLimitRequestHandler = makeRateLimiter({
 });
 
 /**
+ * Pre-auth limiter for `GET /api/auth/demo-login` (docs/DEMO_MODE.md §6.1). Each
+ * hit mints a fresh ephemeral demo `User` AND seeds a workspace (several DB
+ * inserts), so an unthrottled flood is a cheap DB-amplification + capacity-cap
+ * exhaustion vector — far cheaper to fire than its server cost, and it races the
+ * `DEMO_MAX_ACTIVE` cap. Tighter than the OAuth `authLimiter` (a human launching
+ * the demo needs only a handful of tries). Keyed on IP (no session exists yet).
+ * Like every limiter it skips the test env (see {@link makeRateLimiter}).
+ */
+export const demoLoginLimiter: RateLimitRequestHandler = makeRateLimiter({
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 5,
+  name: 'demoLogin',
+});
+
+/**
  * Pre-auth limiter for the GitHub webhook receiver (`/api/webhooks/github`).
  * That endpoint is unauthenticated at the IP layer (it authenticates each
  * delivery by HMAC over the raw body) and — because HMAC needs the exact bytes

@@ -141,7 +141,8 @@ function UserMenu() {
   };
 
   const primary = user?.githubLogin ?? 'Account';
-  const secondary = user?.email ?? 'Signed in with GitHub';
+  // Demo sessions never touched GitHub, so don't claim "Signed in with GitHub".
+  const secondary = user?.isDemo ? 'Demo sandbox' : (user?.email ?? 'Signed in with GitHub');
 
   return (
     <DropdownMenu.Root>

@@ -1,8 +1,23 @@
 import { useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Hexagon, Rocket, ScrollText, Undo2, Github } from 'lucide-react';
+import { Hexagon, Rocket, ScrollText, Undo2, Github, Play } from 'lucide-react';
 import { Button, useToast } from '@/components/ui';
 import { usePageTitle } from '@/hooks/usePageTitle';
+
+/**
+ * Build the full-page navigation URL for the public sandbox demo. The backend
+ * mounts `GET /api/auth/demo-login` (GET so it's exempt from the `/api/auth`
+ * CSRF gate); it mints a sandbox session cookie and redirects to `/dashboard`.
+ * `next` is threaded through so a deep link survives the round-trip.
+ */
+export function demoLoginUrl(next?: string | null): string {
+  return '/api/auth/demo-login' + (next ? '?next=' + encodeURIComponent(next) : '');
+}
+
+/** Build the GitHub OAuth begin URL, threading an optional post-login `next`. */
+export function githubBeginUrl(next?: string | null): string {
+  return '/api/auth/github/begin' + (next ? '?next=' + encodeURIComponent(next) : '');
+}
 
 interface Feature {
   icon: typeof Rocket;
@@ -57,9 +72,11 @@ export default function Landing() {
   }, [sessionState, denied]);
 
   const handleSignIn = () => {
-    const url =
-      '/api/auth/github/begin' + (next ? '?next=' + encodeURIComponent(next) : '');
-    window.location.assign(url);
+    window.location.assign(githubBeginUrl(next));
+  };
+
+  const handleLaunchDemo = () => {
+    window.location.assign(demoLoginUrl(next));
   };
 
   return (
@@ -104,15 +121,25 @@ export default function Landing() {
             ProdStack connects a GitHub repo to Azure Container Apps. Push a commit, get a live URL.
           </p>
           <div className="mt-9">
-            <Button
-              size="lg"
-              onClick={handleSignIn}
-              leadingIcon={<Github className="h-4 w-4" aria-hidden />}
-            >
-              Sign in with GitHub
-            </Button>
+            <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
+              <Button
+                size="lg"
+                onClick={handleLaunchDemo}
+                leadingIcon={<Play className="h-4 w-4" aria-hidden />}
+              >
+                Launch demo
+              </Button>
+              <Button
+                size="lg"
+                variant="secondary"
+                onClick={handleSignIn}
+                leadingIcon={<Github className="h-4 w-4" aria-hidden />}
+              >
+                Sign in with GitHub
+              </Button>
+            </div>
             <p className="mt-3.5 text-xs text-slate-500">
-              Tokens never reach your browser — encrypted server-side.
+              No GitHub account needed — explore a sandboxed deploy.
             </p>
           </div>
         </section>

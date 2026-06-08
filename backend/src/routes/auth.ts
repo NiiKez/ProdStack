@@ -132,6 +132,7 @@ router.get('/me', requireAuth, (req, res) => {
     githubLogin: user.githubLogin,
     email: user.email,
     avatarUrl: user.avatarUrl,
+    isDemo: user.isDemo,
   });
 });
 

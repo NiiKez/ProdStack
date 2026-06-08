@@ -14,6 +14,7 @@ import activityRouter from './routes/activity.js';
 import adminRouter from './routes/admin.js';
 import authRouter from './routes/auth.js';
 import buildsRouter from './routes/builds.js';
+import demoAuthRouter from './routes/demoAuth.js';
 import deploymentsRouter from './routes/deployments.js';
 import githubRouter from './routes/github.js';
 import healthRouter from './routes/health.js';
@@ -100,6 +101,12 @@ export function createApp(): Express {
   //     (not the session cookie) and called by the CI GitHub Action, which does
   //     not send X-Requested-With — guarding it would break CI self-deploy.
   app.use('/api/auth', requireXRequestedWith, authRouter);
+
+  // Demo-login lives on the SAME `/api/auth` mount so it inherits the CSRF gate
+  // (its `GET /demo-login` is exempt). Returns 404 unless ENABLE_DEMO=true, so
+  // the whole demo surface is invisible when the feature is off. Coexists with
+  // authRouter (different sub-paths). docs/DEMO_MODE.md §6.1.
+  app.use('/api/auth', requireXRequestedWith, demoAuthRouter);
 
   // Machine-to-machine CI/CD self-deploy. Token-authenticated (not the user
   // session), so it mounts OUTSIDE requireAuth — see routes/admin.ts — and

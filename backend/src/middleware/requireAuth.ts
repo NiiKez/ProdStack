@@ -20,6 +20,9 @@ export interface AuthedUser {
   githubLogin: string;
   email: string | null;
   avatarUrl: string | null;
+  // True for sandboxed demo sessions (docs/DEMO_MODE.md). Handlers branch on
+  // this to route demo writes through the demo orchestrator instead of Azure.
+  isDemo: boolean;
 }
 
 declare global {
@@ -60,7 +63,14 @@ export async function requireAuth(
   try {
     user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, githubLogin: true, email: true, avatarUrl: true },
+      select: {
+        id: true,
+        githubLogin: true,
+        email: true,
+        avatarUrl: true,
+        isDemo: true,
+        demoExpiresAt: true,
+      },
     });
   } catch (err) {
     next(err);
@@ -73,6 +83,23 @@ export async function requireAuth(
     return;
   }
 
-  req.user = user;
+  // Fail closed on an expired (or malformed) demo session: a demo cookie
+  // outliving its TTL (and its reaped data) must not stay authenticated. A demo
+  // user with a null demoExpiresAt is malformed by definition (demo-login always
+  // sets one) and the reaper would never purge it — treat it as expired too.
+  // Real users have isDemo=false and skip this entirely. (docs/DEMO_MODE.md §6.1.)
+  if (user.isDemo && (user.demoExpiresAt === null || user.demoExpiresAt.getTime() <= Date.now())) {
+    clearSessionCookie(res);
+    res.status(401).json({ error: 'UNAUTHORIZED' });
+    return;
+  }
+
+  req.user = {
+    id: user.id,
+    githubLogin: user.githubLogin,
+    email: user.email,
+    avatarUrl: user.avatarUrl,
+    isDemo: user.isDemo,
+  };
   next();
 }

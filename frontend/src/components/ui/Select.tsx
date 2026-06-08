@@ -46,7 +46,9 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select
             'pr-9 transition-colors',
             'focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/40',
             'disabled:opacity-50 disabled:cursor-not-allowed',
-            leadingLabel ? 'pl-12' : 'pl-3',
+            // leadingLabel sits absolutely at left-3; reserve enough room that a
+            // multi-letter label (e.g. "Range") can't collide with the value.
+            leadingLabel ? 'pl-[4.25rem]' : 'pl-3',
           )}
           {...rest}
         >

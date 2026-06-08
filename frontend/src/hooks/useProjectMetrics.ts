@@ -17,6 +17,9 @@ export function useProjectMetrics(
     queryKey: ['project-metrics', id, range],
     queryFn: () => api<AppMetrics>(`/api/projects/${id}/metrics?range=${range}`),
     enabled: Boolean(id) && enabled,
-    refetchInterval: 30_000,
+    // Advance the charts every 30s, but stop once Azure Monitor reports the app
+    // has no data (`available:false` — e.g. idle/scaled to zero): re-polling
+    // can't change that until the tab is reopened, and each query has a cost.
+    refetchInterval: (query) => (query.state.data?.available === false ? false : 30_000),
   });
 }

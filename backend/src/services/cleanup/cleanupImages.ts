@@ -122,9 +122,12 @@ async function collectProtectedTags(): Promise<{
     }
   };
 
-  // Active project deployments → their build's image tag.
+  // Active project deployments → their build's image tag. Demo deployments are
+  // excluded: their builds carry fake image tags that never exist in ACR, so
+  // protecting them is pointless and just spams a "ref parsed to neither tag nor
+  // digest" warning each run (docs/DEMO_MODE.md §6.7).
   const activeDeployments = await prisma.deployment.findMany({
-    where: { active: true },
+    where: { active: true, build: { isDemo: false } },
     select: { build: { select: { imageTag: true } } },
   });
   for (const d of activeDeployments) {

@@ -7,6 +7,7 @@ import {
   startCleanupScheduler,
   type CleanupSchedulerHandle,
 } from './services/cleanup/scheduler.js';
+import { recoverDemoBuilds } from './services/demo/demoBuildDriver.js';
 
 const app = createApp();
 
@@ -31,6 +32,19 @@ if (env.ENABLE_WORKER) {
 let cleanup: CleanupSchedulerHandle | null = null;
 if (env.ENABLE_CLEANUP_JOBS) {
   cleanup = startCleanupScheduler();
+}
+
+// Demo-build boot recovery (docs/DEMO_MODE.md §5.2): scale-to-zero can tear down
+// this replica mid-replay, leaving a demo build stuck in an in-flight status.
+// Fast-forward any such build to READY so no sandbox build hangs "Building…".
+// Strictly scoped to isDemo=true rows (the analogue of the worker's
+// recoverOwnClaims), and only when the demo surface is enabled.
+if (env.ENABLE_DEMO) {
+  void recoverDemoBuilds()
+    .then((n) => {
+      if (n > 0) logger.info({ recovered: n }, 'fast-forwarded in-flight demo builds');
+    })
+    .catch((err) => logger.error({ err }, 'demo build recovery failed'));
 }
 
 async function shutdown(signal: string): Promise<void> {

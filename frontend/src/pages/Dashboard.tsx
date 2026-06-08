@@ -272,6 +272,8 @@ export default function Dashboard() {
         onOpenChange={setModalOpen}
         onCreated={(p) => {
           setModalOpen(false);
+          // Both real and demo creates land on the project overview; the first
+          // build is started explicitly from there via "Trigger build".
           navigate(`/projects/${p.id}`);
         }}
       />

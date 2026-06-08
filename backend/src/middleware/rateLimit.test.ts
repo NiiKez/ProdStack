@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import {
   authLimiter,
   buildTriggerLimiter,
+  demoLoginLimiter,
   expensiveLimiter,
   globalLimiter,
   makeRateLimiter,
@@ -87,9 +88,31 @@ describe('exported limiters', () => {
       buildTriggerLimiter,
       streamLimiter,
       webhookLimiter,
+      demoLoginLimiter,
     ]) {
       expect(typeof limiter).toBe('function');
     }
+  });
+
+  it('demoLoginLimiter skips under NODE_ENV=test so the demo suites are not throttled', async () => {
+    const app = appWith(demoLoginLimiter);
+    for (let i = 0; i < 12; i++) {
+      const res = await supertest(app).get('/');
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it('demoLoginLimiter config throttles after 5 hits per window (skip overridden)', async () => {
+    // The real limiter skips in test; rebuild its config (5 / 15min) with skip
+    // forced on to prove the cap. Each demo-login mints a User + seeds a
+    // workspace, so the cap is the cheap-to-fire DB-amplification guard.
+    const app = appWith(makeRateLimiter({ windowMs: 15 * 60 * 1000, max: 5, skip: () => false }));
+    for (let i = 0; i < 5; i++) {
+      expect((await supertest(app).get('/')).status).toBe(200);
+    }
+    const blocked = await supertest(app).get('/');
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error).toBe('RATE_LIMITED');
   });
 
   it('webhookLimiter skips under NODE_ENV=test so the suite is not throttled', async () => {

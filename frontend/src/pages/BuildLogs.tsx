@@ -43,6 +43,15 @@ const STAGE_INDEX: Record<string, number> = Object.fromEntries(
 );
 
 export default function BuildLogs() {
+  const { buildId } = useParams<{ id: string; buildId: string }>();
+  // Remount per build so the SSE stream, phase, and local UI state (confirm
+  // dialog, autoscroll) never leak across builds — navigating build→build is
+  // the same route, so without a key React keeps the old instance and would
+  // briefly paint the previous build's status/stepper.
+  return <BuildLogsView key={buildId ?? 'none'} />;
+}
+
+function BuildLogsView() {
   const { id: projectId, buildId } = useParams<{ id: string; buildId: string }>();
   const buildQuery = useBuild(buildId);
   const { lines, status: streamStatus, phase, reconnect } = useBuildLogs(buildId);
@@ -53,7 +62,11 @@ export default function BuildLogs() {
   // The stream's status is the most live; fall back to the fetched build.
   const status = streamStatus ?? buildQuery.data?.status ?? 'queued';
   const normalized = toBuildStatus(status);
-  const inFlight = isInFlight(status);
+  // Only treat as in-flight once we have a real status for THIS build (from the
+  // stream or the fetched row) — otherwise the 'queued' default would flash a
+  // Cancel button on a build that's already finished while its data loads.
+  const haveStatus = streamStatus != null || buildQuery.data != null;
+  const inFlight = haveStatus && isInFlight(status);
 
   usePageTitle(
     buildQuery.data

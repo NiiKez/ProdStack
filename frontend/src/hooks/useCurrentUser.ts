@@ -6,6 +6,7 @@ export interface CurrentUser {
   githubLogin: string;
   email: string | null;
   avatarUrl: string | null;
+  isDemo: boolean;
 }
 
 export function useCurrentUser() {
