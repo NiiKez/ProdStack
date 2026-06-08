@@ -109,9 +109,12 @@ az containerapp secret set -n $APP -g $RG --secrets \
 
 # --- 5. Environment variables ---------------------------------------------
 # Same 16 the API needs (env.ts is shared) plus 5 worker-specific knobs.
-# Derive the API/WEB origins from Azure at runtime (no hardcoded live FQDN).
+# API origin derived from Azure at runtime. WEB_ORIGIN is the public browser
+# origin — the custom domain prodstack.live since 2026-06-08 (docs/CUSTOM_DOMAIN.md),
+# overridable via WEB_PUBLIC_ORIGIN. (On the worker WEB_ORIGIN is functionally inert
+# — it serves no browser OAuth — but kept consistent with the API wiring.)
 API=https://$(az containerapp ingress show -n prodstack-api -g "$RG" --query fqdn -o tsv)
-WEB=https://$(az containerapp ingress show -n prodstack-web -g "$RG" --query fqdn -o tsv)
+WEB="${WEB_PUBLIC_ORIGIN:-https://prodstack.live}"
 ENV_ID=/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.App/managedEnvironments/$ENV_NAME
 
 echo "==> Setting env vars"
