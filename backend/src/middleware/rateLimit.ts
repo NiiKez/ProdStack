@@ -7,7 +7,7 @@ import { env } from '../env.js';
  * Rate-limiting middleware (DoS / Azure-cost-amplification / DB-pool-exhaustion
  * defense). Limiters fall into two families:
  *   - Pre-auth / app-wide (global, auth) key on the client IP (the default).
- *     They rely on `app.set('trust proxy', 1)` in app.ts so `req.ip` reflects
+ *     They rely on `app.set('trust proxy', TRUST_PROXY_HOPS)` in app.ts so `req.ip` reflects
  *     the real client behind Azure Container Apps' Envoy ingress.
  *   - Post-auth (expensive, buildTrigger, stream) key on the authenticated
  *     user id via {@link userOrIpKey}. These routes all sit behind
@@ -105,14 +105,20 @@ export const authLimiter: RateLimitRequestHandler = makeRateLimiter({
  * Pre-auth limiter for `GET /api/auth/demo-login` (docs/DEMO_MODE.md §6.1). Each
  * hit mints a fresh ephemeral demo `User` AND seeds a workspace (several DB
  * inserts), so an unthrottled flood is a cheap DB-amplification + capacity-cap
- * exhaustion vector — far cheaper to fire than its server cost, and it races the
- * `DEMO_MAX_ACTIVE` cap. Tighter than the OAuth `authLimiter` (a human launching
- * the demo needs only a handful of tries). Keyed on IP (no session exists yet).
- * Like every limiter it skips the test env (see {@link makeRateLimiter}).
+ * exhaustion vector. Keyed on IP (no session exists yet) — which is per-VISITOR
+ * only because `trust proxy` (TRUST_PROXY_HOPS) is set to the true proxy-chain
+ * length, so `req.ip` is the real client and not the shared nginx/Envoy upstream
+ * that every prodstack.live request funnels through. (With too few trusted hops
+ * the bucket collapses to that one upstream IP and a `max: 5` throttles ALL
+ * visitors after a few total clicks — exactly the bug this guards against.) The
+ * ceiling is a generous-per-visitor 20/15min: enough that a human retrying
+ * "Launch demo" a few times never trips it, while still blunting scripted
+ * hammering — the real capacity guard is `DEMO_MAX_ACTIVE`, not this. Like every
+ * limiter it skips the test env (see {@link makeRateLimiter}).
  */
 export const demoLoginLimiter: RateLimitRequestHandler = makeRateLimiter({
   windowMs: 15 * 60 * 1000, // 15 min
-  max: 5,
+  max: 20,
   name: 'demoLogin',
 });
 

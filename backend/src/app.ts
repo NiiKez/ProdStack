@@ -25,11 +25,16 @@ import webhooksRouter from './routes/webhooks.js';
 export function createApp(): Express {
   const app = express();
 
-  // Behind Azure Container Apps' Envoy ingress, the real client IP arrives in
-  // `X-Forwarded-For`. Trusting exactly one hop (numeric 1 — NOT `true`, which
-  // trips express-rate-limit's permissive-trust-proxy guard) makes `req.ip` and
-  // the per-IP rate limiters key on the actual client rather than the proxy.
-  app.set('trust proxy', 1);
+  // Behind Azure Container Apps' Envoy ingress — and, on the prodstack.live
+  // custom-domain path, ALSO the prodstack-web nginx reverse proxy plus its own
+  // Envoy — the real client IP is carried in `X-Forwarded-For`. `trust proxy`
+  // must equal the number of proxy hops in front of this app so `req.ip` (and
+  // every per-IP rate limiter) resolves to the actual client rather than a
+  // shared infrastructure IP that every visitor funnels through. It's env-driven
+  // (TRUST_PROXY_HOPS, default 1 for dev/test/direct-FQDN; prod sets 3 for the
+  // web-Envoy → nginx → api-Envoy chain). Numeric — NOT `true`, which trips
+  // express-rate-limit's permissive-trust-proxy guard.
+  app.set('trust proxy', env.TRUST_PROXY_HOPS);
 
   app.use(
     helmet({
@@ -49,7 +54,18 @@ export function createApp(): Express {
       crossOriginResourcePolicy: { policy: 'same-site' },
     }),
   );
-  app.use(pinoHttp({ logger }));
+  // Surface the resolved client IP (post-`trust proxy`) and the raw
+  // X-Forwarded-For chain on every request log. `req.ip` is exactly what the
+  // per-IP rate limiters key on, so logging it alongside the raw chain makes a
+  // proxy-hop misconfiguration — e.g. all visitors collapsing into one shared
+  // upstream IP behind the nginx reverse proxy — diagnosable from the logs
+  // instead of inferred from a wave of 429s. See TRUST_PROXY_HOPS in env.ts.
+  app.use(
+    pinoHttp({
+      logger,
+      customProps: (req) => ({ clientIp: req.ip, xff: req.headers['x-forwarded-for'] }),
+    }),
+  );
   app.use(
     cors({
       origin: env.WEB_ORIGIN,
