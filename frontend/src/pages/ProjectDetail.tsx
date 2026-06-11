@@ -1267,6 +1267,11 @@ function SettingsTab({ project }: SettingsTabProps) {
             Stored encrypted and injected as Container App secrets. Saving redeploys your
             app with the new values (using your latest successful image).
           </p>
+          <p className="text-xs text-slate-500">
+            For security, saved values are write-only — they&apos;re hidden and can&apos;t be
+            shown again. To change one, type over its field to replace it; use the trash icon
+            to remove it.
+          </p>
         </div>
         <KeyValueEditor value={envVars} onChange={setEnvVars} disabled={updateProject.isPending} />
         {envError && <p className="text-xs text-rose-400">{envError}</p>}

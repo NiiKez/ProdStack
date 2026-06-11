@@ -14,9 +14,11 @@ describe('KeyValueEditor write-only behavior', () => {
     render(<KeyValueEditor value={rows} onChange={vi.fn()} />);
 
     const valueInput = screen.getByLabelText('Variable 1 value') as HTMLInputElement;
-    // The cleartext is never present — the field is empty with a "(set)" hint.
+    // The cleartext is never present — the field is empty with a "(set)" hint
+    // that also signals the value is still replaceable by typing.
     expect(valueInput.value).toBe('');
-    expect(valueInput.placeholder).toContain('(set)');
+    expect(valueInput.placeholder).toContain('set');
+    expect(valueInput.placeholder).toContain('type to replace');
   });
 
   it('does not offer a reveal toggle for an unedited stored secret', () => {
