@@ -26,8 +26,10 @@ const FIELD =
 
 /** Placeholder shown in the value field of an unedited stored secret. The
  * server never sends the cleartext (values are write-only), so an existing
- * secret can't be revealed — only replaced by typing a new value. */
-const STORED_PLACEHOLDER = '•••••••• (set)';
+ * secret can't be revealed — only replaced by typing a new value. The "(set)"
+ * marks that a value is stored; "type to replace" signals it's still editable
+ * (the masked field otherwise looks like the value was lost). */
+const STORED_PLACEHOLDER = '•••••••• (set — type to replace)';
 
 /**
  * Env-var rows editor. Keys are validated against the backend's
