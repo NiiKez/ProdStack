@@ -66,6 +66,19 @@ describe('Non-root USER (M2)', () => {
     expect(userIdx).toBeGreaterThan(runnerIdx);
     expect(userIdx).toBeLessThan(entrypointIdx);
   });
+
+  it('frontend runner stage runs fully non-root as uid 101 (nginx-unprivileged)', () => {
+    // The web runtime is nginxinc/nginx-unprivileged: the WHOLE stack (master +
+    // workers) runs as uid 101, not just the workers. The explicit `USER 101`
+    // both restates that and makes Trivy's Dockerfile scan (AVD-DS-0002) pass,
+    // since it doesn't resolve the base image's USER. It must come after the
+    // runner stage starts.
+    expect(FRONTEND).toMatch(/^USER 101\s*$/m);
+    const runnerIdx = FRONTEND.indexOf('AS runner');
+    const userIdx = FRONTEND.indexOf('USER 101');
+    expect(runnerIdx).toBeGreaterThan(-1);
+    expect(userIdx).toBeGreaterThan(runnerIdx);
+  });
 });
 
 describe('worker kaniko-root exception (M2)', () => {
