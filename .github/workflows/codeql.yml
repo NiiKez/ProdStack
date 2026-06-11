@@ -1,0 +1,59 @@
+name: CodeQL
+
+# SAST gate. Static analysis of the JS/TS sources for security bugs (injection,
+# auth, path traversal, etc.). Findings land in the repo Security tab → Code
+# scanning — they do NOT fail the PR by default (CodeQL reports, it doesn't gate),
+# so this is safe to add to a live app. The weekly schedule re-scans unchanged
+# code against newly-shipped CodeQL queries.
+#
+# All actions are pinned to a full commit SHA (matches the repo convention in
+# ci.yml / api.yml / web.yml). SARIF upload to the Security tab is free on this
+# public repo (it needs GitHub code-scanning, which public repos get at no cost).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 04:27 UTC. Off-the-hour per GitHub's guidance (top-of-hour crons are
+    # oversubscribed and start late).
+    - cron: '27 4 * * 1'
+  workflow_dispatch:
+
+# Least privilege at the workflow level; the analyze job widens to what it needs.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      security-events: write # upload code-scanning results
+      contents: read # checkout
+      actions: read # read workflow metadata (required for some setups)
+    strategy:
+      fail-fast: false
+      matrix:
+        # Single combined identifier covers both JS and TS in one analysis.
+        language: [javascript-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        with:
+          languages: ${{ matrix.language }}
+          # No compiled language here, so CodeQL needs no build step.
+          build-mode: none
+          # Broader security rule set than the default suite (security-only, no
+          # code-quality noise).
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        with:
+          category: '/language:${{ matrix.language }}'

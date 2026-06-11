@@ -1,0 +1,121 @@
+name: Security Scan
+
+# Secret scanning (gitleaks) + vulnerability/misconfig scanning (Trivy) for both
+# the source tree and the two built container images. Kept separate from ci.yml
+# (the "is the code green" PR gate) on purpose: the weekly schedule re-scans
+# UNCHANGED code/images so a CVE freshly disclosed against node:20-alpine /
+# nginx:1.27-alpine is caught even when nobody pushes.
+#
+# Gating posture (tuned for a LIVE app — see docs/CICD.md §Security scanning):
+#   - gitleaks  -> BLOCKING. A committed secret is unambiguous; fail the PR.
+#   - Trivy     -> REPORT-ONLY (exit-code 0). Findings surface in the Security
+#                  tab so an unfixable base-image CVE can't wall off every merge.
+#                  Flip exit-code to '1' to make it blocking (noted inline).
+#
+# All actions pinned to a full commit SHA (repo convention). SARIF upload is free
+# on this public repo via GitHub code scanning.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '41 4 * * 1' # Mondays 04:41 UTC (off-the-hour, staggered from CodeQL)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Full history so gitleaks scans every commit, not just the tip — a
+          # secret committed then "removed" in a later commit still leaks.
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        # Free for public/personal repos; org repos need a GITLEAKS_LICENSE. Fails
+        # the job (exit 1) on any finding. Allowlist false positives (e.g. fake
+        # test fixtures) in a committed .gitleaks.toml.
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  trivy-fs:
+    name: Vulnerability scan (filesystem)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # upload SARIF
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig # secret scanning is gitleaks' job above
+          ignore-unfixed: true # hide CVEs with no upstream fix yet
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: '0' # report-only; set '1' to block PRs on findings
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  trivy-image:
+    name: Image scan (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: api
+            dockerfile: backend/Dockerfile
+          - app: web
+            dockerfile: frontend/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Build context is the repo ROOT for both images (npm workspaces hoist
+      # deps) — same as ci.yml's images job and the deploy workflows.
+      - name: Build ${{ matrix.app }} image (no push)
+        run: docker build -f ${{ matrix.dockerfile }} -t prodstack-${{ matrix.app }}:scan .
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: prodstack-${{ matrix.app }}:scan
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-${{ matrix.app }}.sarif
+          exit-code: '0' # report-only; set '1' to block PRs on findings
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        with:
+          sarif_file: trivy-${{ matrix.app }}.sarif
+          # Distinct category per image so the two SARIF uploads don't overwrite
+          # each other in the Security tab.
+          category: trivy-image-${{ matrix.app }}
