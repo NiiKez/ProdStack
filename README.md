@@ -2,7 +2,7 @@
 
 > A self-hostable, Vercel-style PaaS that connects a GitHub repo, builds a Docker image from your code on every push, and deploys it to Azure Container Apps — with live build logs, deployment history, and one-click rollback.
 
-ProdStack turns a Git push into a running app. Sign in with GitHub, connect a repository that contains a `Dockerfile`, and every push to the configured branch automatically builds a Docker image, pushes it to a private registry, and rolls a new revision of your app behind a public URL. A real-time dashboard streams build logs as they happen, keeps a full deployment history, and lets you roll back to any previous version in one click. The platform even deploys **itself** through its own CI/CD pipeline.
+ProdStack turns a Git push into a running app. Sign in with GitHub, connect a repository — bring your own `Dockerfile` or let ProdStack auto-detect the framework and generate one — and every push to the configured branch automatically builds a Docker image, pushes it to a private registry, and rolls a new revision of your app behind a public URL. A real-time dashboard streams build logs as they happen, keeps a full deployment history, and lets you roll back to any previous version in one click. The platform even deploys **itself** through its own CI/CD pipeline.
 
 It is designed to run on Azure Container Apps and is **self-hostable on your own Azure subscription** — and it runs end-to-end on your laptop with **zero cloud account** thanks to a built-in stub mode.
 
@@ -30,9 +30,9 @@ It is designed to run on Azure Container Apps and is **self-hostable on your own
 Most "deploy from Git" platforms are closed SaaS. ProdStack is a small, readable, open-source take on that experience that you can run yourself:
 
 1. **Connect** — Sign in with GitHub and connect a repo as a *project*. ProdStack registers a push webhook on the repo and provisions a Container App placeholder for it.
-2. **Push** — Push to the configured branch. A webhook fires, a build is queued, and an in-cluster builder produces a Docker image from your `Dockerfile`.
+2. **Push** — Push to the configured branch. A webhook fires, a build is queued, and an in-cluster builder produces a Docker image from your `Dockerfile` — or from one ProdStack generates for you by detecting your framework.
 3. **Ship** — The image is pushed to a private registry and a new revision of your app rolls out behind a public URL.
-4. **Observe & manage** — Watch logs stream live, browse the deployment history, edit environment variables, trigger manual rebuilds, or roll back — all from the dashboard.
+4. **Observe & manage** — Watch build logs stream live, inspect runtime logs and metrics, browse the deployment history, edit environment variables, trigger manual rebuilds, or roll back — all from the dashboard.
 
 The whole pipeline is queue-driven and crash-tolerant: the database *is* the build queue, so there is no separate broker to operate.
 
@@ -46,18 +46,20 @@ The whole pipeline is queue-driven and crash-tolerant: the database *is* the bui
 - **Connect a repo as a project** — auto-registers a GitHub push webhook and creates a Container App placeholder; both are torn down on delete.
 - **Push-to-deploy** — an HMAC-verified GitHub webhook enqueues a build. Idempotent on the GitHub delivery id, so redelivered webhooks never double-build.
 - **In-cluster Docker builds with [Kaniko](https://github.com/GoogleContainerTools/kaniko)** — daemonless image builds with **no Docker-in-Docker and no privileged mode**, run in a dedicated worker.
+- **Zero-Dockerfile builds** — no `Dockerfile`? ProdStack detects your framework (Node, Python, …), synthesizes a Kaniko-safe one, and sets the app's ingress port automatically (it also honours a BYO `Dockerfile`'s `EXPOSE`).
 - **Self-deploying CI/CD** — a token-gated `POST /api/admin/deploy` endpoint plus GitHub Actions roll the platform's own apps; database migrations run automatically on container boot.
 
 ### Observe
 
 - **Live build-log streaming over SSE** — logs stream to the browser as they are produced, with replay-from-cursor (`?afterSeq` / `Last-Event-ID`), periodic heartbeats, and a terminal `done` event.
 - **Build & deployment history** — per-project build history and deployment history, a cross-project deployments page, and an activity feed.
+- **Runtime logs & metrics** — stream your running app's stdout/stderr from Azure Log Analytics, and view CPU / memory / replica-count charts (including scale-to-zero behaviour) in the dashboard.
 
 ### Manage
 
 - **One-click rollback** — re-deploy the image from any previous successful build.
-- **Per-project environment variables** — stored **AES-256-GCM encrypted at rest** and **write-only** (the API returns only key names, never decrypted values), surfaced to the running app as Container App secrets, with automatic redeploy on change.
-- **Manual rebuild** — trigger a build without pushing to Git.
+- **Per-project environment variables** — stored **AES-256-GCM encrypted at rest** and **write-only** (the API returns only key names, never decrypted values), surfaced to the running app as Container App secrets, with automatic redeploy on change. Keys prefixed `NEXT_PUBLIC_*` / `VITE_*` are additionally threaded into the build as `--build-arg`s, so client frameworks can inline them at build time.
+- **Manual rebuild & auto-deploy toggle** — trigger a build without pushing to Git, or turn automatic push-to-deploy off per project to build only on demand.
 - **Build cancellation** — fast-cancel a queued build, or cooperatively abort an in-flight build via `AbortController`.
 
 ### Operate
@@ -67,6 +69,10 @@ The whole pipeline is queue-driven and crash-tolerant: the database *is* the bui
   - A **kill switch** for degrade mode — webhooks return `503`, the worker idles (without exiting), and a banner is shown in the UI.
   - **Scale-to-zero** on user apps.
   - A monthly **budget alert**.
+
+### Try it without an account
+
+- **Public demo mode** *(optional — toggled by `ENABLE_DEMO`)* — a **Launch demo** button mints a sandboxed, throwaway session pre-seeded with example "already-deployed" projects. A visitor can browse, create projects, and watch a build stream through the **exact same UI** — except the logs are a replay of a captured real build and **nothing touches Azure, the registry, or Git**. Sessions are ephemeral and reaped automatically, so the platform can be shown off publicly without exposing real deploy infrastructure.
 
 ---
 
@@ -134,10 +140,10 @@ ProdStack is three first-party components, each its own Azure Container App in a
 
 | Area | Technologies |
 |---|---|
-| **Backend** | Node 20 · TypeScript 5.7 · Express 4.21 · Prisma 6.19 + PostgreSQL 16 · Zod · `jsonwebtoken` · helmet · cors · cookie-parser · pino + pino-http · node-cron · `@octokit/rest` · Azure SDKs (`@azure/identity` `DefaultAzureCredential`, `@azure/arm-appcontainers`, `@azure/arm-containerregistry`, `@azure/keyvault-secrets`, `@azure/storage-blob`) · SSE over plain HTTP |
+| **Backend** | Node 20 · TypeScript 5.7 · Express 4.21 · Prisma 6.19 + PostgreSQL 16 · Zod · `jsonwebtoken` · helmet · cors · cookie-parser · `express-rate-limit` · pino + pino-http · node-cron · `@octokit/rest` · Azure SDKs (`@azure/identity` `DefaultAzureCredential`, `@azure/arm-appcontainers`, `@azure/arm-containerregistry`, `@azure/keyvault-secrets`, `@azure/storage-blob`) · SSE over plain HTTP |
 | **Frontend** | React 19 · Vite 6 · TypeScript 5.7 · Tailwind CSS 4 · `react-router-dom` 7 · `@tanstack/react-query` 5 · Radix UI primitives · `lucide-react` · `react-hook-form` + Zod |
 | **Build & runtime** | Kaniko · Docker · nginx · Azure Container Apps · Azure Container Registry · Azure Database for PostgreSQL Flexible Server · Azure Key Vault |
-| **Tooling** | npm workspaces · ESLint 9 · Prettier 3 · Vitest 4 + Supertest · GitHub Actions (CI + self-deploy) |
+| **Tooling** | npm workspaces · ESLint 9 · Prettier 3 · Vitest 4 + Supertest · Playwright (E2E) · GitHub Actions (CI + self-deploy) |
 
 ---
 
@@ -168,8 +174,8 @@ ProdStack is three first-party components, each its own Azure Container App in a
 
 Prisma models (PostgreSQL), in brief:
 
-- **`User`** — `githubUserId` unique; the GitHub OAuth token is stored as an **AES-256-GCM encrypted triple** (ciphertext / IV / auth tag), never plaintext.
-- **`Project`** *(1 User → N Projects)* — `name`, `slug` (unique per user), `githubRepoFullName`, `branch` (default `main`), `webhookId`, `containerAppName`, `liveUrl`, and a `deletedAt` soft-delete column. The webhook secret is stored encrypted.
+- **`User`** — `githubUserId` unique; the GitHub OAuth token is stored as an **AES-256-GCM encrypted triple** (ciphertext / IV / auth tag), never plaintext. Ephemeral demo-mode visitors are also `User` rows (`isDemo` / `demoExpiresAt`), reaped on expiry.
+- **`Project`** *(1 User → N Projects)* — `name`, `slug` (unique per user via a **partial unique index** scoped to non-deleted rows, so a deleted project's slug can be reused), `githubRepoFullName`, `branch` (default `main`), `webhookId`, `containerAppName`, `liveUrl`, an `autoDeploy` toggle, and a `deletedAt` soft-delete column. The webhook secret is stored encrypted.
 - **`Build`** *(1 Project → N Builds)* — `commitSha` / `commitMessage` / `commitAuthor`, a `status` enum, `imageTag`, the Postgres-queue fields (`claimedAt` / `claimedBy` / `attempts`), `cancelRequested`, and timing fields.
 - **`LogLine`** *(1 Build → N LogLines)* — `BigInt` id, `seq` unique per build, a `level` enum.
 - **`Deployment`** *(1 Project → N Deployments)* — `revisionName`, `active` (a **partial unique index** enforces exactly one active deployment per project), `rolledBack`.
@@ -257,8 +263,9 @@ Useful optional variables (full reference in `backend/.env.example`):
 | `BUILD_RUNNER_MODE` | `stub` | `stub` / `docker` / `kaniko` build engine. |
 | `ENABLE_WORKER` | `false` | Run the in-process build poll loop. |
 | `OWNER_GITHUB_ID` | *(empty)* | Optional single-user allow-list gate — when empty, **any** GitHub user may sign in. |
+| `ENABLE_DEMO` | `false` | Enable public **demo mode** (the "Launch demo" button + sandboxed throwaway sessions). |
 
-> **Note on `OWNER_GITHUB_ID`:** the public demo of this project restricts sign-in to a single GitHub user to protect a limited cloud budget. This is a no-op when the variable is unset, so a self-hosted fork allows anyone by default.
+> **Note on `OWNER_GITHUB_ID`:** the hosted instance of this project restricts sign-in to a single GitHub user to protect a limited cloud budget — everyone else can still explore the product through demo mode instead. This is a no-op when the variable is unset, so a self-hosted fork allows anyone by default.
 
 ---
 
@@ -297,7 +304,7 @@ Idempotent provisioning and deploy scripts live in `infra/`. They are the source
 
 ## Status
 
-Core functionality is implemented and working: push-to-deploy with Kaniko builds, live SSE build logs, build/deployment history, one-click rollback, encrypted per-project environment variables, manual rebuild and cancellation, self-deploying CI/CD, and the operational cost safeguards (image GC, log/build pruning, kill switch, scale-to-zero, budget alert). The codebase has an extensive Vitest suite covering the API and worker.
+Core functionality is implemented and working: push-to-deploy with Kaniko builds (including **zero-Dockerfile framework auto-detection**), live SSE build logs, runtime logs and metrics, build/deployment history, one-click rollback, encrypted per-project environment variables, manual rebuild and cancellation, an optional public demo mode, self-deploying CI/CD, and the operational cost safeguards (image GC, log/build pruning, kill switch, scale-to-zero, budget alert). The codebase has an extensive automated test suite — Vitest + Supertest across the API and worker, plus Vitest and Playwright end-to-end tests on the frontend.
 
 ---
 
@@ -315,6 +322,6 @@ Ideas and stretch goals, not commitments:
 
 ## Contributing & license
 
-This is an open-source **portfolio project**. Issues, ideas, and forks are welcome. The single-user sign-in gate that protects the hosted demo is a no-op when self-hosted, so a fork is fully multi-user out of the box.
+This is an open-source **portfolio project**. Issues, ideas, and forks are welcome. The single-user sign-in gate that protects the hosted instance is a no-op when self-hosted, so a fork is fully multi-user out of the box.
 
 See the repository's license file for licensing terms.
