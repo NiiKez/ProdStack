@@ -57,16 +57,17 @@ BACKEND_FQDN=$(az containerapp ingress show -n prodstack-api -g $RG --query fqdn
 az containerapp update -n $APP -g $RG \
   --set-env-vars BACKEND_FQDN=$BACKEND_FQDN >/dev/null
 
-# --- 3. Ensure ingress targets port 80 -------------------------------------
-# nginx listens on 80. The placeholder was likely created with target-port 80
-# already, but `containerapp update --image` never touches ingress, so we set
-# it explicitly (idempotent) — this is the M2 "ingress port stays at whatever
-# it was created with" gotcha. Keep ingress external (public demo).
-echo "==> Ensuring ingress is external on target-port 80"
+# --- 3. Ensure ingress targets port 8080 -----------------------------------
+# nginx listens on 8080 (the runtime is nginxinc/nginx-unprivileged, uid 101 —
+# it cannot bind the privileged :80; see frontend/Dockerfile + nginx.conf.template).
+# `containerapp update --image` never touches ingress, so we set it explicitly
+# (idempotent) — this is the M2 "ingress port stays at whatever it was created
+# with" gotcha. Keep ingress external (public demo).
+echo "==> Ensuring ingress is external on target-port 8080"
 az containerapp ingress update \
   -n $APP -g $RG \
   --type external \
-  --target-port 80 >/dev/null
+  --target-port 8080 >/dev/null
 
 # --- 4. Cap scaling per the single-user safety policy ----------------------
 # Tighten from the ACA default max=10 down to max=1. min=0 lets it scale to

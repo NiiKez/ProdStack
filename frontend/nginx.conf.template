@@ -35,8 +35,11 @@ map $host $backend_upstream {
 }
 
 server {
-    listen 80;
-    listen [::]:80;
+    # Port 8080 (not 80): the runtime is nginxinc/nginx-unprivileged, which runs
+    # as uid 101 and so cannot bind the privileged :80. The web Container App's
+    # ingress targetPort is set to 8080 to match (infra/provision-prodstack-web.sh).
+    listen 8080;
+    listen [::]:8080;
     server_name _;
 
     root /usr/share/nginx/html;

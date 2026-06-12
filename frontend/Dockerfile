@@ -34,21 +34,22 @@ COPY frontend ./frontend
 RUN npm run build --workspace=@prodstack/web
 
 # --- Runtime --------------------------------------------------------------
-# M3 hardening: moved off the floating `nginx:alpine` to a minor-pinned
-# `nginx:1.27-alpine`, then digest-pinned to an immutable @sha256.
-#
-# M2 hardening note — nginx is NOT switched to a fully-rootless image in this
-# pass (deliberate deferral): stock nginx already runs its WORKER processes
-# (which handle every request) as the unprivileged `nginx` user; only the
-# master process is root, solely to bind the privileged port :80. So request
-# handling is already non-root. A fully-rootless master (nginx-unprivileged)
-# listens on :8080 instead of :80, which would REQUIRE a coordinated, one-time
-# `az containerapp ingress update -n prodstack-web -g prodstack --target-port 8080`
-# BEFORE the next CI roll — otherwise the revision fails activation (ingress
-# targetPort 80 vs listen 8080). That deploy-coupling is intentionally left as
-# a follow-up; prodstack-web is in the CI auto-deploy allow-list.
-# The digest below is for nginx:1.27-alpine.
-FROM nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 AS runner
+# Hardening history: M3 moved off floating `nginx:alpine` → minor-pinned
+# `nginx:1.27-alpine`, digest-pinned to an immutable @sha256. Then (2026-06-12,
+# off the back of the Trivy image scan) switched to the FULLY-ROOTLESS
+# `nginxinc/nginx-unprivileged:1.29-alpine`:
+#   1. Security: stock nginx runs its master process as root (only to bind the
+#      privileged port :80). The unprivileged image runs the whole stack as uid
+#      101 and listens on :8080 — clears Trivy AVD-DS-0002 (run-as-root HIGH).
+#   2. Freshness: `nginx:1.27-alpine` was stuck on alpine 3.21.3 and had
+#      accumulated 32 HIGH/CRITICAL OS CVEs; `1.29-alpine` is on alpine 3.23.4
+#      (down to ~3, the rest unfixed-upstream).
+# Listening on :8080 (not :80) REQUIRES the web Container App's ingress
+# targetPort to be 8080 — done live + made durable in infra/provision-prodstack-web.sh.
+# It still ships the same envsubst entrypoint (/docker-entrypoint.d/...) so the
+# /etc/nginx/templates/*.template render below is unchanged.
+# The digest below is for nginxinc/nginx-unprivileged:1.29-alpine.
+FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6 AS runner
 
 # Install our site config as an envsubst TEMPLATE. nginx:alpine's
 # /docker-entrypoint.d/20-envsubst-on-templates.sh renders every
@@ -67,10 +68,17 @@ COPY frontend/nginx.security-headers.conf /etc/nginx/snippets/prodstack-security
 # Static SPA bundle.
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 
-EXPOSE 80
+# Run as the unprivileged uid the base image ships (101 = nginx). The base
+# already defaults to this; we restate it explicitly so Trivy's Dockerfile scan
+# (AVD-DS-0002), which does not resolve the base image's USER, also passes.
+# COPY above runs at build time as root regardless, so file placement is fine.
+USER 101
+
+EXPOSE 8080
 
 # Lightweight liveness probe against the SPA shell (no backend dependency).
+# Port matches the unprivileged image's :8080 listen (see nginx.conf.template).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
 
-# nginx:alpine's default CMD already runs `nginx -g 'daemon off;'`.
+# The unprivileged base image's default CMD already runs `nginx -g 'daemon off;'`.
