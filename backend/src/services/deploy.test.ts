@@ -233,10 +233,14 @@ describe('redeployWithCurrentEnv', () => {
 
     expect(result.redeployed).toBe(true);
     expect(result.deployment).toMatchObject({ id: 'd2', active: true, rolledBack: false });
+    // forceNewRevision is essential: a value-only env change leaves the ACA
+    // template identical, so without it the roll no-ops and the running replica
+    // keeps the stale value (the exact "save didn't take effect" bug).
     expect(mocks.updateContainerApp).toHaveBeenCalledWith({
       name: 'octocat-app',
       image: 'prodstack.azurecr.io/app:sha',
       envVars: [{ name: 'API_KEY', value: 'secret' }],
+      forceNewRevision: true,
     });
     expect(mocks.txDeploymentUpdateMany).toHaveBeenCalledWith({
       where: { projectId: 'p1', active: true },

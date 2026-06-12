@@ -66,6 +66,17 @@ export interface UpdateContainerAppOpts {
    * Node server). Omitted on plain rolls so the existing port is preserved.
    */
   targetPort?: number;
+  /**
+   * Force ACA to roll a fresh revision even when the template is otherwise
+   * unchanged. The env-redeploy path (`redeployWithCurrentEnv`) needs this: env
+   * vars are referenced by a key-stable `secretRef`, so rotating a *value*
+   * leaves the revision template byte-identical and ACA refuses to create a new
+   * revision — the running replica keeps the stale value in memory until it
+   * restarts (a silent "save didn't take effect"). Stamping a content-addressed
+   * `revisionSuffix` makes any value change roll a new revision. Left unset on
+   * image rolls, where the changed image tag already forces a new revision.
+   */
+  forceNewRevision?: boolean;
 }
 
 // --- Constants -------------------------------------------------------------
@@ -338,6 +349,27 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
   const containers = existing.template?.containers ?? [];
   const { env: containerEnv, secrets } = envToSecrets(opts.envVars);
 
+  // Force a fresh revision when asked (the env-redeploy path). A value-only env
+  // change leaves the template identical (env vars are `secretRef`s, not inline
+  // values), so without this ACA would no-op the re-PUT and the running replica
+  // would keep serving the old value. A content-addressed suffix makes any value
+  // change roll a new revision; salting with the current latest revision name
+  // keeps the suffix unique even when reverting to a prior exact config (ACA
+  // rejects reusing a historical revision name).
+  const revisionSuffix = opts.forceNewRevision
+    ? `cfg${createHash('sha1')
+        .update(
+          JSON.stringify({
+            salt: existing.latestRevisionName ?? '',
+            env: (opts.envVars ?? [])
+              .map((e) => [e.name, e.value] as const)
+              .sort((a, b) => a[0].localeCompare(b[0])),
+          }),
+        )
+        .digest('hex')
+        .slice(0, 12)}`
+    : undefined;
+
   // Reconcile only the `env-`-prefixed secrets we manage; preserve everything
   // else (e.g. a registry-password secret referenced by `registries[]`). A re-
   // PUT replaces the whole `secrets` array, and `get()` returns secret *names*
@@ -398,6 +430,7 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
       : {}),
     template: {
       ...existing.template,
+      ...(revisionSuffix ? { revisionSuffix } : {}),
       containers: containers.length > 0
         ? [
             {
