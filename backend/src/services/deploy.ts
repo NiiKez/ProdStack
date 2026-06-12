@@ -243,6 +243,11 @@ export async function redeployWithCurrentEnv(opts: {
     name: active.project.containerAppName,
     image,
     envVars,
+    // Re-applying the same image with only changed env values leaves the ACA
+    // revision template identical (env vars are key-stable `secretRef`s), so
+    // without forcing a new revision ACA no-ops the roll and the running replica
+    // keeps the stale value. This is the whole point of the redeploy.
+    forceNewRevision: true,
   });
 
   try {

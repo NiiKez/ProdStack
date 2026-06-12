@@ -264,6 +264,96 @@ describe('env vars surfaced as Container App secrets', () => {
   });
 });
 
+describe('forceNewRevision (env-redeploy rolls a fresh revision)', () => {
+  const existingApp = (latestRevisionName: string) => ({
+    location: 'francecentral',
+    environmentId: process.env.CONTAINER_APPS_ENV_ID,
+    latestRevisionName,
+    configuration: { ingress: { external: true, targetPort: 80 }, secrets: [] },
+    template: { containers: [{ name: 'demo', image: 'img:tag' }], scale: {} },
+  });
+
+  it('stamps a content-addressed revisionSuffix when forceNewRevision is set', async () => {
+    mocks.get.mockResolvedValue(existingApp('demo--0000001'));
+    mocks.beginCreateOrUpdateAndWait.mockResolvedValue({
+      configuration: { ingress: {} },
+      latestRevisionName: 'demo--cfg',
+    });
+
+    const { updateContainerApp } = await import('./containerApps.js');
+    await updateContainerApp({
+      name: 'demo',
+      image: 'img:tag',
+      envVars: [{ name: 'SITE_PASSWORD', value: 'hunter2' }],
+      forceNewRevision: true,
+    });
+
+    const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    // A valid ACA revision suffix: lowercase alphanumeric, here `cfg` + 12 hex.
+    expect(envelope.template.revisionSuffix).toMatch(/^cfg[0-9a-f]{12}$/);
+  });
+
+  it('omits the revisionSuffix without the flag (so a plain image roll is unaffected)', async () => {
+    mocks.get.mockResolvedValue(existingApp('demo--0000001'));
+    mocks.beginCreateOrUpdateAndWait.mockResolvedValue({ configuration: { ingress: {} } });
+
+    const { updateContainerApp } = await import('./containerApps.js');
+    await updateContainerApp({
+      name: 'demo',
+      image: 'img:tag',
+      envVars: [{ name: 'SITE_PASSWORD', value: 'hunter2' }],
+    });
+
+    const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    expect(envelope.template.revisionSuffix).toBeUndefined();
+  });
+
+  it('changes the suffix when an env value changes (so the rotation actually rolls)', async () => {
+    const suffixFor = async (value: string): Promise<string> => {
+      mocks.beginCreateOrUpdateAndWait.mockReset();
+      mocks.get.mockResolvedValue(existingApp('demo--0000001'));
+      mocks.beginCreateOrUpdateAndWait.mockResolvedValue({ configuration: { ingress: {} } });
+      const { updateContainerApp } = await import('./containerApps.js');
+      await updateContainerApp({
+        name: 'demo',
+        image: 'img:tag',
+        envVars: [{ name: 'SITE_PASSWORD', value }],
+        forceNewRevision: true,
+      });
+      const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+      return envelope.template.revisionSuffix as string;
+    };
+
+    const a = await suffixFor('old-password');
+    const b = await suffixFor('new-password');
+    expect(a).not.toBe(b);
+  });
+
+  it('stays unique on an A→B→A revert by salting with the current revision name', async () => {
+    // Same env value, but the app has rolled to a new latest revision in between
+    // — the salt must make the suffix differ so ACA does not reject reusing a
+    // historical revision name.
+    const suffixWithRevision = async (rev: string): Promise<string> => {
+      mocks.beginCreateOrUpdateAndWait.mockReset();
+      mocks.get.mockResolvedValue(existingApp(rev));
+      mocks.beginCreateOrUpdateAndWait.mockResolvedValue({ configuration: { ingress: {} } });
+      const { updateContainerApp } = await import('./containerApps.js');
+      await updateContainerApp({
+        name: 'demo',
+        image: 'img:tag',
+        envVars: [{ name: 'SITE_PASSWORD', value: 'same' }],
+        forceNewRevision: true,
+      });
+      const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+      return envelope.template.revisionSuffix as string;
+    };
+
+    const first = await suffixWithRevision('demo--cfgaaaaaaaaaaaa');
+    const second = await suffixWithRevision('demo--cfgbbbbbbbbbbbb');
+    expect(first).not.toBe(second);
+  });
+});
+
 describe('ingress targetPort on update (zero-Dockerfile auto-build)', () => {
   it('re-points ingress to the requested port, preserving the other ingress fields', async () => {
     mocks.get.mockResolvedValue({
