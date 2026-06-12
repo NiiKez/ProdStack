@@ -39,7 +39,7 @@ if az containerapp show -n $APP -g $RG >/dev/null 2>&1; then
   echo "==> $APP exists; updating image to $IMAGE"
   az containerapp update -n $APP -g $RG --image "$IMAGE" >/dev/null
 else
-  echo "==> Creating $APP from $IMAGE (no ingress, 1 replica fixed)"
+  echo "==> Creating $APP from $IMAGE (no ingress, scale-to-zero 0..1)"
   az containerapp create \
     --name $APP --resource-group $RG \
     --environment $ENV_NAME \
@@ -47,7 +47,7 @@ else
     --registry-server $ACR.azurecr.io \
     --registry-username "$ACR_USER" \
     --registry-password "$ACR_PASS" \
-    --min-replicas 1 --max-replicas 1 \
+    --min-replicas 0 --max-replicas 1 \
     --cpu 2.0 --memory 4.0Gi \
     --system-assigned >/dev/null
 fi
@@ -144,6 +144,28 @@ az containerapp update -n $APP -g $RG --set-env-vars \
   ACR_USERNAME=secretref:acr-username \
   ACR_PASSWORD=secretref:acr-password \
   >/dev/null
+
+# --- 5b. KEDA scale-to-zero rule (cost: builder runs only during builds) ---
+# The builder is a 2 vCPU / 4 GiB box that is idle ~99% of the time, so we let
+# it scale to 0 replicas and have KEDA wake it 0->1 the instant a build needs
+# it. The trigger is a count over the Build table (the queue already lives in
+# Postgres). It MUST count in-flight statuses too, not just QUEUED — the moment
+# the worker claims a job the status flips QUEUED->CLONING, so a QUEUED-only
+# query would hit 0 and scale the container down *mid-build*. READY/FAILED/
+# CANCELLED are terminal -> excluded -> replica is free to drop to 0 after the
+# 300s cooldown. isDemo=false mirrors claimNextBuild/recoverOwnClaims (demo
+# builds never touch this worker). Auth maps KEDA's `connection` param to the
+# existing KV-backed database-url secret — no new credential. Idempotent.
+echo "==> Setting KEDA scale-to-zero rule (builds-pending)"
+az containerapp update -n $APP -g $RG \
+  --min-replicas 0 --max-replicas 1 \
+  --scale-rule-name builds-pending \
+  --scale-rule-type postgresql \
+  --scale-rule-metadata \
+      "query=SELECT count(*) FROM \"Build\" WHERE \"isDemo\" = false AND status IN ('QUEUED','CLONING','BUILDING','PUSHING','DEPLOYING')" \
+      "targetQueryValue=1" \
+      "activationTargetQueryValue=0" \
+  --scale-rule-auth "connection=database-url" >/dev/null
 
 # --- 6. Show current state -------------------------------------------------
 echo "==> Active revision:"
