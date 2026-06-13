@@ -18,6 +18,26 @@ updates:
       minor-and-patch:
         update-types: [minor, patch]
     labels: [dependencies]
+    # Runtime-coupled / breaking majors are pinned deliberately (2026-06-13). These
+    # are NOT "forgotten" bumps — adopting them is a conscious migration, not an
+    # auto-merge. Remove an entry here when you decide to do that migration.
+    ignore:
+      # @types/node must MATCH the runtime major (the app builds + runs on Node 20).
+      # @types/node 25 would expose Node-25 APIs that don't exist at runtime — a
+      # latent bug. Keep it tracking the runtime: bump only when the Node base
+      # image below moves. (Minor/patch within 20.x still flow.)
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # TypeScript majors change compiler behaviour repo-wide (e.g. 6.0 turns the
+      # `baseUrl` deprecation into a hard error). Adopt deliberately + fix tsconfig,
+      # don't take it the week it ships. 5.x minor/patch still flow.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # pino majors require a coordinated pino-http + pino-pretty upgrade (pino 10
+      # breaks pino-http 10 -> `logger[stringifySym] is not a function`). 9.x
+      # minor/patch still flow.
+      - dependency-name: "pino"
+        update-types: ["version-update:semver-major"]
 
   # --- GitHub Actions (keeps the SHA pins fresh; Dependabot updates pin + comment) ---
   - package-ecosystem: github-actions
@@ -33,15 +53,31 @@ updates:
 
   # --- Docker base images (one entry per Dockerfile dir; keeps digest pins current,
   #     e.g. the node:20-alpine HIGHs the Trivy triage left as "cron tracks") ---
+  # `node` major is pinned to the runtime LTS (Node 20) in every dir: the whole
+  # app is built + tested on Node 20, so jumping the base image to a brand-new
+  # non-LTS major (Dependabot proposed node:26-alpine) would ship an untested
+  # runtime straight to the live app via auto-deploy. Moving to the next LTS is a
+  # deliberate migration — bump @types/node in lockstep and drop the matching
+  # ignore. Digest/patch refreshes within 20-alpine still flow (the whole point of
+  # this ecosystem entry). kaniko/nginx bumps are unaffected.
   - package-ecosystem: docker
     directory: "/backend"
     schedule: { interval: weekly, day: monday }
     labels: [dependencies, docker]
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: "/frontend"
     schedule: { interval: weekly, day: monday }
     labels: [dependencies, docker]
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: "/worker"
     schedule: { interval: weekly, day: monday }
     labels: [dependencies, docker]
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
