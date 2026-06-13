@@ -19,7 +19,7 @@
 # --- Builder --------------------------------------------------------------
 # Base image digest-pinned (M3 hardening): immutable @sha256 so a retagged
 # upstream can't silently change the build. The digest is for node:20-alpine.
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
+FROM node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba AS builder
 WORKDIR /app
 
 # Install deps with the workspace lockfile. Copy only manifests first so this
