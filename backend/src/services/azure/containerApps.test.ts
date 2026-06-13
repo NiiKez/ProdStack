@@ -591,6 +591,59 @@ describe('rollPlatformApp (real branch — M6 CI/CD self-deploy)', () => {
     expect(ref.liveUrl).toBe('https://prodstack-api.example.azurecontainerapps.io');
   });
 
+  it('overrides a stale pinned revisionSuffix so the async roll cannot collide', async () => {
+    // Reproduces the silent CI-deploy no-op: the live revision was created by a
+    // manual roll with an explicit suffix (`demoon1`), so `get()` returns it on
+    // `template.revisionSuffix`. Replaying it would make ARM accept the PUT but
+    // fail provisioning ("revision with suffix demoon1 already exists"). The roll
+    // must stamp a FRESH suffix instead of inheriting the stale one.
+    mocks.get.mockResolvedValue({
+      location: 'francecentral',
+      environmentId: process.env.CONTAINER_APPS_ENV_ID,
+      latestRevisionName: 'prodstack-api--demoon1',
+      configuration: {
+        ingress: { external: true, targetPort: 3000, fqdn: 'prodstack-api.example.azurecontainerapps.io' },
+      },
+      template: {
+        revisionSuffix: 'demoon1',
+        containers: [{ name: 'prodstack-api', image: 'prodstack.azurecr.io/prodstack-api:old' }],
+      },
+    });
+    mocks.listSecrets.mockResolvedValue({ value: [] });
+    mocks.beginCreateOrUpdate.mockResolvedValue({});
+
+    const { rollPlatformApp } = await import('./containerApps.js');
+    await rollPlatformApp({ name: 'prodstack-api', image: 'prodstack.azurecr.io/prodstack-api:newsha' });
+
+    const [, , envelope] = mocks.beginCreateOrUpdate.mock.calls[0]!;
+    expect(envelope.template.revisionSuffix).not.toBe('demoon1');
+    expect(envelope.template.revisionSuffix).toMatch(/^roll[0-9a-f]{12}$/);
+  });
+
+  it('derives a different suffix once the latest revision advances (same image redeploy)', async () => {
+    const rollWith = async (latestRevisionName: string): Promise<string> => {
+      mocks.get.mockResolvedValue({
+        location: 'francecentral',
+        environmentId: process.env.CONTAINER_APPS_ENV_ID,
+        latestRevisionName,
+        configuration: { ingress: { external: true, targetPort: 3000, fqdn: 'x.example.azurecontainerapps.io' } },
+        template: { containers: [{ name: 'prodstack-api', image: 'prodstack.azurecr.io/prodstack-api:old' }] },
+      });
+      mocks.listSecrets.mockResolvedValue({ value: [] });
+      mocks.beginCreateOrUpdate.mockReset();
+      mocks.beginCreateOrUpdate.mockResolvedValue({});
+      const { rollPlatformApp } = await import('./containerApps.js');
+      // Same image both times — only the live revision name differs (as it does
+      // after a successful roll), which must still produce a unique suffix.
+      await rollPlatformApp({ name: 'prodstack-api', image: 'prodstack.azurecr.io/prodstack-api:samesha' });
+      return mocks.beginCreateOrUpdate.mock.calls[0]![2].template.revisionSuffix as string;
+    };
+
+    const first = await rollWith('prodstack-api--demoon1');
+    const second = await rollWith('prodstack-api--roll-after-first');
+    expect(first).not.toBe(second);
+  });
+
   it('refuses to roll a Container App outside the platform allow-list', async () => {
     const { rollPlatformApp } = await import('./containerApps.js');
     await expect(

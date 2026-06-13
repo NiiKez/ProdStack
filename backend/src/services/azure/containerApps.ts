@@ -546,6 +546,27 @@ async function realRollPlatformApp(opts: RollPlatformAppOpts): Promise<Container
     (s): s is Secret => typeof s.name === 'string',
   );
   const containers = existing.template?.containers ?? [];
+
+  // Stamp a FRESH revision suffix instead of inheriting `existing.template.
+  // revisionSuffix`. Critical: spreading `...existing.template` carries over
+  // whatever suffix the live revision was created with — and the platform apps
+  // have been rolled by hand with explicit `--revision-suffix` (e.g. `demoon1`,
+  // `nginxunpriv1`). Re-PUTting that same suffix makes ARM ACCEPT the request
+  // (201) but then FAIL the async revision provisioning with `revision with
+  // suffix <x> already exists`, discarding the new revision — so the roll
+  // returns 202 to CI while the app silently stays on the old image. (This is
+  // why every CI self-deploy was a no-op after a manual roll.) A content-
+  // addressed suffix salted with `latestRevisionName` keeps it unique across
+  // re-deploys of the same image (after a successful roll the latest revision
+  // name changes, so the next roll computes a different suffix), mirroring the
+  // env-redeploy `forceNewRevision` path in `realUpdate`.
+  const revisionSuffix = `roll${createHash('sha1')
+    .update(
+      JSON.stringify({ salt: existing.latestRevisionName ?? '', image: opts.image }),
+    )
+    .digest('hex')
+    .slice(0, 12)}`;
+
   const merged: ContainerApp = {
     ...existing,
     ...(secrets.length > 0
@@ -553,6 +574,7 @@ async function realRollPlatformApp(opts: RollPlatformAppOpts): Promise<Container
       : {}),
     template: {
       ...existing.template,
+      revisionSuffix,
       containers:
         containers.length > 0
           ? [{ ...containers[0], image: opts.image }, ...containers.slice(1)]
