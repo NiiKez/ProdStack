@@ -110,8 +110,16 @@ router.post(
 router.post(
   '/azure/test',
   requireXRequestedWith,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     try {
+      // A demo session must be physically unable to reach Azure, so we never
+      // call `pingAzure()` for it — that would be a real ARM read per visitor.
+      // Return a canned success matching the route's `{ ok, mode }` shape
+      // (docs/DEMO_MODE.md §14).
+      if (req.user?.isDemo === true) {
+        res.status(200).json({ ok: true, mode: 'demo' });
+        return;
+      }
       const result = await pingAzure();
       res.status(200).json(result);
     } catch (err) {
@@ -156,14 +164,22 @@ router.delete(
       await prisma.user.delete({ where: { id: user.id } });
       clearSessionCookie(res);
 
-      for (const project of liveProjects) {
-        try {
-          await deleteContainerApp(project.containerAppName);
-        } catch (err) {
-          logger.warn(
-            { err, containerAppName: project.containerAppName },
-            'deleteContainerApp failed during account delete',
-          );
+      // Demo projects have no real Azure resource, so a demo account delete is
+      // DB-only: the user-delete cascade above is all it needs. Skip the Azure
+      // teardown loop entirely — mirrors the project-delete guard in
+      // projects.ts (docs/DEMO_MODE.md §4 layer 3 / §14).
+      const isDemo = req.user?.isDemo === true;
+
+      if (!isDemo) {
+        for (const project of liveProjects) {
+          try {
+            await deleteContainerApp(project.containerAppName);
+          } catch (err) {
+            logger.warn(
+              { err, containerAppName: project.containerAppName },
+              'deleteContainerApp failed during account delete',
+            );
+          }
         }
       }
 

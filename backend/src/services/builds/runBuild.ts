@@ -764,34 +764,80 @@ async function deployAndRecord(
 
   const fallbackRevision =
     env.BUILD_RUNNER_MODE === 'stub' ? 'stub' : build.commitSha.slice(0, 12);
+  const revisionName = deploy.revisionName ?? fallbackRevision;
 
-  await prisma.$transaction([
-    prisma.deployment.updateMany({
-      where: { projectId: build.projectId, active: true },
-      data: { active: false },
-    }),
-    prisma.deployment.create({
-      data: {
-        projectId: build.projectId,
-        buildId: build.id,
-        revisionName: deploy.revisionName ?? fallbackRevision,
-        active: true,
-      },
-    }),
-    prisma.build.update({
-      where: { id: ctx.buildId },
-      data: { status: 'READY', finishedAt, durationMs, imageTag: image },
-    }),
-    prisma.project.update({
-      where: { id: build.projectId },
-      data: {
-        liveUrl: deploy.liveUrl,
-        // Record the auto-detected framework (or clear it when the user ships
-        // their own Dockerfile) so the UI can show how the app is built.
-        ...(resolved ? { frameworkHint: resolved.framework } : {}),
-      },
-    }),
-  ]);
+  // Azure has *already* rolled to `image` at this point. The DB write below must
+  // therefore never let a failure here masquerade as a build failure: the build
+  // genuinely succeeded (image pushed + Azure live). The `one_active_per_project`
+  // partial-unique index can trip P2002 when a concurrent rollback/redeploy (in
+  // the API process, see services/deploy.ts) wins the active-deployment slot at
+  // the same instant. If we let that P2002 unwind to runBuild's catch, the build
+  // would be marked FAILED while the app is live on this exact image — and a
+  // stale `active=true` row would mislead the next rollback/redeploy. So we catch
+  // P2002 and reconcile: record the build as READY (it succeeded) but write this
+  // deployment as a NON-active historical row, since the concurrent deploy now
+  // owns the active slot (and the project's liveUrl). Non-P2002 errors still
+  // propagate — a real DB failure should still mark the build FAILED.
+  try {
+    await prisma.$transaction([
+      prisma.deployment.updateMany({
+        where: { projectId: build.projectId, active: true },
+        data: { active: false },
+      }),
+      prisma.deployment.create({
+        data: {
+          projectId: build.projectId,
+          buildId: build.id,
+          revisionName,
+          active: true,
+        },
+      }),
+      prisma.build.update({
+        where: { id: ctx.buildId },
+        data: { status: 'READY', finishedAt, durationMs, imageTag: image },
+      }),
+      prisma.project.update({
+        where: { id: build.projectId },
+        data: {
+          liveUrl: deploy.liveUrl,
+          // Record the auto-detected framework (or clear it when the user ships
+          // their own Dockerfile) so the UI can show how the app is built.
+          ...(resolved ? { frameworkHint: resolved.framework } : {}),
+        },
+      }),
+    ]);
+  } catch (err) {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) {
+      throw err;
+    }
+    // Won the image+roll, lost the active slot to a concurrent deploy. Reconcile
+    // the DB without overwriting the winner's active deployment/liveUrl: still
+    // mark this build READY (it succeeded) + record a non-active historical
+    // Deployment so the timeline shows this image shipped. We do NOT touch
+    // Project.liveUrl/active — the concurrent deploy owns the live state.
+    logger.warn(
+      { buildId: ctx.buildId, projectId: build.projectId, image },
+      'deploy active-slot race (P2002): image is live but another deploy won the active slot — recording build READY with a non-active deployment',
+    );
+    await ctx.logs.write(
+      'WARN',
+      'another deployment won the active slot concurrently — recording this build as deployed (historical)',
+    );
+    await prisma.$transaction([
+      prisma.deployment.create({
+        data: {
+          projectId: build.projectId,
+          buildId: build.id,
+          revisionName,
+          active: false,
+        },
+      }),
+      prisma.build.update({
+        where: { id: ctx.buildId },
+        data: { status: 'READY', finishedAt, durationMs, imageTag: image },
+      }),
+    ]);
+  }
 
   await ctx.logs.write('SUCCESS', `deployed → ${deploy.liveUrl}`);
   logger.info(
