@@ -49,7 +49,7 @@ RUN npm run build --workspace=@prodstack/web
 # It still ships the same envsubst entrypoint (/docker-entrypoint.d/...) so the
 # /etc/nginx/templates/*.template render below is unchanged.
 # The digest below is for nginxinc/nginx-unprivileged:1.29-alpine.
-FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6 AS runner
+FROM nginxinc/nginx-unprivileged:1.31-alpine@sha256:85bcbc6b2edd325462560c597d784ecee415024f1c6a004e53ac5f202b8ca561 AS runner
 
 # Install our site config as an envsubst TEMPLATE. nginx:alpine's
 # /docker-entrypoint.d/20-envsubst-on-templates.sh renders every
