@@ -66,8 +66,31 @@ describe('ipRateLimitKey (edge-authenticated, EDGE_PROXY_SECRET set)', () => {
   });
 
   it('treats a WRONG edge secret as a direct hit (keys on the Envoy peer)', () => {
+    // 'not-the-secret' is SHORTER than EDGE_SECRET, so this trips the length
+    // pre-check and short-circuits BEFORE timingSafeEqual ever runs.
     const key = ipRateLimitKey(
       fakeReq({ edgeHeader: 'not-the-secret', ip: '6.6.6.6', xff: 'x.x.x.x, 198.51.100.9' }),
+    );
+    expect(key).toBe(ipKeyGenerator('198.51.100.9'));
+  });
+
+  it('treats a SAME-LENGTH wrong edge secret as a direct hit (exercises the timingSafeEqual-false branch)', () => {
+    // Built from EDGE_SECRET so it can never drift in length: same byte length,
+    // different bytes → passes the length pre-check and forces the constant-time
+    // compare to actually run and return false. Must be keyed on the Envoy peer.
+    const sameLengthWrong = EDGE_SECRET.toUpperCase();
+    expect(Buffer.byteLength(sameLengthWrong)).toBe(Buffer.byteLength(EDGE_SECRET));
+    expect(sameLengthWrong).not.toBe(EDGE_SECRET);
+    const key = ipRateLimitKey(
+      fakeReq({ edgeHeader: sameLengthWrong, ip: '6.6.6.6', xff: 'x.x.x.x, 198.51.100.9' }),
+    );
+    expect(key).toBe(ipKeyGenerator('198.51.100.9'));
+  });
+
+  it('treats an EMPTY-STRING x-prodstack-edge header as absent (keys on the Envoy peer)', () => {
+    // An empty header is not a valid secret → direct-hit handling kicks in.
+    const key = ipRateLimitKey(
+      fakeReq({ edgeHeader: '', ip: '6.6.6.6', xff: 'x.x.x.x, 198.51.100.9' }),
     );
     expect(key).toBe(ipKeyGenerator('198.51.100.9'));
   });

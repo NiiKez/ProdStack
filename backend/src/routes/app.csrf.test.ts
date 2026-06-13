@@ -166,6 +166,24 @@ describe('M9 central CSRF guard', () => {
     });
   });
 
+  describe('cookie/session-authenticated mutating routes (/api/projects)', () => {
+    // The central guard short-circuits BEFORE the project route handler, so no
+    // project/prisma mocking is needed — the security-relevant assertion is the
+    // 403 rejection itself. We deliberately don't exercise the with-header path
+    // here (that would require the project handler's mocks).
+    it('REJECTS a PATCH missing X-Requested-With with 403 CSRF', async () => {
+      const res = await supertest(createApp()).patch('/api/projects/p1').send({ branch: 'main' });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ error: 'CSRF' });
+    });
+
+    it('REJECTS a DELETE missing X-Requested-With with 403 CSRF', async () => {
+      const res = await supertest(createApp()).delete('/api/projects/p1');
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ error: 'CSRF' });
+    });
+  });
+
   describe('token-authenticated route (/api/admin/deploy) is EXEMPT', () => {
     it('rolls WITHOUT X-Requested-With (CI runner sends no such header)', async () => {
       const res = await supertest(createApp())
