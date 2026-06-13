@@ -13,7 +13,7 @@
 # --- Builder --------------------------------------------------------------
 # Base image digest-pinned (M3 hardening): immutable @sha256 so a retagged
 # upstream can't silently change the build. The digest is for node:20-alpine.
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
+FROM node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json tsconfig.base.json ./
@@ -52,7 +52,7 @@ FROM gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd
 # A future rootless build engine (e.g. buildkit-rootless / kaniko user-ns) is
 # the only way to drop this; not in scope for this pass.
 # Base image digest-pinned (M3 hardening) — node:20-alpine; see builder note.
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runner
+FROM node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV BUILD_RUNNER_MODE=kaniko
