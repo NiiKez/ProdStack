@@ -13,8 +13,11 @@
 # Microsoft.App/containerApps/write (Contributor) or it 403s.
 #
 # Roles granted (matches infra/provision-prodstack-builder.sh's pattern):
-#   Contributor on RG       — roll prodstack-api/prodstack-web (M6 self-deploy)
-#                             AND roll user Container Apps via updateContainerApp()
+#   ProdStack Container Apps Operator on RG — custom least-privilege role: roll
+#                             prodstack-api/prodstack-web (M6 self-deploy) AND
+#                             create/roll/delete user Container Apps via the
+#                             containerApps.* SDK. Replaced broad Contributor on
+#                             2026-06-12 (see provision-custom-roles.sh).
 #   AcrPull on ACR          — pull its own image
 #   Key Vault Secrets User  — read database-url, data-enc-key, deploy-token, etc.
 #   Monitoring Reader on RG — read Azure Monitor metrics for the Metrics tab
@@ -26,17 +29,25 @@
 # Re-run any time the API app is recreated or its identity is reset. Safe to run
 # repeatedly: a duplicate assignment is a no-op ("already had ...").
 #
-# NOTE on least privilege: v1 deliberately uses broad `Contributor` on the RG
-# (custom-role tightening is a stretch goal). A future hardening
-# is a custom role limited to Microsoft.App/containerApps read|write +
-# .../listSecrets/action, scoped to just the platform apps. The builder MI has
-# the same broad Contributor today, so tighten both together if/when you do it.
+# Least privilege: as of 2026-06-12 this grants the custom
+# `ProdStack Container Apps Operator` role (Microsoft.App/containerApps/* +
+# managedEnvironments read/join), NOT broad `Contributor` — so a compromise of
+# the api (or builder, tightened the same way) can't reach Postgres/Key Vault/
+# ACR-config/networking. Create the role first with provision-custom-roles.sh
+# (this script asserts it exists and aborts with guidance if not).
 set -euo pipefail
 
 RG=prodstack
 APP=prodstack-api
 ACR=prodstack
 KV_NAME=prodstack-kv
+ACA_ROLE="ProdStack Container Apps Operator"
+
+# Fail loudly if the custom role hasn't been created yet (one-time bootstrap).
+if ! az role definition list --name "$ACA_ROLE" --query "[0].roleName" -o tsv 2>/dev/null | grep -q .; then
+  echo "ERROR: custom role '$ACA_ROLE' not found. Run infra/provision-custom-roles.sh first." >&2
+  exit 1
+fi
 
 # Use --assignee-object-id (NOT --assignee): the deployment Entra tenant blocks
 # directory/Graph reads, so the Graph
@@ -50,7 +61,7 @@ RG_ID=$(az group show -n "$RG" --query id -o tsv)
 echo "==> prodstack-api identity principalId: $PRINCIPAL"
 echo "==> Asserting RBAC roles"
 for ROLE_SCOPE in \
-  "Contributor:$RG_ID" \
+  "$ACA_ROLE:$RG_ID" \
   "AcrPull:$ACR_ID" \
   "Key Vault Secrets User:$KV_ID" \
   "Monitoring Reader:$RG_ID" \

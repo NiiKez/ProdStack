@@ -33,15 +33,21 @@ vi.hoisted(() => {
 const mocks = vi.hoisted(() => ({
   userCount: vi.fn(),
   userCreate: vi.fn(),
+  txQueryRaw: vi.fn(),
+  $transaction: vi.fn(),
   seedDemoWorkspace: vi.fn(),
 }));
 
+// Interactive-transaction client: the cap critical section acquires the advisory
+// lock then runs count + create on this same client (so they're one transaction).
+const txClient = {
+  $queryRaw: mocks.txQueryRaw,
+  user: { count: mocks.userCount, create: mocks.userCreate },
+};
+
 vi.mock('../db.js', () => ({
   prisma: {
-    user: {
-      count: mocks.userCount,
-      create: mocks.userCreate,
-    },
+    $transaction: mocks.$transaction,
   },
 }));
 
@@ -66,10 +72,19 @@ function buildApp() {
 beforeEach(() => {
   mocks.userCount.mockReset();
   mocks.userCreate.mockReset();
+  mocks.txQueryRaw.mockReset();
+  mocks.$transaction.mockReset();
   mocks.seedDemoWorkspace.mockReset();
 
   mocks.userCount.mockResolvedValue(0);
   mocks.userCreate.mockResolvedValue({ id: 'demo_user_1' });
+  mocks.txQueryRaw.mockResolvedValue([]);
+  // Run the interactive-transaction callback against the shared tx client so the
+  // cap-check + insert (and their thrown DemoAtCapacityError) propagate exactly
+  // as they would against Postgres.
+  mocks.$transaction.mockImplementation(async (fn: (tx: typeof txClient) => Promise<unknown>) =>
+    fn(txClient),
+  );
   mocks.seedDemoWorkspace.mockResolvedValue(undefined);
 });
 
@@ -123,6 +138,22 @@ describe('GET /api/auth/demo-login (ENABLE_DEMO=true)', () => {
     expect(mocks.userCount).toHaveBeenCalledWith({
       where: { isDemo: true, demoExpiresAt: { gt: expect.any(Date) } },
     });
+  });
+
+  it('runs the cap-check + insert in ONE advisory-locked transaction (atomic, no TOCTOU)', async () => {
+    // The cap is only meaningful if count→insert is atomic; otherwise N parallel
+    // logins all read count<max and all insert past the ceiling. We enforce it
+    // with a pg advisory lock inside a single interactive transaction.
+    const app = buildApp();
+    const res = await request(app).get('/api/auth/demo-login').redirects(0);
+    expect(res.status).toBe(302);
+
+    // Exactly one interactive transaction wrapped the cap-check + insert...
+    expect(mocks.$transaction).toHaveBeenCalledTimes(1);
+    // ...and a pg_advisory_xact_lock was acquired inside it (before count/create).
+    expect(mocks.txQueryRaw).toHaveBeenCalledTimes(1);
+    const lockSql = (mocks.txQueryRaw.mock.calls[0]![0] as readonly string[]).join('');
+    expect(lockSql).toMatch(/pg_advisory_xact_lock/);
   });
 
   it('retries on a P2002 githubUserId collision, re-rolling a fresh reserved-band id', async () => {

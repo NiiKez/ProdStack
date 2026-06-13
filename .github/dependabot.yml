@@ -1,0 +1,47 @@
+# Dependabot — automated dependency + base-image + action updates.
+# Closes a 2026-06-12 DevSecOps-review gap: the "npm audit → 0 vulns" claim was a
+# one-time manual check, so a new advisory against a locked dep (or a stale,
+# CVE-laden base-image digest, or an outdated pinned action) would go unnoticed
+# between manual reviews. Dependabot opens a PR per update; CI (ci.yml + the
+# Trivy/CodeQL scans) gates each one. Grouped to keep PR volume sane.
+version: 2
+updates:
+  # --- npm (monorepo: one hoisted lockfile at the root covers both workspaces) ---
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for all non-major bumps; majors (which can break) come separately.
+      minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies]
+
+  # --- GitHub Actions (keeps the SHA pins fresh; Dependabot updates pin + comment) ---
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies, ci]
+
+  # --- Docker base images (one entry per Dockerfile dir; keeps digest pins current,
+  #     e.g. the node:20-alpine HIGHs the Trivy triage left as "cron tracks") ---
+  - package-ecosystem: docker
+    directory: "/backend"
+    schedule: { interval: weekly, day: monday }
+    labels: [dependencies, docker]
+  - package-ecosystem: docker
+    directory: "/frontend"
+    schedule: { interval: weekly, day: monday }
+    labels: [dependencies, docker]
+  - package-ecosystem: docker
+    directory: "/worker"
+    schedule: { interval: weekly, day: monday }
+    labels: [dependencies, docker]

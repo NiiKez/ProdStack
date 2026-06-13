@@ -38,6 +38,16 @@ const CAPACITY_RETRY_AFTER_SECONDS = 300;
 /** Max collision-retries when picking a synthetic negative githubUserId. */
 const GITHUB_ID_RETRIES = 5;
 
+/**
+ * Stable advisory-lock id for the demo-capacity critical section. Any concurrent
+ * demo-login serializes on this single key while it checks the cap and inserts,
+ * so the count→insert below is atomic across requests (see {@link admitDemoUser}).
+ */
+const DEMO_CAP_LOCK_KEY = 728_412;
+
+/** Internal signal: the active-demo-user count was at DEMO_MAX_ACTIVE. */
+class DemoAtCapacityError extends Error {}
+
 /** Reserved negative band for synthetic demo githubUserIds: `-1 … -2_000_000_000`.
  *  Real GitHub ids are positive, so this band can never collide with one. */
 function randomDemoGithubUserId(): number {
@@ -55,22 +65,24 @@ router.get('/demo-login', demoLoginLimiter, async (req: Request, res, next) => {
 
     // Capacity cap: refuse new sessions once the live (unexpired) demo-user
     // count hits DEMO_MAX_ACTIVE, so a flood of sandboxes can't balloon the DB.
-    const activeDemoUsers = await prisma.user.count({
-      where: { isDemo: true, demoExpiresAt: { gt: new Date() } },
-    });
-    if (activeDemoUsers >= env.DEMO_MAX_ACTIVE) {
-      res.setHeader('Retry-After', String(CAPACITY_RETRY_AFTER_SECONDS));
-      res.status(503).json({
-        error: 'DEMO_AT_CAPACITY',
-        message: 'Demo is at capacity, try again shortly.',
-      });
-      return;
+    let user: { id: string };
+    try {
+      user = await admitDemoUser();
+    } catch (err) {
+      if (err instanceof DemoAtCapacityError) {
+        res.setHeader('Retry-After', String(CAPACITY_RETRY_AFTER_SECONDS));
+        res.status(503).json({
+          error: 'DEMO_AT_CAPACITY',
+          message: 'Demo is at capacity, try again shortly.',
+        });
+        return;
+      }
+      throw err;
     }
 
-    const user = await createDemoUser();
-
-    // Seed the sandbox AFTER the user row is committed so the dashboard isn't
-    // empty. DB-only (orchestrator never touches Azure/ACR/git/Kaniko).
+    // Seed the sandbox AFTER the user row is committed (and the cap lock released)
+    // so the dashboard isn't empty. DB-only (orchestrator never touches
+    // Azure/ACR/git/Kaniko).
     await seedDemoWorkspace(user.id);
 
     setSessionCookie(res, signSession(user.id));
@@ -81,33 +93,53 @@ router.get('/demo-login', demoLoginLimiter, async (req: Request, res, next) => {
 });
 
 /**
- * Insert a fresh demo `User`. Retries on a P2002 unique-constraint collision on
- * the synthetic `githubUserId` (mirrors `createWithSlugRetry` in projects.ts):
- * each retry re-rolls a new random id from the reserved band.
+ * Atomically admit one demo `User`, enforcing DEMO_MAX_ACTIVE without a TOCTOU
+ * race. The cap check and the insert run inside ONE transaction guarded by a
+ * Postgres advisory lock (`pg_advisory_xact_lock`), so N concurrent demo-logins
+ * can't all read `count < max` and all insert past the ceiling — they serialize
+ * on the lock, which auto-releases at commit. The lock spans only the fast
+ * count+insert; the slow workspace seed runs AFTER, outside the transaction.
+ *
+ * Throws {@link DemoAtCapacityError} when the live (unexpired) demo-user count is
+ * already at the cap. Retries the WHOLE transaction on a P2002 unique-constraint
+ * collision on the synthetic `githubUserId` (a Postgres error aborts the
+ * surrounding transaction, so we can't retry the insert in place — we re-roll a
+ * fresh reserved-band id and re-run), mirroring the prior collision handling.
  */
-async function createDemoUser() {
+async function admitDemoUser(): Promise<{ id: string }> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < GITHUB_ID_RETRIES; attempt++) {
-    // Placeholder, never used for a real GitHub call — the token columns are
-    // non-null `Bytes`, so a demo user still needs *a* (meaningless) ciphertext.
+    // Placeholder ciphertext — never used for a real GitHub call; the token
+    // columns are non-null `Bytes`, so a demo user still needs *a* value.
     const tok = encrypt('demo-no-github-token');
     try {
-      return await prisma.user.create({
-        data: {
-          githubUserId: randomDemoGithubUserId(),
-          githubLogin: `demo-${randomBytes(3).toString('hex')}`,
-          email: null,
-          avatarUrl: null,
-          isDemo: true,
-          demoExpiresAt: new Date(Date.now() + env.DEMO_TTL_MINUTES * 60_000),
-          githubTokenCiphertext: tok.ciphertext,
-          githubTokenIv: tok.iv,
-          githubTokenAuthTag: tok.authTag,
-          githubTokenKeyVersion: tok.keyVersion,
-        },
-        select: { id: true },
+      return await prisma.$transaction(async (tx) => {
+        // Serialize the cap critical section across all concurrent logins.
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(${DEMO_CAP_LOCK_KEY}::bigint)`;
+        const activeDemoUsers = await tx.user.count({
+          where: { isDemo: true, demoExpiresAt: { gt: new Date() } },
+        });
+        if (activeDemoUsers >= env.DEMO_MAX_ACTIVE) {
+          throw new DemoAtCapacityError();
+        }
+        return await tx.user.create({
+          data: {
+            githubUserId: randomDemoGithubUserId(),
+            githubLogin: `demo-${randomBytes(3).toString('hex')}`,
+            email: null,
+            avatarUrl: null,
+            isDemo: true,
+            demoExpiresAt: new Date(Date.now() + env.DEMO_TTL_MINUTES * 60_000),
+            githubTokenCiphertext: tok.ciphertext,
+            githubTokenIv: tok.iv,
+            githubTokenAuthTag: tok.authTag,
+            githubTokenKeyVersion: tok.keyVersion,
+          },
+          select: { id: true },
+        });
       });
     } catch (err) {
+      if (err instanceof DemoAtCapacityError) throw err;
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         lastErr = err;
         continue;

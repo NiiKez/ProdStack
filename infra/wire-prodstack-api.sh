@@ -52,14 +52,41 @@ az containerapp secret set $APP --secrets \
 # ACR admin creds for M6 image GC. The cleanup job talks to the ACR data-plane
 # REST API (delete manifests) with HTTP Basic auth — the managed identity can't
 # speak the OCI registry protocol, so we use admin creds, same as the builder.
-# Stored as plain Container App secrets (not KV) so `az acr credential renew`
-# rotates them with one re-run of this script.
-echo "==> Fetching ACR admin credentials for image cleanup..."
+# Stored in Key Vault and referenced via keyvaultref like the other 8 secrets
+# (2026-06-12 hardening): a plain Container App secret is readable in cleartext
+# by anyone holding `Microsoft.App/.../listSecrets` (incl. the RG-Contributor MI)
+# with no KV audit/RBAC gate. Routing through KV gives the same audit + RBAC as
+# every other secret. Rotation is unchanged: `az acr credential renew` then
+# re-run this script — it re-writes the fresh value into the KV secret below
+# (this script runs as the operator, who holds KV write access).
+echo "==> Syncing ACR admin credentials into Key Vault for image cleanup..."
 ACR_USER=$(az acr credential show -n prodstack --query username -o tsv)
 ACR_PASS=$(az acr credential show -n prodstack --query 'passwords[0].value' -o tsv)
+az keyvault secret set --vault-name prodstack-kv --name acr-username --value "$ACR_USER" >/dev/null
+az keyvault secret set --vault-name prodstack-kv --name acr-password --value "$ACR_PASS" >/dev/null
 az containerapp secret set $APP --secrets \
-  acr-username="$ACR_USER" \
-  acr-password="$ACR_PASS"
+  acr-username=keyvaultref:$KV/acr-username,$IDR \
+  acr-password=keyvaultref:$KV/acr-password,$IDR
+
+# --- Optional: rate-limit-integrity edge secret (C1) -----------------------
+# EDGE_PROXY_SECRET proves a request traversed prodstack-web's nginx (which
+# injects it as the X-ProdStack-Edge header). The API then trusts the
+# X-Forwarded-For chain its per-IP rate limiters key on ONLY for edge-marked
+# requests; a DIRECT hit on the API's *.azurecontainerapps.io FQDN (1 hop, where
+# XFF is forgeable) is keyed on the un-spoofable Envoy peer instead. UNSET => the
+# API trusts req.ip as before (inert / no behavior change). ACTIVATION ORDER
+# matters — create the KV secret, run provision-prodstack-web.sh FIRST (so nginx
+# injects the header), THEN this script. Conditional so re-running before the KV
+# secret exists is a safe no-op. See backend/src/middleware/rateLimit.ts.
+#   az keyvault secret set --vault-name prodstack-kv --name edge-proxy-secret \
+#     --value "$(openssl rand -hex 32)"
+if az keyvault secret show --vault-name prodstack-kv --name edge-proxy-secret >/dev/null 2>&1; then
+  echo "==> Wiring EDGE_PROXY_SECRET (rate-limit integrity) onto the API..."
+  az containerapp secret set $APP --secrets edge-proxy-secret=keyvaultref:$KV/edge-proxy-secret,$IDR
+  az containerapp update $APP --set-env-vars EDGE_PROXY_SECRET=secretref:edge-proxy-secret >/dev/null
+else
+  echo "==> EDGE_PROXY_SECRET not in Key Vault yet — skipping (rate-limit edge marker inactive)."
+fi
 
 # Subscription id: prefer $AZURE_SUBSCRIPTION_ID, else fall back to the current
 # `az login`. The API origin is derived from Azure at runtime (the env-domain hash

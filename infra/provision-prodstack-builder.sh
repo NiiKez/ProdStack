@@ -55,8 +55,18 @@ fi
 # --- 2. Grant the managed identity the roles it needs ----------------------
 # AcrPull   — pull its own image
 # AcrPush   — push images it builds for user projects
-# Contributor on RG — roll user Container Apps via updateContainerApp()
+# ProdStack Container Apps Operator on RG — custom least-privilege role (replaced
+#   broad Contributor 2026-06-12): create/roll/delete user Container Apps via
+#   the containerApps.* SDK, and nothing else in the RG. Critical here because
+#   this worker runs untrusted user Dockerfiles as root — a compromise must NOT
+#   reach Postgres/Key Vault/ACR-config. Create it first with
+#   provision-custom-roles.sh (asserted below).
 # Key Vault Secrets User — read DB URL, data-enc-key, etc.
+ACA_ROLE="ProdStack Container Apps Operator"
+if ! az role definition list --name "$ACA_ROLE" --query "[0].roleName" -o tsv 2>/dev/null | grep -q .; then
+  echo "ERROR: custom role '$ACA_ROLE' not found. Run infra/provision-custom-roles.sh first." >&2
+  exit 1
+fi
 PRINCIPAL=$(az containerapp show -n $APP -g $RG --query identity.principalId -o tsv)
 ACR_ID=$(az acr show -n $ACR --query id -o tsv)
 KV_ID=$(az keyvault show -n $KV_NAME --query id -o tsv)
@@ -66,7 +76,7 @@ echo "==> Assigning RBAC roles to $PRINCIPAL"
 for ROLE_SCOPE in \
   "AcrPull:$ACR_ID" \
   "AcrPush:$ACR_ID" \
-  "Contributor:$RG_ID" \
+  "$ACA_ROLE:$RG_ID" \
   "Key Vault Secrets User:$KV_ID"
 do
   ROLE="${ROLE_SCOPE%%:*}"
@@ -97,14 +107,21 @@ az containerapp secret set -n $APP -g $RG --secrets \
 
 # --- 4. ACR admin creds (kaniko needs docker-config-style auth to push) ----
 # Kaniko cannot use the managed identity for `docker push`; it needs a
-# username/password pair. Storing as plain Container App secrets (not KV)
-# so `az acr credential renew` rotates them with one re-run of this script.
-echo "==> Fetching ACR admin credentials"
+# username/password pair. Stored in Key Vault and referenced via keyvaultref
+# like the shared secrets above (2026-06-12 hardening): a plain Container App
+# secret is readable in cleartext by anyone holding listSecrets (incl. this
+# app's own RG-Contributor MI, which runs untrusted user Dockerfiles) with no
+# KV audit/RBAC gate. Rotation is unchanged: `az acr credential renew` then
+# re-run this script — it re-writes the fresh value into the KV secret (this
+# script runs as the operator, who holds KV write access).
+echo "==> Syncing ACR admin credentials into Key Vault"
 ACR_USER=$(az acr credential show -n $ACR --query username -o tsv)
 ACR_PASS=$(az acr credential show -n $ACR --query 'passwords[0].value' -o tsv)
+az keyvault secret set --vault-name $KV_NAME --name acr-username --value "$ACR_USER" >/dev/null
+az keyvault secret set --vault-name $KV_NAME --name acr-password --value "$ACR_PASS" >/dev/null
 az containerapp secret set -n $APP -g $RG --secrets \
-  acr-username="$ACR_USER" \
-  acr-password="$ACR_PASS" \
+  acr-username=keyvaultref:$KV/acr-username,$IDR \
+  acr-password=keyvaultref:$KV/acr-password,$IDR \
   >/dev/null
 
 # --- 5. Environment variables ---------------------------------------------

@@ -16,6 +16,7 @@ import { randomBytes } from 'node:crypto';
 import { BuildStatus, Prisma } from '@prisma/client';
 
 import { prisma } from '../../db.js';
+import { env } from '../../env.js';
 import { encrypt } from '../../lib/crypto.js';
 import { HttpError } from '../../lib/errors.js';
 import { containerAppName, dedupedSlug, slugify } from '../slug.js';
@@ -206,6 +207,25 @@ export async function createDemoProject(
       where: { userId: user.id, deletedAt: null },
       select: { slug: true },
     });
+    // Per-session project cap (DoS / DB-exhaustion). Count EVERY project this
+    // session has ever created — INCLUDING soft-deleted tombstones — not just the
+    // live ones, so a create→delete→create churn loop can't accumulate unbounded
+    // tombstone Project rows (and their cascaded Build/LogLine/EnvVar children)
+    // while keeping the live count under the cap. Demo delete is a soft-delete
+    // (`deletedAt`, projects.ts) and the reaper only purges at session EXPIRY, so
+    // a live-only count would let one visitor churn create/delete and bloat
+    // Postgres at the global-limiter rate — exactly what "demo safety does NOT
+    // depend on the rate limiter" must rule out. Counting all rows makes this a
+    // true per-session LIFETIME ceiling: total demo Project rows ≤ DEMO_MAX_ACTIVE
+    // × this, and transitively bounds every child build/log row.
+    const totalEverCreated = await prisma.project.count({ where: { userId: user.id } });
+    if (totalEverCreated >= env.DEMO_MAX_PROJECTS_PER_USER) {
+      throw new HttpError(
+        429,
+        'DEMO_PROJECT_LIMIT',
+        `Demo sandboxes are limited to ${env.DEMO_MAX_PROJECTS_PER_USER} projects.`,
+      );
+    }
     const slug = dedupedSlug(slugify(input.name), live.map((p) => p.slug));
     const wh = freshWebhookSecret();
     return prisma.project.create({
@@ -260,10 +280,37 @@ export async function startDemoBuild(project: {
   // §4 layer-4 backstop, but starting from a project id.
   const owner = await prisma.project.findUnique({
     where: { id: project.id },
-    select: { user: { select: { isDemo: true, githubLogin: true } } },
+    select: { userId: true, user: { select: { isDemo: true, githubLogin: true } } },
   });
   if (owner === null || owner.user.isDemo !== true) {
     throw new Error('demoOrchestrator called for non-demo user');
+  }
+
+  // Per-project total-build cap (DoS / DB-exhaustion): bound the Build/LogLine
+  // rows — and the replay timers — a single demo project can accumulate over a
+  // session, independent of the per-user buildTrigger rate limiter.
+  const buildsForProject = await prisma.build.count({ where: { projectId: project.id } });
+  if (buildsForProject >= env.DEMO_MAX_BUILDS_PER_PROJECT) {
+    throw new HttpError(
+      429,
+      'DEMO_BUILD_LIMIT',
+      `Demo projects are limited to ${env.DEMO_MAX_BUILDS_PER_PROJECT} builds.`,
+    );
+  }
+
+  // Per-session concurrency cap: bound how many replay drivers run at once across
+  // ALL of this demo session's projects (each in-flight build holds replay
+  // timers + polls Postgres). The /rebuild route already caps in-flight builds to
+  // one PER PROJECT; this caps the session total across multiple projects.
+  const inFlightForUser = await prisma.build.count({
+    where: { project: { userId: owner.userId }, status: { in: DEMO_IN_FLIGHT } },
+  });
+  if (inFlightForUser >= env.DEMO_MAX_INFLIGHT_BUILDS_PER_USER) {
+    throw new HttpError(
+      429,
+      'DEMO_BUILD_INFLIGHT_LIMIT',
+      'Too many demo builds running at once. Wait for one to finish.',
+    );
   }
 
   const build = await prisma.build.create({
