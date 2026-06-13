@@ -22,10 +22,12 @@ const mocks = vi.hoisted(() => ({
   userFindUniqueOrThrow: vi.fn(),
   projectFindMany: vi.fn(),
   projectFindUnique: vi.fn(),
+  projectCount: vi.fn(),
   projectCreate: vi.fn(),
   envVarCreate: vi.fn(),
   buildCreate: vi.fn(),
   buildFindFirst: vi.fn(),
+  buildCount: vi.fn(),
   logLineCreateMany: vi.fn(),
   deploymentCreate: vi.fn(),
   deploymentFindFirst: vi.fn(),
@@ -45,10 +47,11 @@ vi.mock('../../db.js', () => ({
     project: {
       findMany: mocks.projectFindMany,
       findUnique: mocks.projectFindUnique,
+      count: mocks.projectCount,
       create: mocks.projectCreate,
     },
     envVar: { create: mocks.envVarCreate },
-    build: { create: mocks.buildCreate, findFirst: mocks.buildFindFirst },
+    build: { create: mocks.buildCreate, findFirst: mocks.buildFindFirst, count: mocks.buildCount },
     logLine: { createMany: mocks.logLineCreateMany },
     deployment: {
       create: mocks.deploymentCreate,
@@ -75,6 +78,7 @@ beforeEach(() => {
   mocks.userFindUnique.mockResolvedValue({ isDemo: true });
   mocks.userFindUniqueOrThrow.mockResolvedValue({ githubLogin: DEMO_USER.githubLogin });
   mocks.projectFindMany.mockResolvedValue([]);
+  mocks.projectCount.mockResolvedValue(0);
   mocks.projectCreate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
     id: 'proj-new',
     slug: data.slug,
@@ -82,10 +86,12 @@ beforeEach(() => {
     ...data,
   }));
   mocks.projectFindUnique.mockResolvedValue({
+    userId: DEMO_USER.id,
     user: { isDemo: true, githubLogin: DEMO_USER.githubLogin },
   });
   mocks.buildCreate.mockResolvedValue({ id: 'build-new' });
   mocks.buildFindFirst.mockResolvedValue(null);
+  mocks.buildCount.mockResolvedValue(0);
   mocks.envVarCreate.mockResolvedValue({});
   mocks.logLineCreateMany.mockResolvedValue({});
   mocks.deploymentCreate.mockResolvedValue({ id: 'dep-new', active: true, build: {} });
@@ -136,6 +142,30 @@ describe('createDemoProject', () => {
     expect(mocks.projectCreate).not.toHaveBeenCalled();
     expect(mocks.buildCreate).not.toHaveBeenCalled();
   });
+
+  it('429s DEMO_PROJECT_LIMIT at the per-session project cap (creates nothing)', async () => {
+    // Default DEMO_MAX_PROJECTS_PER_USER=10; simulate the session already at it.
+    mocks.projectCount.mockResolvedValue(10);
+    await expect(
+      createDemoProject(DEMO_USER, { name: 'one too many', repoUrl: 'https://github.com/a/b' }),
+    ).rejects.toMatchObject({ status: 429, code: 'DEMO_PROJECT_LIMIT' });
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
+  });
+
+  it('counts soft-deleted tombstones against the cap (no create→delete churn bypass)', async () => {
+    // The DoS hardening: demo delete is a soft-delete, so a live-only count would
+    // let a session loop create→delete forever and bloat the DB with tombstone
+    // rows while staying under the cap. The cap counts ALL projects ever created
+    // (incl. soft-deleted), so only 1 live project but 10 total still 429s.
+    mocks.projectFindMany.mockResolvedValue([{ slug: 'still-live' }]);
+    mocks.projectCount.mockResolvedValue(10);
+    await expect(
+      createDemoProject(DEMO_USER, { name: 'churned', repoUrl: 'https://github.com/a/b' }),
+    ).rejects.toMatchObject({ status: 429, code: 'DEMO_PROJECT_LIMIT' });
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
+    // The cap read includes tombstones (no `deletedAt` filter).
+    expect(mocks.projectCount).toHaveBeenCalledWith({ where: { userId: DEMO_USER.id } });
+  });
 });
 
 describe('startDemoBuild', () => {
@@ -158,10 +188,34 @@ describe('startDemoBuild', () => {
   });
 
   it('throws when the project owner is not a demo user', async () => {
-    mocks.projectFindUnique.mockResolvedValue({ user: { isDemo: false, githubLogin: 'real' } });
+    mocks.projectFindUnique.mockResolvedValue({
+      userId: 'real-1',
+      user: { isDemo: false, githubLogin: 'real' },
+    });
     await expect(
       startDemoBuild({ id: 'proj-1', branch: 'main', githubRepoFullName: 'a/b' }),
     ).rejects.toThrow(/non-demo user/);
+    expect(mocks.buildCreate).not.toHaveBeenCalled();
+    expect(mocks.startDemoReplay).not.toHaveBeenCalled();
+  });
+
+  it('429s DEMO_BUILD_LIMIT at the per-project build cap (no build, no replay)', async () => {
+    // Default DEMO_MAX_BUILDS_PER_PROJECT=25 — first count (per-project total).
+    mocks.buildCount.mockResolvedValueOnce(25);
+    await expect(
+      startDemoBuild({ id: 'proj-1', branch: 'main', githubRepoFullName: 'a/b' }),
+    ).rejects.toMatchObject({ status: 429, code: 'DEMO_BUILD_LIMIT' });
+    expect(mocks.buildCreate).not.toHaveBeenCalled();
+    expect(mocks.startDemoReplay).not.toHaveBeenCalled();
+  });
+
+  it('429s DEMO_BUILD_INFLIGHT_LIMIT at the per-session in-flight cap', async () => {
+    // First count (per-project total) under cap; second (per-user in-flight) at
+    // the default DEMO_MAX_INFLIGHT_BUILDS_PER_USER=3.
+    mocks.buildCount.mockResolvedValueOnce(0).mockResolvedValueOnce(3);
+    await expect(
+      startDemoBuild({ id: 'proj-1', branch: 'main', githubRepoFullName: 'a/b' }),
+    ).rejects.toMatchObject({ status: 429, code: 'DEMO_BUILD_INFLIGHT_LIMIT' });
     expect(mocks.buildCreate).not.toHaveBeenCalled();
     expect(mocks.startDemoReplay).not.toHaveBeenCalled();
   });

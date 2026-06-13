@@ -67,6 +67,28 @@ const EnvSchema = z.object({
   // Numeric (NOT `true`, which trips express-rate-limit's permissive-trust-proxy
   // guard).
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(1),
+  // Shared secret proving a request arrived through our OWN prodstack-web nginx
+  // reverse proxy (the canonical prodstack.live path: web-Envoy → nginx →
+  // api-Envoy = 3 hops). nginx injects it as the `X-ProdStack-Edge` request
+  // header (`proxy_set_header` REPLACES any client-supplied value, so it can't be
+  // forged). The per-IP rate limiters trust the resolved client IP (`req.ip`,
+  // derived from the full X-Forwarded-For chain) ONLY for requests bearing the
+  // matching header; every other request — notably a DIRECT hit on the API's own
+  // *.azurecontainerapps.io FQDN, which is just 1 proxy hop, where a caller can
+  // PREPEND fake X-Forwarded-For entries and so control `req.ip` — is keyed on
+  // the un-spoofable address Azure's Envoy appended. UNSET (default) → trust
+  // `req.ip` as before (today's behavior; dev/test and any not-yet-wired deploy
+  // keep working). To ACTIVATE: set the SAME value on BOTH prodstack-web (so
+  // nginx renders + injects it) and prodstack-api — web FIRST, then api, or all
+  // prodstack.live traffic momentarily collapses onto one bucket. See
+  // middleware/rateLimit.ts + docs/DEMO_MODE.md §6.1.
+  EDGE_PROXY_SECRET: z.string().min(16, 'EDGE_PROXY_SECRET must be at least 16 chars').optional(),
+  // Max concurrent SSE build-log streams a single authenticated user may hold
+  // open at once. Each stream is a long-lived connection that polls Postgres on
+  // an interval, so an unbounded fan-out is an event-loop / DB-pool exhaustion
+  // vector (a demo visitor could otherwise open thousands). Generous enough for
+  // the owner's several tabs; bounds a hostile session. See lib/streamRegistry.ts.
+  MAX_LOG_STREAMS_PER_USER: z.coerce.number().int().positive().default(8),
 
   // Database
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
@@ -168,6 +190,15 @@ const EnvSchema = z.object({
   // build is ~90s; 6× replays it in ~15s so a visitor sees the whole pipeline
   // without a long wait. 1× = real-time fidelity.
   DEMO_REPLAY_SPEED: z.coerce.number().positive().default(6),
+  // Per-SESSION demo resource caps (DoS / DB-exhaustion defense, docs/DEMO_MODE.md
+  // §6.3). DEMO_MAX_ACTIVE bounds the number of demo SESSIONS; these bound what a
+  // SINGLE session can do, so one visitor can't fill Postgres or spawn unbounded
+  // replay timers even if the per-IP rate limiter is evaded — i.e. demo safety
+  // does NOT depend on the rate limiter. Positive ints; generous-for-a-demo
+  // defaults. Total demo footprint is bounded by DEMO_MAX_ACTIVE × these.
+  DEMO_MAX_PROJECTS_PER_USER: z.coerce.number().int().positive().default(10),
+  DEMO_MAX_BUILDS_PER_PROJECT: z.coerce.number().int().positive().default(25),
+  DEMO_MAX_INFLIGHT_BUILDS_PER_USER: z.coerce.number().int().positive().default(3),
 
   // Feature gates
   ENABLE_WORKER: boolFromString(false),

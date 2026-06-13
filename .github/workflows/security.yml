@@ -92,6 +92,8 @@ jobs:
             dockerfile: backend/Dockerfile
           - app: web
             dockerfile: frontend/Dockerfile
+          - app: builder
+            dockerfile: worker/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

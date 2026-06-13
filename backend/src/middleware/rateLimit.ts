@@ -1,3 +1,5 @@
+import { timingSafeEqual } from 'node:crypto';
+
 import rateLimit, { ipKeyGenerator, type RateLimitRequestHandler } from 'express-rate-limit';
 import type { Request, Response } from 'express';
 
@@ -46,16 +48,73 @@ export function makeRateLimiter(opts: {
 }
 
 /**
+ * Constant-time check that a request provably arrived through our OWN
+ * prodstack-web nginx edge, which injects the `X-ProdStack-Edge` shared-secret
+ * header (`proxy_set_header`, so a client-supplied value is overwritten, not
+ * forgeable). Returns true ALSO when no `EDGE_PROXY_SECRET` is configured — then
+ * we fall back to trusting `req.ip` (today's behavior: dev/test and any
+ * not-yet-wired deploy keep working). Returns false ONLY when a secret IS set and
+ * the header is absent/wrong — i.e. a direct hit on the API's own FQDN, where the
+ * X-Forwarded-For chain is attacker-controlled.
+ */
+function arrivedViaTrustedEdge(req: Request): boolean {
+  const secret = env.EDGE_PROXY_SECRET;
+  if (secret === undefined || secret === '') return true;
+  const provided = req.get('x-prodstack-edge');
+  if (typeof provided !== 'string' || provided.length === 0) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(secret);
+  // timingSafeEqual throws on length mismatch — short-circuit first (the length
+  // is not itself secret, and an attacker learns nothing from a length reject).
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * The right-most `X-Forwarded-For` entry — the address Azure Container Apps'
+ * Envoy ingress appended for the TCP peer that actually opened the connection to
+ * it. Envoy ALWAYS appends last, so a caller prepending fake entries cannot move
+ * it: on a direct hit this is the attacker's real IP. Falls back to the socket
+ * address when no XFF is present.
+ */
+function envoyAppendedPeer(req: Request): string {
+  const xff = req.headers['x-forwarded-for'];
+  const raw = Array.isArray(xff) ? xff[xff.length - 1] : xff;
+  if (typeof raw === 'string' && raw.length > 0) {
+    const last = raw.split(',').pop()?.trim();
+    if (last !== undefined && last.length > 0) return last;
+  }
+  return req.socket?.remoteAddress ?? 'unknown';
+}
+
+/**
+ * Spoof-resistant per-IP rate-limit key. The API is reachable by TWO ingress
+ * paths with DIFFERENT real proxy-hop counts: the canonical prodstack.live path
+ * (web-Envoy → nginx → api-Envoy = 3 hops, what `TRUST_PROXY_HOPS` is tuned for)
+ * and a DIRECT hit on the API's own *.azurecontainerapps.io FQDN (api-Envoy =
+ * 1 hop). A fixed `trust proxy = 3` over-trusts the short path, so a direct
+ * caller can PREPEND fake `X-Forwarded-For` entries and thereby control `req.ip`
+ * — a fresh bucket every request, defeating every per-IP limiter. We therefore
+ * key on the resolved client IP (`req.ip`) ONLY when the request provably came
+ * through our edge (the `X-ProdStack-Edge` secret); otherwise we key on the
+ * un-spoofable Envoy-appended peer. IPv6 is normalized to a /56 via
+ * `ipKeyGenerator` in both branches so an attacker can't rotate the host portion.
+ */
+export function ipRateLimitKey(req: Request): string {
+  const ip = arrivedViaTrustedEdge(req) ? (req.ip ?? 'unknown') : envoyAppendedPeer(req);
+  return ipKeyGenerator(ip);
+}
+
+/**
  * Key post-auth limiters by the authenticated user id, falling back to the
- * client IP for the (in practice unreachable — these routes are behind
- * `requireAuth`) anonymous case. The IP fallback goes through
- * `ipKeyGenerator` so IPv6 addresses are normalized to a /56 subnet rather
- * than letting an attacker rotate the host portion for a fresh bucket.
+ * spoof-resistant per-IP key for the (in practice unreachable — these routes are
+ * behind `requireAuth`) anonymous case. {@link ipRateLimitKey} already normalizes
+ * IPv6 to a /56 and ignores a forged X-Forwarded-For on the direct API FQDN.
  */
 export function userOrIpKey(req: Request): string {
   const userId = req.user?.id;
   if (typeof userId === 'string' && userId.length > 0) return `u:${userId}`;
-  return ipKeyGenerator(req.ip ?? '');
+  return ipRateLimitKey(req);
 }
 
 /** Paths the global limiter must never throttle: ACA liveness/readiness probes
@@ -85,6 +144,7 @@ export const globalLimiter: RateLimitRequestHandler = makeRateLimiter({
   max: 300,
   name: 'global',
   skip: (req) => env.NODE_ENV === 'test' || isHealthPath(req),
+  keyGenerator: ipRateLimitKey,
 });
 
 /**
@@ -99,6 +159,7 @@ export const authLimiter: RateLimitRequestHandler = makeRateLimiter({
   windowMs: 15 * 60 * 1000, // 15 min
   max: 40,
   name: 'auth',
+  keyGenerator: ipRateLimitKey,
 });
 
 /**
@@ -120,6 +181,7 @@ export const demoLoginLimiter: RateLimitRequestHandler = makeRateLimiter({
   windowMs: 15 * 60 * 1000, // 15 min
   max: 20,
   name: 'demoLogin',
+  keyGenerator: ipRateLimitKey,
 });
 
 /**
@@ -140,6 +202,7 @@ export const webhookLimiter: RateLimitRequestHandler = makeRateLimiter({
   windowMs: 60 * 1000, // 1 min
   max: 120,
   name: 'webhook',
+  keyGenerator: ipRateLimitKey,
 });
 
 /**

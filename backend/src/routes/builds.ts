@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
+import { logStreamRegistry } from '../lib/streamRegistry.js';
 import { streamLimiter } from '../middleware/rateLimit.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 
@@ -245,6 +246,36 @@ router.get('/:id/logs/stream', streamLimiter, async (req: Request, res: Response
     return;
   }
 
+  // Concurrency cap (DoS / DB-pool / event-loop defense): bound how many
+  // simultaneous log streams ONE user may hold open — each keeps a connection
+  // alive and polls Postgres on an interval. `streamLimiter` caps the OPEN RATE;
+  // this caps the CONCURRENT COUNT (a hostile demo session could otherwise open
+  // thousands). The slot is released in cleanup() when the connection closes.
+  if (!logStreamRegistry.tryAcquire(userId)) {
+    res.setHeader('Retry-After', '5');
+    res.status(429).json({
+      error: 'TOO_MANY_STREAMS',
+      message: 'Too many open log streams. Close one and retry.',
+    });
+    return;
+  }
+
+  // Release the slot exactly once, however the connection ends — normal `done`,
+  // client disconnect, OR a throw during the synchronous setup below (writeHead
+  // on an already-destroyed socket) BEFORE `cleanup`/the close handler are wired.
+  // `res` emits 'close' on every termination (incl. an aborted socket), so this
+  // guarantees the reserved slot can never leak a permanent decrement on an error
+  // path (which would otherwise shrink the user's cap until a process restart).
+  // Idempotent + independent of the timers, so it's safe even if it fires before
+  // they're declared (where `cleanup` would hit a TDZ on pollTimer).
+  let slotReleased = false;
+  const releaseSlot = (): void => {
+    if (slotReleased) return;
+    slotReleased = true;
+    logStreamRegistry.release(userId);
+  };
+  res.on('close', releaseSlot);
+
   // Cursor precedence: `Last-Event-ID` (set automatically by the browser's
   // EventSource on reconnect) overrides the initial `?afterSeq=`. Both are
   // the last `seq` the client already has, so we stream strictly greater.
@@ -286,6 +317,7 @@ router.get('/:id/logs/stream', streamLimiter, async (req: Request, res: Response
     closed = true;
     clearInterval(pollTimer);
     clearInterval(heartbeatTimer);
+    releaseSlot();
     res.end();
   };
 
