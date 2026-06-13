@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # Full history so gitleaks scans every commit, not just the tip — a
           # secret committed then "removed" in a later commit still leaks.
@@ -44,7 +44,7 @@ jobs:
         # Free for public/personal repos; org repos need a GITLEAKS_LICENSE. Fails
         # the job (exit 1) on any finding. Allowlist false positives (e.g. fake
         # test fixtures) in a committed .gitleaks.toml.
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -57,7 +57,7 @@ jobs:
       security-events: write # upload SARIF
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -72,7 +72,7 @@ jobs:
           exit-code: '0' # report-only; set '1' to block PRs on findings
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -96,7 +96,7 @@ jobs:
             dockerfile: worker/Dockerfile
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       # Build context is the repo ROOT for both images (npm workspaces hoist
       # deps) — same as ci.yml's images job and the deploy workflows.
@@ -115,7 +115,7 @@ jobs:
           exit-code: '0' # report-only; set '1' to block PRs on findings
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: trivy-${{ matrix.app }}.sarif
           # Distinct category per image so the two SARIF uploads don't overwrite
