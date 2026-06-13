@@ -84,6 +84,34 @@ describe('requireAuth — expired demo session', () => {
     expect(cookieHeader).toMatch(/Expires=Thu, 01 Jan 1970/);
   });
 
+  it('returns 401 and clears the session cookie when a demo user has a null demoExpiresAt (malformed)', async () => {
+    const app = buildApp();
+    (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'demo_null',
+      githubLogin: 'demo-null789',
+      email: null,
+      avatarUrl: null,
+      isDemo: true,
+      // Malformed: demo-login always sets a TTL, and the reaper keys off it, so a
+      // null demoExpiresAt is a never-expiring, never-reaped demo session — must
+      // fail closed exactly like a past-TTL one.
+      demoExpiresAt: null,
+    });
+
+    const res = await request(app)
+      .get('/auth-only')
+      .set('Cookie', [signedSessionCookie('demo_null')]);
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: 'UNAUTHORIZED' });
+
+    // The malformed demo cookie is cleared so the client stops resending it.
+    const setCookie = res.headers['set-cookie'];
+    const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : (setCookie ?? '');
+    expect(cookieHeader).toMatch(/^session=/m);
+    expect(cookieHeader).toMatch(/Expires=Thu, 01 Jan 1970/);
+  });
+
   it('still authenticates a demo user whose demoExpiresAt is in the FUTURE', async () => {
     const app = buildApp();
     (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({

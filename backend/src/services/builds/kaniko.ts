@@ -80,7 +80,7 @@ export async function runKaniko(opts: KanikoOptions): Promise<KanikoResult> {
  * kaniko build context — a `COPY . .` in the user's Dockerfile would then
  * bake the registry password into the published image.
  */
-function assertAuthDirIsolated(contextDir: string, authDir: string): void {
+export function assertAuthDirIsolated(contextDir: string, authDir: string): void {
   const ctx = path.resolve(contextDir);
   const auth = path.resolve(authDir);
   const rel = path.relative(ctx, auth);
@@ -98,7 +98,7 @@ function assertAuthDirIsolated(contextDir: string, authDir: string): void {
  *
  * `authDir` is a sibling of the kaniko context, never inside it.
  */
-async function writeDockerConfig(authDir: string): Promise<string> {
+export async function writeDockerConfig(authDir: string): Promise<string> {
   const dir = path.join(authDir, '.docker');
   await mkdir(dir, { recursive: true, mode: 0o700 });
 
