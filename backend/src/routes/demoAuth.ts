@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 
 import { Prisma } from '@prisma/client';
 import { Router, type Request } from 'express';
@@ -49,9 +49,13 @@ const DEMO_CAP_LOCK_KEY = 728_412;
 class DemoAtCapacityError extends Error {}
 
 /** Reserved negative band for synthetic demo githubUserIds: `-1 … -2_000_000_000`.
- *  Real GitHub ids are positive, so this band can never collide with one. */
+ *  Real GitHub ids are positive, so this band can never collide with one. Uses
+ *  `crypto.randomInt` (CSPRNG) rather than `Math.random()`: the id only needs to
+ *  be unique, not unpredictable, but a CSPRNG keeps it off the "insecure
+ *  randomness in a security context" radar at zero cost (`randomInt(2e9)` is well
+ *  under the 2^48 ceiling and synchronous). */
 function randomDemoGithubUserId(): number {
-  return -(Math.floor(Math.random() * 2_000_000_000) + 1);
+  return -(randomInt(2_000_000_000) + 1);
 }
 
 router.get('/demo-login', demoLoginLimiter, async (req: Request, res, next) => {
