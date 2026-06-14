@@ -17,7 +17,6 @@ import { createHmac } from 'node:crypto';
 
 import cookieParser from 'cookie-parser';
 import express from 'express';
-import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -30,10 +29,10 @@ vi.mock('../db.js', () => ({
 }));
 
 import { prisma } from '../db.js';
+import { signSession } from '../lib/jwt.js';
 import { requireAuth } from './requireAuth.js';
 
 const COOKIE_SECRET = process.env.COOKIE_SECRET!;
-const JWT_SECRET = process.env.JWT_SECRET!;
 
 function buildApp() {
   const app = express();
@@ -46,10 +45,8 @@ function buildApp() {
 }
 
 function signedSessionCookie(userId: string): string {
-  const token = jwt.sign({ sub: userId }, JWT_SECRET, {
-    algorithm: 'HS256',
-    expiresIn: '7d',
-  });
+  // Production signer → token carries the iss/aud verifySession now requires.
+  const token = signSession(userId);
   return `session=s:${signCookieValue(token, COOKIE_SECRET)}`;
 }
 

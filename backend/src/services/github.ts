@@ -259,7 +259,12 @@ export async function listRepoSignals(
   let djangoWsgiModule: string | undefined;
   if (hasManagePy) {
     // Match `<pkg>/wsgi.py` one level deep, mirroring findDjangoWsgiModule.
-    const wsgi = paths.find((p) => /^[^/]+\/wsgi\.py$/.test(p));
+    // The package segment must be a plain Python identifier: it is interpolated
+    // verbatim into the generated Dockerfile's gunicorn CMD, so a name with
+    // quotes/`$`/backticks/spaces could inject Dockerfile directives. Reject
+    // anything else and fall back to the `manage.py runserver` template — same
+    // guard as resolveDockerfile.findDjangoWsgiModule so preview == real build.
+    const wsgi = paths.find((p) => /^[A-Za-z_][A-Za-z0-9_]*\/wsgi\.py$/.test(p));
     if (wsgi) djangoWsgiModule = `${wsgi.slice(0, wsgi.indexOf('/'))}.wsgi`;
   }
 

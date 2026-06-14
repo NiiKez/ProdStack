@@ -59,6 +59,7 @@ const mocks = vi.hoisted(() => ({
   buildFindUniqueOrThrow: vi.fn(),
   buildFindUnique: vi.fn(),
   buildUpdate: vi.fn(),
+  buildUpdateMany: vi.fn(),
   logLineCreate: vi.fn(),
   deploymentUpdateMany: vi.fn(),
   deploymentCreate: vi.fn(),
@@ -80,6 +81,7 @@ vi.mock('../../db.js', () => ({
       findUniqueOrThrow: mocks.buildFindUniqueOrThrow,
       findUnique: mocks.buildFindUnique,
       update: mocks.buildUpdate,
+      updateMany: mocks.buildUpdateMany,
     },
     logLine: { create: mocks.logLineCreate },
     deployment: { updateMany: mocks.deploymentUpdateMany, create: mocks.deploymentCreate },
@@ -115,8 +117,15 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 const { runBuild } = await import('./runBuild.js');
 
-/** A fake `git` child process that immediately closes with the given exit code. */
-function fakeGitChild(exitCode = 0): EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void } {
+/**
+ * A fake `git` child process that immediately closes with the given exit code.
+ * Optionally emits a single stdout line first (used to drive `git rev-parse HEAD`
+ * to a specific sha for the wrong-commit integrity guard).
+ */
+function fakeGitChild(
+  exitCode = 0,
+  stdoutLine?: string,
+): EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void } {
   const child = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter;
     stderr: EventEmitter;
@@ -125,9 +134,12 @@ function fakeGitChild(exitCode = 0): EventEmitter & { stdout: EventEmitter; stde
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.kill = vi.fn();
-  // Emit `close` on the next tick so the listeners registered synchronously by
+  // Emit on the next tick so the listeners registered synchronously by
   // spawnLogged are attached before we fire.
-  setImmediate(() => child.emit('close', exitCode));
+  setImmediate(() => {
+    if (stdoutLine !== undefined) child.stdout.emit('data', `${stdoutLine}\n`);
+    child.emit('close', exitCode);
+  });
   return child;
 }
 
@@ -172,6 +184,9 @@ beforeEach(() => {
   mocks.buildFindUniqueOrThrow.mockResolvedValue(buildRow());
   mocks.buildFindUnique.mockResolvedValue({ cancelRequested: false });
   mocks.buildUpdate.mockResolvedValue({});
+  // The finally-block terminal reconcile is a no-op on these paths (the catch
+  // already writes FAILED) — it must find 0 non-terminal rows to flip.
+  mocks.buildUpdateMany.mockResolvedValue({ count: 0 });
   mocks.logLineCreate.mockResolvedValue({});
   mocks.loadDecryptedEnvVars.mockResolvedValue([]);
   mocks.decrypt.mockReturnValue('ghp_faketoken');
@@ -234,5 +249,108 @@ describe('runBuild FAILURE path (real kaniko-mode orchestration)', () => {
     // Timeout is a failure — no deploy.
     expect(mocks.updateContainerApp).not.toHaveBeenCalled();
     expect(mocks.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('runBuild demo-isolation backstop (docs/DEMO_MODE.md §4 layer 5)', () => {
+  it('refuses a demo build before any clone/kaniko/deploy and records it FAILED', async () => {
+    // The real worker must NEVER execute a demo build. Even if a demo row reached
+    // runBuild (a pre-claim bug, a webhook for a demo project, a future caller),
+    // it must fail closed — never clone a repo, push to ACR, or roll a real
+    // Container App under a sandboxed session.
+    mocks.buildFindUniqueOrThrow.mockResolvedValue(buildRow({ isDemo: true }));
+
+    await runBuild('build-1');
+
+    const data = terminalUpdate();
+    expect(data.status).toBe('FAILED');
+    expect(data.errorMessage).toMatch(/demo build/i);
+
+    // No external side effect whatsoever.
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(mocks.runKaniko).not.toHaveBeenCalled();
+    expect(mocks.updateContainerApp).not.toHaveBeenCalled();
+    expect(mocks.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('runBuild wrong-commit integrity guard', () => {
+  it('FAILS the build when the cloned HEAD does not match the requested commit', async () => {
+    // `--depth 1` clones the branch HEAD; if HEAD advanced and the exact commit
+    // could not be fetched, the build must NOT silently ship the wrong source.
+    // Drive `git rev-parse HEAD` to a sha that disagrees with build.commitSha.
+    const wrongHead = 'f'.repeat(40); // disjoint from 'abc1234def5678'
+    mocks.spawn.mockImplementation((_cmd: string, args: string[]) =>
+      Array.isArray(args) && args.includes('rev-parse')
+        ? fakeGitChild(0, wrongHead)
+        : fakeGitChild(0),
+    );
+
+    await runBuild('build-1');
+
+    // Kaniko must never run — we bailed during clone integrity verification.
+    expect(mocks.runKaniko).not.toHaveBeenCalled();
+    expect(mocks.updateContainerApp).not.toHaveBeenCalled();
+
+    const data = terminalUpdate();
+    expect(data.status).toBe('FAILED');
+    expect(data.errorMessage).toMatch(/does not match requested commit/i);
+  });
+
+  it('proceeds normally when rev-parse confirms the requested commit', async () => {
+    // build.commitSha is the short 'abc1234def5678'; a full HEAD that begins with
+    // it is a match (short sha is a prefix of the resolved 40-char sha).
+    const matchingHead = 'abc1234def5678' + '0'.repeat(40 - 'abc1234def5678'.length);
+    mocks.spawn.mockImplementation((_cmd: string, args: string[]) =>
+      Array.isArray(args) && args.includes('rev-parse')
+        ? fakeGitChild(0, matchingHead)
+        : fakeGitChild(0),
+    );
+    mocks.runKaniko.mockResolvedValue({ exitCode: 1, timedOut: false });
+
+    await runBuild('build-1');
+
+    // It got PAST the integrity check into the build (kaniko ran) — the guard
+    // does not false-positive on a matching short sha.
+    expect(mocks.runKaniko).toHaveBeenCalledTimes(1);
+    const data = terminalUpdate();
+    // Failed at kaniko (as configured), NOT at the integrity guard.
+    expect(data.errorMessage).toContain('kaniko exited with code 1');
+  });
+});
+
+describe('runBuild terminal-state safety net (stuck in-flight reconcile)', () => {
+  it('force-fails the build in the finally block when the catch status write itself throws', async () => {
+    // The catch writes FAILED via prisma.build.update — but if THAT write throws
+    // (a transient DB error), the row would be left in an in-flight status with
+    // its claim held: the KEDA `builds-pending` count never drops, the billed
+    // builder stays warm, and the build is silently lost. The finally-block
+    // reconcile must force it terminal via updateMany and clear the claim.
+    mocks.runKaniko.mockResolvedValue({ exitCode: 1, timedOut: false });
+    // Let the in-flight writes (CLONING/BUILDING) succeed, but make the terminal
+    // FAILED write throw, simulating a DB blip exactly at the worst moment.
+    mocks.buildUpdate.mockImplementation(
+      async (arg: { data?: { status?: string } }) => {
+        if (arg?.data?.status === 'FAILED') throw new Error('db blip on terminal write');
+        return {};
+      },
+    );
+    mocks.buildUpdateMany.mockResolvedValue({ count: 1 });
+
+    // The catch's failed write re-throws past the finally; the worker backstop
+    // would log it — here we just assert it rejected AND that the net engaged.
+    await expect(runBuild('build-1')).rejects.toThrow(/db blip/);
+
+    expect(mocks.buildUpdateMany).toHaveBeenCalledTimes(1);
+    const arg = mocks.buildUpdateMany.mock.calls[0]![0] as {
+      where: { id: string; status: { in: string[] } };
+      data: { status: string; claimedAt: null; claimedBy: null };
+    };
+    expect(arg.where.id).toBe('build-1');
+    expect(arg.where.status.in).toContain('BUILDING');
+    expect(arg.data.status).toBe('FAILED');
+    // Clears the claim so the row can never look "claimed by a dead worker".
+    expect(arg.data.claimedAt).toBeNull();
+    expect(arg.data.claimedBy).toBeNull();
   });
 });

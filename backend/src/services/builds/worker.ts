@@ -12,7 +12,7 @@
  */
 import { env } from '../../env.js';
 import { logger } from '../../lib/logger.js';
-import { claimNextBuild, recoverOwnClaims } from './queue.js';
+import { claimNextBuild, failExhaustedBuilds, recoverOwnClaims } from './queue.js';
 import { runBuild } from './runBuild.js';
 
 export interface WorkerHandle {
@@ -72,7 +72,14 @@ export function startWorker(): WorkerHandle {
 
       let claimed: Awaited<ReturnType<typeof claimNextBuild>> = null;
       try {
-        claimed = await claimNextBuild(env.WORKER_ID);
+        // Drain poison pills first: a build that has burned through its claim
+        // budget (kept crashing the worker) is failed here so it stops being
+        // re-claimed AND stops keeping the KEDA `builds-pending` count > 0.
+        const reaped = await failExhaustedBuilds(env.BUILD_MAX_ATTEMPTS);
+        if (reaped > 0) {
+          log.warn({ reaped }, 'failed builds that exhausted their attempt budget');
+        }
+        claimed = await claimNextBuild(env.WORKER_ID, env.BUILD_MAX_ATTEMPTS);
       } catch (err) {
         log.error({ err }, 'queue poll failed');
       }

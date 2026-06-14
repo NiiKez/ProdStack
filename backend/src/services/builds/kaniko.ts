@@ -185,6 +185,11 @@ function spawnAndStream(
       timedOut = true;
       child.kill('SIGKILL');
     }, opts.timeoutMs);
+    // Don't let the hard-timeout timer keep the (single-use) worker process
+    // alive past a clean exit — mirrors `spawnLogged` in runBuild.ts. Without
+    // this, a path where `close`/`error` never fires would leave a live
+    // 10-minute timer pinning the event loop and delaying the worker's self-exit.
+    timer.unref?.();
 
     // On abort, SIGTERM the child and escalate to SIGKILL if it hasn't exited
     // within the grace period. kaniko can be unresponsive to SIGTERM mid-
@@ -214,6 +219,10 @@ function spawnAndStream(
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       opts.signal?.removeEventListener('abort', onAbort);
+      // Best-effort: if the process half-spawned (e.g. EAGAIN/ENOMEM under the
+      // builder's memory pressure) make sure it can't linger. A no-op when there
+      // is no live child (spawn ENOENT).
+      child.kill('SIGKILL');
       reject(err);
     });
 

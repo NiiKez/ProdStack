@@ -78,10 +78,16 @@ const ALL_TYPES = new Set<string>([
   'project.deleted',
 ]);
 
+// cuid-ish project-id shape — mirrors deployments.ts's PROJECT_ID_RE so the
+// `projectId` filter only ever carries a well-formed id into the (user-scoped)
+// query. Defense-in-depth / input hygiene: the DB query is already userId-scoped
+// so a foreign id never leaked, but bounding the shape keeps the contract tight.
+const PROJECT_ID_RE = /^[a-z0-9]{1,40}$/;
+
 const querySchema = z.object({
   // Opaque keyset cursor from a previous page's `nextCursor`.
   cursor: z.string().min(1).max(200).optional(),
-  projectId: z.string().min(1).max(40).optional(),
+  projectId: z.string().regex(PROJECT_ID_RE).optional(),
   // Comma-separated ActivityType values to narrow the feed.
   type: z.string().max(300).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(30),

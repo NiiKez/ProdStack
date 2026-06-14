@@ -23,12 +23,14 @@ vi.mock('../../db.js', () => ({
   prisma: { build: { updateMany: mocks.buildUpdateMany }, $queryRaw: mocks.queryRaw },
 }));
 
-const { claimNextBuild, recoverOwnClaims } = await import('./queue.js');
+const { claimNextBuild, failExhaustedBuilds, recoverOwnClaims } = await import('./queue.js');
 
 interface WhereArg {
   status: unknown;
   cancelRequested?: boolean;
   isDemo?: boolean;
+  claimedAt?: unknown;
+  attempts?: unknown;
 }
 interface UpdateManyArg {
   where: WhereArg;
@@ -46,7 +48,7 @@ describe('claimNextBuild', () => {
     // build is already invisible via `claimedAt IS NULL`, but the worker's claim
     // query must also carry the explicit `isDemo = false` guard.
     mocks.queryRaw.mockResolvedValue([]);
-    await claimNextBuild('worker-1');
+    await claimNextBuild('worker-1', 3);
 
     expect(mocks.queryRaw).toHaveBeenCalledTimes(1);
     const sql = mocks.queryRaw.mock.calls[0]![0] as Prisma.Sql;
@@ -56,6 +58,43 @@ describe('claimNextBuild', () => {
     expect(text).toContain('"isDemo" = false');
     expect(text).toContain("status = 'QUEUED'");
     expect(text).toContain('"claimedAt" IS NULL');
+  });
+
+  it('caps re-claims with an attempts < maxAttempts guard (poison-pill)', async () => {
+    // A build that keeps crashing the worker before it can record a terminal
+    // status must not be re-claimed forever — claimNextBuild excludes any row
+    // whose attempts have reached the cap. The cap is a bound *parameter*, so it
+    // shows up as a SQL placeholder with `maxAttempts` in the values array.
+    mocks.queryRaw.mockResolvedValue([]);
+    await claimNextBuild('worker-1', 3);
+
+    const sql = mocks.queryRaw.mock.calls[0]![0] as Prisma.Sql;
+    expect(sql.strings.join('')).toContain('"attempts" <');
+    // The worker id and the attempts cap are the two bound values.
+    expect(sql.values).toContain(3);
+  });
+});
+
+describe('failExhaustedBuilds', () => {
+  it('marks unclaimed, non-demo QUEUED builds at/over the attempts cap as FAILED', async () => {
+    mocks.buildUpdateMany.mockResolvedValue({ count: 2 });
+
+    const reaped = await failExhaustedBuilds(3);
+    expect(reaped).toBe(2);
+
+    expect(mocks.buildUpdateMany).toHaveBeenCalledTimes(1);
+    const arg = mocks.buildUpdateMany.mock.calls[0]![0] as UpdateManyArg & {
+      where: WhereArg;
+      data: { status?: string; errorMessage?: string };
+    };
+    // Only QUEUED + unclaimed + non-demo + attempts >= cap rows are reaped, and
+    // they go terminal (FAILED) so the KEDA `builds-pending` count can drop to 0.
+    expect(arg.where.status).toBe('QUEUED');
+    expect(arg.where.claimedAt).toBeNull();
+    expect(arg.where.isDemo).toBe(false);
+    expect(arg.where.attempts).toEqual({ gte: 3 });
+    expect(arg.data.status).toBe('FAILED');
+    expect(arg.data.errorMessage).toMatch(/3 attempts/);
   });
 });
 

@@ -49,9 +49,27 @@ jobs:
           languages: ${{ matrix.language }}
           # No compiled language here, so CodeQL needs no build step.
           build-mode: none
-          # Broader security rule set than the default suite (security-only, no
-          # code-quality noise).
-          queries: security-extended
+          # Inline config (single source of truth): the broader security suite
+          # plus path exclusions.
+          #   - queries: security-extended — security-only, no code-quality noise.
+          #   - paths-ignore — exclude test files. A unit/integration test mounts
+          #     bespoke Express routes and fixtures to exercise middleware in
+          #     isolation (e.g. requireAuth.test.ts's
+          #     `app.get('/auth-only', requireAuth, …)`), which trips production
+          #     web-security queries such as js/missing-rate-limiting even though
+          #     the route is never a real HTTP surface. Test code is not a deployed
+          #     attack surface; every NON-test (production) file is still fully
+          #     analyzed, so this drops a class of false positives without reducing
+          #     real coverage.
+          config: |
+            queries:
+              - uses: security-extended
+            paths-ignore:
+              - '**/*.test.ts'
+              - '**/*.test.tsx'
+              - '**/*.spec.ts'
+              - '**/*.spec.tsx'
+              - frontend/e2e/**
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2

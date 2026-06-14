@@ -152,6 +152,19 @@ const CANCEL_POLL_MS = 2000;
 /** Grace period after an abort's SIGTERM before escalating a child to SIGKILL. */
 const ABORT_KILL_GRACE_MS = 10_000;
 
+/**
+ * Statuses a build can sit in while it is still (or supposedly) being worked.
+ * Used by the `finally` safety-net to detect a build the catch failed to move to
+ * a terminal state. Mirrors the KEDA `builds-pending` in-flight set + QUEUED.
+ */
+const NON_TERMINAL_STATUSES: BuildStatus[] = [
+  'QUEUED',
+  'CLONING',
+  'BUILDING',
+  'PUSHING',
+  'DEPLOYING',
+];
+
 class LogSink {
   private nextSeq = 1;
   private dropped = false;
@@ -288,6 +301,17 @@ export async function runBuild(buildId: string): Promise<void> {
   cancelTimer.unref?.();
 
   try {
+    // Demo-isolation backstop — the fifth, independent layer (docs/DEMO_MODE.md
+    // §4). The real worker must NEVER execute a demo build: `claimNextBuild`
+    // already filters `isDemo=false` and demo builds are created pre-claimed, but
+    // assert here too so that a demo row reaching this function by ANY route (a
+    // future caller, a pre-claim bug, a webhook for a demo project) fails closed
+    // — recorded FAILED by the catch below — instead of cloning a repo, pushing
+    // to ACR, and rolling a real Container App under a sandboxed session.
+    if (build.isDemo) {
+      throw new Error('refusing to run a demo build on the real worker (isolation backstop)');
+    }
+
     await mkdir(workDir, { recursive: true, mode: 0o700 });
     await mkdir(authDir, { recursive: true, mode: 0o700 });
 
@@ -331,6 +355,39 @@ export async function runBuild(buildId: string): Promise<void> {
     // git's final fatal: …, etc.) race with `prisma.$disconnect()` in
     // single-use mode and the UI shows truncated logs.
     await ctx.logs.flush();
+
+    // Safety net: guarantee the build reached a terminal state. The catch above
+    // already writes FAILED/CANCELLED — but if THAT status write itself threw
+    // (a transient DB error on the wide-open shared Postgres), the row would be
+    // left in an in-flight status with its claim still held. That is a real cost
+    // + correctness bug: the KEDA `builds-pending` scale rule keeps counting the
+    // row, so the 2 vCPU / 4 GiB builder stays billed-warm until the boot
+    // stale-reaper catches it (up to 2× BUILD_TIMEOUT_MS later), and the build is
+    // silently lost (the worker only ever re-claims QUEUED rows, never a stuck
+    // BUILDING one). A conditional updateMany guarded on a non-terminal status is
+    // a no-op on every normal path (status already READY/FAILED/CANCELLED); it
+    // also clears the claim so the row can never look "claimed by a dead worker".
+    try {
+      const reconciled = await prisma.build.updateMany({
+        where: { id: buildId, status: { in: NON_TERMINAL_STATUSES } },
+        data: {
+          status: 'FAILED',
+          finishedAt: new Date(),
+          errorMessage: 'build did not reach a terminal state (status write failed)',
+          claimedAt: null,
+          claimedBy: null,
+        },
+      });
+      if (reconciled.count > 0) {
+        logger.error(
+          { buildId },
+          'build was left in a non-terminal state after the runner finished — force-failed it',
+        );
+      }
+    } catch (err) {
+      logger.error({ err, buildId }, 'failed to reconcile build to a terminal state');
+    }
+
     await rm(workDir, { recursive: true, force: true }).catch((err: unknown) => {
       logger.warn({ err, workDir }, 'failed to clean up build work dir');
     });
@@ -507,7 +564,13 @@ async function cloneRepo(opts: {
     await spawnLogged(
       'git',
       cloneArgs({ noCredHelper, branch: opts.branch, url, intoDir: opts.intoDir }),
-      { onLine: gitOnLine, redact: redactSecrets, env: authGitEnv, signal: opts.signal },
+      {
+        onLine: gitOnLine,
+        redact: redactSecrets,
+        env: authGitEnv,
+        signal: opts.signal,
+        timeoutMs: env.GIT_TIMEOUT_MS,
+      },
     );
   } catch (err) {
     // Don't retry anonymously on a cancel — the user asked to stop.
@@ -526,7 +589,13 @@ async function cloneRepo(opts: {
     await spawnLogged(
       'git',
       cloneArgs({ noCredHelper, branch: opts.branch, url, intoDir: opts.intoDir }),
-      { onLine: gitOnLine, redact: redactSecrets, env: baseGitEnv, signal: opts.signal },
+      {
+        onLine: gitOnLine,
+        redact: redactSecrets,
+        env: baseGitEnv,
+        signal: opts.signal,
+        timeoutMs: env.GIT_TIMEOUT_MS,
+      },
     );
   }
 
@@ -535,10 +604,18 @@ async function cloneRepo(opts: {
   await spawnLogged(
     'git',
     fetchArgs({ intoDir: opts.intoDir, noCredHelper, commitSha: opts.commitSha }),
-    { onLine: gitOnLine, redact: redactSecrets, env: authGitEnv, signal: opts.signal },
+    {
+      onLine: gitOnLine,
+      redact: redactSecrets,
+      env: authGitEnv,
+      signal: opts.signal,
+      timeoutMs: env.GIT_TIMEOUT_MS,
+    },
   ).catch(() => {
     // Older git servers reject single-sha fetch; the shallow clone above is
-    // good enough when HEAD hasn't moved. Continue.
+    // good enough when HEAD hasn't moved. Continue. (A timeout here is bounded
+    // by GIT_TIMEOUT_MS rather than hanging, then falls through to the shallow
+    // HEAD too.)
   });
   if (opts.signal?.aborted) throw new Error('cancelled');
   await spawnLogged('git', checkoutArgs({ intoDir: opts.intoDir, commitSha: opts.commitSha }), {
@@ -546,10 +623,51 @@ async function cloneRepo(opts: {
     redact: redactSecrets,
     env: baseGitEnv,
     signal: opts.signal,
+    timeoutMs: env.GIT_TIMEOUT_MS,
   }).catch(() => {
     // Same fallback — if checkout fails the shallow HEAD is what we'll build.
   });
   if (opts.signal?.aborted) throw new Error('cancelled');
+
+  // Integrity guard: confirm the working tree is actually AT the requested
+  // commit. `--depth 1` clones the branch HEAD; if HEAD advanced after the
+  // webhook fired, the fetch + checkout above are what pin the exact SHA — but
+  // both swallow their errors (older git servers reject a single-SHA fetch).
+  // Without this check a failed fetch+checkout would silently build the *wrong*
+  // commit while recording it under `build.commitSha`, so the deployed image
+  // would lie about its source — a subtle integrity hole. Verify HEAD and fail
+  // closed on a CONFIRMED mismatch; if rev-parse can't produce a sha we don't
+  // block the build (no regression over the prior "build the shallow HEAD"
+  // behavior). The rev-parse spawn carries no secrets — anonymous, off-network.
+  let headSha = '';
+  await spawnLogged('git', ['-C', opts.intoDir, 'rev-parse', 'HEAD'], {
+    onLine: (line) => {
+      const t = line.trim();
+      if (/^[0-9a-f]{40,64}$/.test(t)) headSha = t;
+    },
+    redact: redactSecrets,
+    env: baseGitEnv,
+    signal: opts.signal,
+    timeoutMs: env.GIT_TIMEOUT_MS,
+  }).catch(() => {
+    // rev-parse itself failed (unusual) — don't fail the build on the integrity
+    // probe; worst case is the pre-existing "build the shallow HEAD" behavior.
+  });
+  if (opts.signal?.aborted) throw new Error('cancelled');
+  // A short requested SHA is a prefix of the full 40-char HEAD; the symmetric
+  // startsWith also covers an equal/longer requested SHA. Only a definite
+  // mismatch (HEAD resolved AND neither value is a prefix of the other) is fatal.
+  if (
+    headSha.length > 0 &&
+    !headSha.startsWith(opts.commitSha) &&
+    !opts.commitSha.startsWith(headSha)
+  ) {
+    throw new Error(
+      `repository HEAD ${headSha.slice(0, 12)} does not match requested commit ` +
+        `${opts.commitSha.slice(0, 12)} — the branch advanced and the exact commit could ` +
+        `not be fetched from a shallow clone. Refusing to build the wrong source.`,
+    );
+  }
 }
 
 /** base64(`x-access-token:<token>`) — the credential blob for HTTP Basic auth. */
@@ -593,7 +711,24 @@ export function authConfigEnv(url: string, headerValue: string): NodeJS.ProcessE
   return env;
 }
 
-function spawnLogged(
+/**
+ * Spawn a child, stream its stdout/stderr line-by-line (redacting secrets),
+ * and resolve on a 0 exit / reject otherwise. Two independent kill paths:
+ *
+ *  - `timeoutMs` — a hard wall-clock deadline. A git server can accept the TCP
+ *    connection then stall indefinitely (slow-loris on smart-HTTP, pathological
+ *    pack data); the cooperative-cancel path below only fires on a *user* cancel,
+ *    so without this a hung git phase would wedge the single-replica worker
+ *    forever and block the whole build queue. On expiry the child is SIGKILLed
+ *    and the promise rejects with a `timed out` error (distinct from a non-zero
+ *    exit, so the caller/log shows the real cause). Mirrors {@link runKaniko}.
+ *  - `signal` — cooperative cancel (SIGTERM, escalating to SIGKILL after a grace
+ *    period if the child ignores it).
+ *
+ * Exported for unit testing (the timeout path is exercised against a real
+ * long-running child in runBuild.timeout.test.ts).
+ */
+export function spawnLogged(
   command: string,
   args: string[],
   opts: {
@@ -602,6 +737,8 @@ function spawnLogged(
     redact: string | string[];
     env?: NodeJS.ProcessEnv;
     signal?: AbortSignal;
+    /** Hard wall-clock cap; SIGKILL + reject on expiry. Omit to disable. */
+    timeoutMs?: number;
   },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -609,6 +746,20 @@ function spawnLogged(
       stdio: ['ignore', 'pipe', 'pipe'],
       env: opts.env,
     });
+
+    // Hard timeout: SIGKILL outright (not SIGTERM) — a stalled git over a dead
+    // connection may never reap a graceful signal, and we want the worker slot
+    // back deterministically. `timedOut` makes the `close` handler report the
+    // timeout rather than a misleading "killed by signal" exit code.
+    let timedOut = false;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    if (opts.timeoutMs !== undefined) {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, opts.timeoutMs);
+      timeoutTimer.unref?.();
+    }
 
     // Cooperative cancel: SIGTERM the child if the build is being cancelled,
     // escalating to SIGKILL if it doesn't exit within the grace period.
@@ -626,6 +777,7 @@ function spawnLogged(
       }
     }
     const detach = (): void => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       if (killTimer) clearTimeout(killTimer);
       opts.signal?.removeEventListener('abort', onAbort);
     };
@@ -650,6 +802,10 @@ function spawnLogged(
       detach();
       const tail = buffer.trim();
       if (tail.length > 0) opts.onLine(redact(tail, opts.redact));
+      if (timedOut) {
+        reject(new Error(`${command} ${args[0] ?? ''} timed out after ${opts.timeoutMs}ms`));
+        return;
+      }
       if (code === 0) resolve();
       else reject(new Error(`${command} ${args[0] ?? ''} exited with code ${code}`));
     });

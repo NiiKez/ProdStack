@@ -94,6 +94,15 @@ async function findDjangoWsgiModule(repoDir: string, rootEntries: string[]): Pro
   for (const entry of rootEntries) {
     // Skip obvious non-package dirs to keep the scan cheap.
     if (entry.startsWith('.') || entry === 'node_modules' || entry === 'venv') continue;
+    // Security: this directory name is interpolated verbatim into the GENERATED
+    // Dockerfile's gunicorn CMD (`<entry>.wsgi:application`). The repo controls
+    // its own directory names, and a POSIX name may contain quotes / `$` /
+    // backticks / spaces / newlines — which could break out of the JSON-array
+    // CMD string and inject arbitrary Dockerfile directives into the otherwise
+    // trusted generated build recipe. A Python package (the only thing that can
+    // legitimately be a wsgi module) must be a plain identifier, so reject
+    // anything else and fall back to the `manage.py runserver` template.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry)) continue;
     if (await fileExists(path.join(repoDir, entry, 'wsgi.py'))) {
       return `${entry}.wsgi`;
     }

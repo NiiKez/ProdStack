@@ -240,7 +240,20 @@ router.get('/:id/logs/stream', streamLimiter, async (req: Request, res: Response
     return;
   }
 
-  const build = await findOwnedBuild(buildId, userId);
+  // Guard the only `await` that runs BEFORE `res.writeHead`. This handler is
+  // async but takes no `next`, and Express 4 does not route an async-handler
+  // rejection to the error middleware — so a transient DB error here (the shared
+  // Postgres is reachably flaky) would surface as an unhandledRejection and leave
+  // the client socket hanging open until it times out, instead of a clean 500.
+  // No slot/timer is held yet, so a plain 500 is the complete cleanup.
+  let build: Awaited<ReturnType<typeof findOwnedBuild>>;
+  try {
+    build = await findOwnedBuild(buildId, userId);
+  } catch (err) {
+    logger.warn({ err, buildId }, 'sse stream setup failed');
+    res.status(500).json({ error: 'INTERNAL' });
+    return;
+  }
   if (build === null) {
     res.status(404).json({ error: 'BUILD_NOT_FOUND' });
     return;
@@ -342,8 +355,17 @@ router.get('/:id/logs/stream', streamLimiter, async (req: Request, res: Response
     return sent;
   };
 
+  // Reentrancy guard: `poll` is async and a slow drain (large build / DB latency
+  // on the shared Postgres) can outlast STREAM_POLL_MS. Without this, the interval
+  // would fire a second `poll` while the first is still in flight; the two share
+  // the closure's `cursor`/`lastStatus`/`terminalSeen`, so overlapping runs would
+  // double-send log rows (both read the same cursor before either advances it) and
+  // race the terminal-state machine. The flag makes any tick that overlaps an
+  // in-flight poll a no-op.
+  let polling = false;
   const poll = async (): Promise<void> => {
-    if (closed) return;
+    if (closed || polling) return;
+    polling = true;
     try {
       // `lastStatus === null` only on the very first poll (the prime call).
       const isFirstPoll = lastStatus === null;
@@ -391,13 +413,27 @@ router.get('/:id/logs/stream', streamLimiter, async (req: Request, res: Response
       }
     } catch (err) {
       logger.warn({ err, buildId }, 'sse poll failed');
+    } finally {
+      polling = false;
     }
   };
 
   const pollTimer = setInterval(() => void poll(), STREAM_POLL_MS);
   const heartbeatTimer = setInterval(() => write(':hb\n\n'), STREAM_HEARTBEAT_MS);
 
+  // Tear down on EVERY termination path. `cleanup` clears both interval timers,
+  // so it MUST run whether the *request* stream closes (client FIN after the GET)
+  // or the *response* stream closes (an aborted/RST socket, an upstream Envoy/nginx
+  // idle reset, or an HTTP/2 stream reset). In Express 4 those are distinct events
+  // and a response-side abort does not reliably fire `req`'s 'close' — so wiring
+  // cleanup to `req` alone would orphan the 1s `pollTimer` (two Postgres queries
+  // per tick) and the heartbeat writer FOREVER on this single, never-restarting
+  // replica: a slow-burn DB/timer leak trivially triggered by opening then RST-ing
+  // streams. `cleanup` is idempotent (the `closed` flag), so firing on both is
+  // safe. Wired here, after the timers are declared, to avoid a TDZ on `pollTimer`
+  // (the early `res.on('close', releaseSlot)` covers the pre-timer setup window).
   req.on('close', cleanup);
+  res.on('close', cleanup);
 
   // Prime immediately so a client opening on an already-finished build gets
   // the full replay + `done` without waiting a poll interval.

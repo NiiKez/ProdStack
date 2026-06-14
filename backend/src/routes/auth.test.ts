@@ -15,7 +15,6 @@ import { createHmac } from 'node:crypto';
 
 import cookieParser from 'cookie-parser';
 import express from 'express';
-import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,12 +38,13 @@ vi.mock('../services/github.js', () => ({
 }));
 
 import { prisma } from '../db.js';
+import { signSession } from '../lib/jwt.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
+import { exchangeCodeForToken, fetchGithubProfile } from '../services/github.js';
 import authRouter from './auth.js';
 
 const COOKIE_SECRET = process.env.COOKIE_SECRET!;
-const JWT_SECRET = process.env.JWT_SECRET!;
 
 function buildApp() {
   const app = express();
@@ -86,6 +86,61 @@ describe('GET /api/auth/github/callback', () => {
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: 'OAUTH_STATE_MISMATCH' });
+  });
+});
+
+describe('GET /api/auth/github/callback — state is single-use', () => {
+  const mockExchange = exchangeCodeForToken as ReturnType<typeof vi.fn>;
+  const mockProfile = fetchGithubProfile as ReturnType<typeof vi.fn>;
+  const mockUpsert = prisma.user.upsert as ReturnType<typeof vi.fn>;
+
+  function joinSetCookie(res: { headers: Record<string, unknown> }): string {
+    const h = res.headers['set-cookie'];
+    return Array.isArray(h) ? h.join('\n') : String(h ?? '');
+  }
+
+  it('clears the oauth_state cookie on a successful callback so it cannot be replayed', async () => {
+    mockExchange.mockResolvedValue({ accessToken: 'gho_token' });
+    mockProfile.mockResolvedValue({
+      id: 4242,
+      login: 'octocat',
+      email: 'octo@example.com',
+      avatarUrl: 'https://example.com/a.png',
+    });
+    mockUpsert.mockResolvedValue({ id: 'user_1' });
+
+    const signedState = signCookieValue('state-abc', COOKIE_SECRET);
+    const res = await request(buildApp())
+      .get('/api/auth/github/callback')
+      .query({ code: 'code-1', state: 'state-abc' })
+      .set('Cookie', [`oauth_state=s:${signedState}`])
+      .redirects(0);
+
+    expect(res.status).toBe(302);
+    const cookies = joinSetCookie(res);
+    // A fresh session was minted...
+    expect(cookies).toMatch(/^session=/m);
+    // ...and the single-use state cookie was expired.
+    expect(cookies).toMatch(/^oauth_state=.*Expires=Thu, 01 Jan 1970/m);
+  });
+
+  it('clears oauth_state even when the token exchange fails (cleared BEFORE the exchange)', async () => {
+    mockExchange.mockRejectedValue(new Error('github exchange down'));
+
+    const signedState = signCookieValue('state-xyz', COOKIE_SECRET);
+    const res = await request(buildApp())
+      .get('/api/auth/github/callback')
+      .query({ code: 'code-1', state: 'state-xyz' })
+      .set('Cookie', [`oauth_state=s:${signedState}`])
+      .redirects(0);
+
+    const cookies = joinSetCookie(res);
+    // The state nonce is invalidated regardless of the exchange outcome, so a
+    // captured (code, state, cookie) triple can't be retried.
+    expect(cookies).toMatch(/^oauth_state=.*Expires=Thu, 01 Jan 1970/m);
+    // No session is minted on the failure path.
+    expect(cookies).not.toMatch(/^session=/m);
+    expect(mockUpsert).not.toHaveBeenCalled();
   });
 });
 
@@ -135,10 +190,9 @@ describe('requireAuth middleware', () => {
     };
     (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(fakeUser);
 
-    const token = jwt.sign({ sub: fakeUser.id }, JWT_SECRET, {
-      algorithm: 'HS256',
-      expiresIn: '7d',
-    });
+    // Use the production signer so the token carries the iss/aud the verifier
+    // now requires — hand-rolling jwt.sign here would drift from prod.
+    const token = signSession(fakeUser.id);
     const signedSession = signCookieValue(token, COOKIE_SECRET);
 
     const res = await request(app)
@@ -174,10 +228,7 @@ describe('GET /api/auth/me', () => {
     };
     (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(fakeUser);
 
-    const token = jwt.sign({ sub: fakeUser.id }, JWT_SECRET, {
-      algorithm: 'HS256',
-      expiresIn: '7d',
-    });
+    const token = signSession(fakeUser.id);
     const signedSession = signCookieValue(token, COOKIE_SECRET);
 
     const res = await request(app)
@@ -207,10 +258,7 @@ describe('GET /api/auth/me', () => {
     };
     (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(demoUser);
 
-    const token = jwt.sign({ sub: demoUser.id }, JWT_SECRET, {
-      algorithm: 'HS256',
-      expiresIn: '7d',
-    });
+    const token = signSession(demoUser.id);
     const signedSession = signCookieValue(token, COOKIE_SECRET);
 
     const res = await request(app)

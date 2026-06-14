@@ -89,6 +89,30 @@ describe('resolveDockerfile', () => {
     expect(written).toContain('gunicorn myproj.wsgi:application');
   });
 
+  it('refuses to interpolate a hostile wsgi package dir name into the generated Dockerfile', async () => {
+    // The wsgi package directory name is interpolated verbatim into the
+    // generated gunicorn CMD. A repo controls its own dir names, and a POSIX
+    // name may contain `"`, `$`, `;`, spaces — which could break out of the
+    // JSON-array CMD and inject arbitrary Dockerfile directives. The name must
+    // be a plain Python identifier; anything else is skipped and Django falls
+    // back to the `manage.py runserver` template.
+    const hostile = 'evil") ; RUN echo pwned ; #';
+    await writeFile(path.join(repoDir, 'manage.py'), '# django');
+    await writeFile(path.join(repoDir, 'requirements.txt'), 'Django==5.0');
+    await mkdir(path.join(repoDir, hostile));
+    await writeFile(path.join(repoDir, hostile, 'wsgi.py'), '# wsgi');
+
+    const res = await resolveDockerfile(repoDir, logs);
+    expect(res.framework).toBe('Django');
+    const written = await readFile(res.dockerfilePath, 'utf8');
+    // The injection payload never reaches the generated recipe…
+    expect(written).not.toContain('RUN echo pwned');
+    expect(written).not.toContain(hostile);
+    expect(written).not.toMatch(/gunicorn .*\.wsgi/);
+    // …and we fall back cleanly to the safe runserver template.
+    expect(written).toContain('manage.py runserver');
+  });
+
   it('throws a friendly error when nothing is detected', async () => {
     await writeFile(path.join(repoDir, 'README.md'), '# hi');
     await expect(resolveDockerfile(repoDir, logs)).rejects.toThrow(
