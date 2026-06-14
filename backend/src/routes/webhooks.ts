@@ -69,8 +69,20 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
       throw new HttpError(400, 'INVALID_PAYLOAD');
     }
 
+    // Scope the lookup to NON-demo projects. This is the webhook arm of the
+    // demo-isolation invariant (docs/DEMO_MODE.md §4): the webhook is the only
+    // mutation path not behind `requireAuth`, so it can't branch on
+    // `req.user.isDemo` like every other route. A demo project has only a
+    // *synthetic* repo id + secret and no real GitHub webhook configured, so a
+    // delivery matching one is forged — and without this filter it would create
+    // a real, claimable (`isDemo=false`, `claimedAt=null`) Build that the Kaniko
+    // worker would clone + push + deploy to Azure under a demo session, bypassing
+    // all four structural layers at once. `user: { isDemo: false }` makes demo
+    // projects invisible here (they 404), and it also resolves a synthetic-repo-id
+    // collision in favour of the real project. The runBuild backstop is the
+    // belt-and-suspenders fifth layer.
     const project = await prisma.project.findFirst({
-      where: { githubRepoId: repoIdRaw, deletedAt: null },
+      where: { githubRepoId: repoIdRaw, deletedAt: null, user: { isDemo: false } },
     });
     if (project === null) {
       throw new HttpError(404, 'PROJECT_NOT_FOUND');

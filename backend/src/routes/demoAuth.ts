@@ -1,7 +1,7 @@
 import { randomBytes, randomInt } from 'node:crypto';
 
 import { Prisma } from '@prisma/client';
-import { Router, type Request } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 
 import { prisma } from '../db.js';
 import { env } from '../env.js';
@@ -58,15 +58,23 @@ function randomDemoGithubUserId(): number {
   return -(randomInt(2_000_000_000) + 1);
 }
 
-router.get('/demo-login', demoLoginLimiter, async (req: Request, res, next) => {
-  try {
-    // Layer-4 env gate (docs/DEMO_MODE.md §4): the entire surface is 404 when
-    // the feature is disabled, so a probe can't even tell it exists.
-    if (!env.ENABLE_DEMO) {
-      res.status(404).json({ error: 'NOT_FOUND' });
-      return;
-    }
+/**
+ * Layer-4 env gate (docs/DEMO_MODE.md §4), mounted BEFORE the rate limiter so a
+ * disabled surface is byte-identical to a genuinely nonexistent route: it 404s
+ * with NO `RateLimit-*` headers and no limiter side effects, so a probe can't
+ * even tell the route is mounted. (Previously the limiter ran first and emitted
+ * standard rate-limit headers ahead of the 404 — a faint route-existence oracle.)
+ */
+function requireDemoEnabled(_req: Request, res: Response, next: NextFunction): void {
+  if (!env.ENABLE_DEMO) {
+    res.status(404).json({ error: 'NOT_FOUND' });
+    return;
+  }
+  next();
+}
 
+router.get('/demo-login', requireDemoEnabled, demoLoginLimiter, async (req: Request, res, next) => {
+  try {
     // Capacity cap: refuse new sessions once the live (unexpired) demo-user
     // count hits DEMO_MAX_ACTIVE, so a flood of sandboxes can't balloon the DB.
     let user: { id: string };
@@ -87,7 +95,21 @@ router.get('/demo-login', demoLoginLimiter, async (req: Request, res, next) => {
     // Seed the sandbox AFTER the user row is committed (and the cap lock released)
     // so the dashboard isn't empty. DB-only (orchestrator never touches
     // Azure/ACR/git/Kaniko).
-    await seedDemoWorkspace(user.id);
+    //
+    // The user row is already committed at this point, so a seed failure would
+    // otherwise leave an empty orphan user consuming a DEMO_MAX_ACTIVE slot until
+    // its TTL/the reaper. Compensate: best-effort delete the just-created user
+    // (cascade-purges any partial seed) before surfacing the error, so a failed
+    // seed never permanently burns capacity.
+    try {
+      await seedDemoWorkspace(user.id);
+    } catch (seedErr) {
+      await prisma.user.delete({ where: { id: user.id } }).catch(() => {
+        // Best-effort: if the compensating delete also fails, the TTL/reaper
+        // still reclaims the slot — we just surface the original seed error.
+      });
+      throw seedErr;
+    }
 
     setSessionCookie(res, signSession(user.id));
     res.redirect(302, resolveNext(req));

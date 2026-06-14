@@ -33,6 +33,7 @@ vi.hoisted(() => {
 const mocks = vi.hoisted(() => ({
   userCount: vi.fn(),
   userCreate: vi.fn(),
+  userDelete: vi.fn(),
   txQueryRaw: vi.fn(),
   $transaction: vi.fn(),
   seedDemoWorkspace: vi.fn(),
@@ -48,6 +49,7 @@ const txClient = {
 vi.mock('../db.js', () => ({
   prisma: {
     $transaction: mocks.$transaction,
+    user: { delete: mocks.userDelete },
   },
 }));
 
@@ -72,12 +74,14 @@ function buildApp() {
 beforeEach(() => {
   mocks.userCount.mockReset();
   mocks.userCreate.mockReset();
+  mocks.userDelete.mockReset();
   mocks.txQueryRaw.mockReset();
   mocks.$transaction.mockReset();
   mocks.seedDemoWorkspace.mockReset();
 
   mocks.userCount.mockResolvedValue(0);
   mocks.userCreate.mockResolvedValue({ id: 'demo_user_1' });
+  mocks.userDelete.mockResolvedValue({ id: 'demo_user_1' });
   mocks.txQueryRaw.mockResolvedValue([]);
   // Run the interactive-transaction callback against the shared tx client so the
   // cap-check + insert (and their thrown DemoAtCapacityError) propagate exactly
@@ -187,5 +191,36 @@ describe('GET /api/auth/demo-login (ENABLE_DEMO=true)', () => {
     const res = await request(app).get('/api/auth/demo-login').redirects(0);
     expect(res.status).toBe(500);
     expect(mocks.userCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes the just-created demo user when seeding fails (no leaked capacity slot)', async () => {
+    // The user row is committed before the seed runs; a seed failure must not
+    // leave an empty orphan consuming a DEMO_MAX_ACTIVE slot until TTL/reaper.
+    mocks.seedDemoWorkspace.mockRejectedValueOnce(new Error('seed boom'));
+
+    const app = buildApp();
+    const res = await request(app).get('/api/auth/demo-login').redirects(0);
+
+    expect(res.status).toBe(500);
+    expect(mocks.userCreate).toHaveBeenCalledTimes(1);
+    // Compensating delete of the exact user that was created.
+    expect(mocks.userDelete).toHaveBeenCalledWith({ where: { id: 'demo_user_1' } });
+    // No session cookie is minted when the workspace never seeded.
+    const setCookie = res.headers['set-cookie'];
+    const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : (setCookie ?? '');
+    expect(cookieHeader).not.toMatch(/^session=/m);
+  });
+
+  it('still surfaces the seed error even if the compensating delete also fails', async () => {
+    mocks.seedDemoWorkspace.mockRejectedValueOnce(new Error('seed boom'));
+    mocks.userDelete.mockRejectedValueOnce(new Error('delete also down'));
+
+    const app = buildApp();
+    const res = await request(app).get('/api/auth/demo-login').redirects(0);
+
+    // Best-effort cleanup: a failed delete is swallowed; the original seed error
+    // still surfaces (the TTL/reaper reclaims the slot later).
+    expect(res.status).toBe(500);
+    expect(mocks.userDelete).toHaveBeenCalledTimes(1);
   });
 });

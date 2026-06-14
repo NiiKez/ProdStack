@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   buildFindUniqueOrThrow: vi.fn(),
   buildFindUnique: vi.fn(),
   buildUpdate: vi.fn(),
+  buildUpdateMany: vi.fn(),
   logLineCreate: vi.fn(),
   deploymentUpdateMany: vi.fn(),
   deploymentCreate: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock('../../db.js', () => ({
       findUniqueOrThrow: mocks.buildFindUniqueOrThrow,
       findUnique: mocks.buildFindUnique,
       update: mocks.buildUpdate,
+      updateMany: mocks.buildUpdateMany,
     },
     logLine: { create: mocks.logLineCreate },
     deployment: { updateMany: mocks.deploymentUpdateMany, create: mocks.deploymentCreate },
@@ -79,6 +81,9 @@ beforeEach(() => {
   for (const m of Object.values(mocks)) m.mockReset();
   mocks.buildFindUniqueOrThrow.mockResolvedValue(stubBuildRow());
   mocks.buildUpdate.mockResolvedValue({});
+  // The finally-block terminal reconcile is a no-op here (the build reaches a
+  // terminal state on its own) — it must find 0 non-terminal rows to flip.
+  mocks.buildUpdateMany.mockResolvedValue({ count: 0 });
   mocks.logLineCreate.mockResolvedValue({});
   mocks.loadDecryptedEnvVars.mockResolvedValue([]);
 });

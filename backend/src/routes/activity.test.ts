@@ -71,6 +71,15 @@ describe('GET /api/activity', () => {
     expect(res.status).toBe(401);
   });
 
+  it('400s a malformed projectId filter (shape-validated, never reaches the DB)', async () => {
+    // A non-cuid-ish projectId is rejected up front rather than silently
+    // filtered — mirrors the deployments feed's PROJECT_ID_RE contract.
+    const res = await supertest(createApp()).get('/api/activity?projectId=../../etc');
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: 'VALIDATION_FAILED' });
+    expect(mocks.buildFindMany).not.toHaveBeenCalled();
+  });
+
   it('expands a terminal build into queued + succeeded events, newest first', async () => {
     mocks.buildFindMany.mockResolvedValue([
       {

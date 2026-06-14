@@ -401,6 +401,39 @@ describe('POST /api/webhooks/github', () => {
     expect(state.webhookEvents.has('delivery-validsha')).toBe(true);
   });
 
+  it('scopes the project lookup to non-demo projects and 404s a demo-project delivery (no build)', async () => {
+    // Demo-isolation invariant (docs/DEMO_MODE.md §4): the webhook is the only
+    // mutation path not behind requireAuth, so it can't branch on req.user.isDemo.
+    // It must instead exclude demo projects at the DB query — otherwise a forged
+    // delivery for a demo project would create a real, claimable Build that the
+    // Kaniko worker would deploy to Azure under a sandboxed session. Assert the
+    // `user: { isDemo: false }` filter is present and that a filtered-out (demo)
+    // project yields a clean 404 with no Build/WebhookEvent written.
+    let capturedWhere: Record<string, unknown> | undefined;
+    mocks.projectFindFirst.mockImplementationOnce(
+      async (args: { where?: Record<string, unknown> }) => {
+        capturedWhere = args?.where;
+        // Simulate the DB: a demo project is filtered out by the isDemo guard.
+        return null;
+      },
+    );
+
+    const body = pushPayload();
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/webhooks/github')
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-GitHub-Delivery', 'delivery-demo')
+      .set('X-Hub-Signature-256', sign(body))
+      .send(body);
+
+    expect(res.status).toBe(404);
+    expect(capturedWhere).toMatchObject({ user: { isDemo: false } });
+    expect(state.builds).toHaveLength(0);
+    expect(state.webhookEvents.size).toBe(0);
+  });
+
   it('returns 204 for an unrecognized event type', async () => {
     const body = JSON.stringify({ repository: { id: 12345 } });
     const app = createApp();
@@ -416,5 +449,33 @@ describe('POST /api/webhooks/github', () => {
     expect(res.body).toEqual({});
     expect(state.builds).toHaveLength(0);
     expect(state.webhookEvents.size).toBe(0);
+  });
+
+  // DoS-amplification bound (app.ts mounts express.raw with a 512kb cap on this
+  // route). The per-project HMAC secret can only be located by parsing the body
+  // for its repo id, so a forged delivery with a valid-but-wrong signature would
+  // otherwise force a full JSON.parse + DB lookup + AES-GCM decrypt + HMAC over
+  // the WHOLE body before the 401. The body-size cap is the only knob on that
+  // unauthenticated work; this pins that an over-cap body is rejected by the
+  // parser BEFORE the handler runs — no project lookup, decrypt, or HMAC happens.
+  it('rejects an over-512kb body with 413 before any project lookup or HMAC work', async () => {
+    // ~600 KiB of valid JSON (well-formed push payload padded past the cap).
+    const body = pushPayload({ head_commit: { id: 'a'.repeat(40), message: 'x'.repeat(600 * 1024), author: { name: 'Octo' } } });
+    expect(body.length).toBeGreaterThan(512 * 1024);
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/webhooks/github')
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-GitHub-Delivery', 'delivery-huge')
+      .set('X-Hub-Signature-256', sign(body))
+      .send(body);
+
+    expect(res.status).toBe(413);
+    expect(res.body.error).toBe('PAYLOAD_TOO_LARGE');
+    // The amplification bound: the oversized body never reached the handler, so
+    // no DB lookup / decrypt / HMAC was performed on attacker-controlled bytes.
+    expect(mocks.projectFindFirst).not.toHaveBeenCalled();
+    expect(state.builds).toHaveLength(0);
   });
 });

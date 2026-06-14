@@ -72,6 +72,12 @@ router.get('/github/callback', authLimiter, async (req, res, next) => {
     return;
   }
 
+  // State is single-use: clear it the moment it validates, BEFORE the (async)
+  // token exchange. A captured (code, state, oauth_state-cookie) triple can
+  // therefore not be replayed within the 5-minute cookie TTL — a second
+  // callback finds no state cookie and is rejected above.
+  clearOAuthCookies(res);
+
   try {
     const { accessToken } = await exchangeCodeForToken(code);
     const profile = await fetchGithubProfile(accessToken);
@@ -81,7 +87,6 @@ router.get('/github/callback', authLimiter, async (req, res, next) => {
     // them at the repo to self-host. We reject *before* the upsert so a
     // non-owner's OAuth token is never persisted: no DB row, no stored token.
     if (env.OWNER_GITHUB_ID !== undefined && profile.id !== env.OWNER_GITHUB_ID) {
-      clearOAuthCookies(res);
       res.redirect(302, `${env.WEB_ORIGIN}/?denied=not_owner`);
       return;
     }
@@ -114,12 +119,10 @@ router.get('/github/callback', authLimiter, async (req, res, next) => {
 
     const jwtToken = signSession(user.id);
     setSessionCookie(res, jwtToken);
-    clearOAuthCookies(res);
 
     const destination = nextPath ?? '/dashboard';
     res.redirect(302, `${env.WEB_ORIGIN}${destination}`);
   } catch (err) {
-    clearOAuthCookies(res);
     next(err);
   }
 });

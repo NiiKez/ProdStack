@@ -73,5 +73,12 @@ describe('GET /api/auth/demo-login (ENABLE_DEMO=false)', () => {
     expect(mocks.userCount).not.toHaveBeenCalled();
     expect(mocks.userCreate).not.toHaveBeenCalled();
     expect(mocks.seedDemoWorkspace).not.toHaveBeenCalled();
+
+    // The env gate runs BEFORE the rate limiter, so a disabled surface emits no
+    // rate-limit metadata — it's byte-identical to a genuinely nonexistent route
+    // (no faint "this route is mounted" oracle via RateLimit-* headers).
+    expect(res.headers).not.toHaveProperty('ratelimit-limit');
+    expect(res.headers).not.toHaveProperty('ratelimit-remaining');
+    expect(res.headers).not.toHaveProperty('retry-after');
   });
 });

@@ -60,6 +60,21 @@ export function errorMiddleware(
     return;
   }
 
+  // Body-parser size cap (`express.raw`/`express.json` `limit`): an over-limit
+  // request is rejected by the parser BEFORE any route handler runs. Surface it
+  // as a clean 413 rather than a generic 500 so a too-large body is
+  // distinguishable from an internal fault. The webhook body cap (app.ts) leans
+  // on this rejection to bound the unauthenticated parse/HMAC work a forged
+  // delivery can force. `raw-body` tags the error with `type: 'entity.too.large'`.
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { type?: unknown }).type === 'entity.too.large'
+  ) {
+    res.status(413).json({ error: 'PAYLOAD_TOO_LARGE' });
+    return;
+  }
+
   logger.error({ err }, 'unhandled error');
   res.status(500).json({ error: 'INTERNAL' });
 }

@@ -81,13 +81,25 @@ export function createApp(): Express {
   // verification sees the exact bytes GitHub signed — which also puts it ahead
   // of the app-wide `globalLimiter`. A dedicated per-IP `webhookLimiter` mounts
   // ON this sub-path so an unauthenticated flood of forged deliveries can't burn
-  // an indexed lookup + AES-GCM decrypt + HMAC-over-1MB unthrottled. Note: no
-  // CSRF (`requireXRequestedWith`) guard here — webhooks are HMAC-authenticated
-  // and GitHub never sends `X-Requested-With`.
+  // an indexed lookup + AES-GCM decrypt + HMAC unthrottled. Note: no CSRF
+  // (`requireXRequestedWith`) guard here — webhooks are HMAC-authenticated and
+  // GitHub never sends `X-Requested-With`.
+  //
+  // Body cap is the load-bearing amplification bound: the per-project secret can
+  // only be located by parsing the body (for the repo id), so a forged delivery
+  // with a valid-but-wrong signature forces a `JSON.parse` + DB lookup + decrypt +
+  // `HMAC` over the WHOLE body before the 401 — the decrypt-before-verify is
+  // structural (per-project secrets), so the body SIZE is the only knob on how
+  // much unauthenticated CPU one request can burn. 512kb comfortably fits a real
+  // GitHub push payload (commits arrays are truncated server-side; a normal push
+  // is a few KB) while halving the worst case vs. the old 1mb. Anything larger is
+  // a 413 before any handler runs. This matters most until `EDGE_PROXY_SECRET` is
+  // live, since direct-FQDN callers can otherwise spoof `X-Forwarded-For` past the
+  // per-IP `webhookLimiter` (see middleware/rateLimit.ts).
   app.use(
     '/api/webhooks',
     webhookLimiter,
-    express.raw({ type: 'application/json', limit: '1mb' }),
+    express.raw({ type: 'application/json', limit: '512kb' }),
     webhooksRouter,
   );
 

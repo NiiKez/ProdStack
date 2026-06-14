@@ -144,11 +144,26 @@ const EnvSchema = z.object({
   // non-stub modes.
   BUILD_RUNNER_MODE: z.enum(['stub', 'docker', 'kaniko']).default('stub'),
   BUILD_TIMEOUT_MS: z.coerce.number().int().positive().default(10 * 60 * 1000),
+  // Hard per-phase wall-clock cap on each `git clone`/`fetch`/`checkout`. Unlike
+  // BUILD_TIMEOUT_MS (which only bounds kaniko), this bounds the git phases — a
+  // git server that accepts the TCP connection then stalls (slow-loris on the
+  // smart-HTTP transport, pathological pack data) would otherwise hang the
+  // single-replica worker forever and wedge the whole build queue. A normal
+  // clone takes seconds; 5 min is a generous ceiling for a large repo.
+  GIT_TIMEOUT_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
   BUILD_WORK_DIR: z.string().default('/tmp/prodstack-builds'),
   ACR_USERNAME: z.string().optional(),
   ACR_PASSWORD: z.string().optional(),
   WORKER_ID: z.string().default(`worker-${process.pid}`),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
+  // Poison-pill guard. `claimNextBuild` bumps `Build.attempts` on every claim; a
+  // build that crashes the worker process *before* `runBuild`'s catch can record
+  // a terminal status (e.g. an OOM/SIGKILL while kaniko snapshots the FS in
+  // memory on the 4 GiB builder) gets released back to QUEUED by boot recovery
+  // and re-claimed — an unbounded loop that keeps the (billed) builder warm and
+  // never drains the queue. Once `attempts` reaches this cap the build is failed
+  // instead of re-claimed, so it gets a bounded number of real tries (default 3).
+  BUILD_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
 
   // CI/CD self-deploy (M6 "Option B"). The GitHub Actions pipeline builds +
   // pushes the image with ACR admin creds, then calls POST /api/admin/deploy
