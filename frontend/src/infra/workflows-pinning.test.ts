@@ -41,6 +41,19 @@ const usesRefs: UsesRef[] = workflowFiles.flatMap(({ name, text }) =>
     })
 );
 
+// A `uses:` that the M4 guard must check is an EXTERNAL action / reusable-workflow
+// reference — always `owner/repo[/path]@<gitref>`, so it contains an `owner/repo`
+// slash. Two kinds of `uses:` are deliberately NOT such references and are exempt:
+//   - local actions (`./path`) — in-repo, no tag to hijack;
+//   - a CodeQL inline `config:`'s `queries: - uses: security-extended` — a query
+//     SUITE name (data fed to the analyzer), not an executable action, so it has
+//     no git ref to pin and no `owner/repo` slash.
+// Every executable third-party action has the slash, so scoping to it keeps the
+// guard's guarantee intact (no real action can slip through unpinned) while not
+// misfiring on the bare suite name.
+const isExternalActionRef = (ref: string): boolean =>
+  !ref.startsWith('./') && !ref.startsWith('.\\') && ref.includes('/');
+
 describe('GitHub Actions workflow pinning (M4)', () => {
   it('has at least one workflow with a `uses:` reference (sanity)', () => {
     expect(workflowFiles.length).toBeGreaterThan(0);
@@ -49,9 +62,9 @@ describe('GitHub Actions workflow pinning (M4)', () => {
 
   it('pins EVERY `uses:` action to a full 40-char commit SHA', () => {
     for (const { file, line, ref } of usesRefs) {
-      // Local actions (`./path`) and reusable workflows in this repo are exempt;
-      // only external `owner/repo@<ref>` references are an M4 concern.
-      if (ref.startsWith('./') || ref.startsWith('.\\')) continue;
+      // Only external `owner/repo@<ref>` actions are an M4 concern; local actions
+      // and CodeQL config query-suite `uses:` are exempt (see isExternalActionRef).
+      if (!isExternalActionRef(ref)) continue;
       expect(
         /@[0-9a-f]{40}$/.test(ref),
         `${file}:${line} — action is not pinned to a 40-char commit SHA: "${ref}"`
@@ -61,7 +74,7 @@ describe('GitHub Actions workflow pinning (M4)', () => {
 
   it('uses NO mutable action ref (`@v\\d`, `@main`, `@master`)', () => {
     for (const { file, line, ref } of usesRefs) {
-      if (ref.startsWith('./') || ref.startsWith('.\\')) continue;
+      if (!isExternalActionRef(ref)) continue;
       const tag = ref.split('@')[1] ?? '';
       expect(
         /^v\d/.test(tag) || tag === 'main' || tag === 'master',
