@@ -141,7 +141,12 @@ async function admitDemoUser(): Promise<{ id: string }> {
     try {
       return await prisma.$transaction(async (tx) => {
         // Serialize the cap critical section across all concurrent logins.
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(${DEMO_CAP_LOCK_KEY}::bigint)`;
+        // MUST be `$executeRaw`, not `$queryRaw`: `pg_advisory_xact_lock` returns
+        // a `void` column, and Prisma's `$queryRaw` deserializer throws P2010
+        // ("Failed to deserialize column of type 'void'") on it. `$executeRaw`
+        // runs the statement (acquiring the lock) without deserializing the
+        // result column, so it sidesteps the void entirely.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${DEMO_CAP_LOCK_KEY}::bigint)`;
         const activeDemoUsers = await tx.user.count({
           where: { isDemo: true, demoExpiresAt: { gt: new Date() } },
         });
