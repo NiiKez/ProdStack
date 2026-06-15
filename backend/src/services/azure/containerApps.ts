@@ -430,7 +430,17 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
       : {}),
     template: {
       ...existing.template,
-      ...(revisionSuffix ? { revisionSuffix } : {}),
+      // Never inherit the live revision's suffix. `get()` returns the explicit
+      // suffix a revision was created with — e.g. a `cfg…` from a prior
+      // env-redeploy (`forceNewRevision` below) or a manual `--revision-suffix` —
+      // and spreading `...existing.template` carries it straight into this PUT.
+      // Re-PUTting it makes ARM reject the roll with `revision with suffix <x>
+      // already exists` (Failed deploy, app stuck on the old image). On a plain
+      // image roll we want ACA to auto-generate a fresh unique suffix, so blank
+      // it (`''` ≡ unset for ARM); the `forceNewRevision` path overrides with its
+      // own content-addressed suffix. (Same class of bug fixed for the platform
+      // self-deploy path in `realRollPlatformApp`; this is the user-app analogue.)
+      revisionSuffix: revisionSuffix ?? '',
       containers: containers.length > 0
         ? [
             {
