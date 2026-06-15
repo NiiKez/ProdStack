@@ -34,7 +34,7 @@ const mocks = vi.hoisted(() => ({
   userCount: vi.fn(),
   userCreate: vi.fn(),
   userDelete: vi.fn(),
-  txQueryRaw: vi.fn(),
+  txExecuteRaw: vi.fn(),
   $transaction: vi.fn(),
   seedDemoWorkspace: vi.fn(),
 }));
@@ -42,7 +42,9 @@ const mocks = vi.hoisted(() => ({
 // Interactive-transaction client: the cap critical section acquires the advisory
 // lock then runs count + create on this same client (so they're one transaction).
 const txClient = {
-  $queryRaw: mocks.txQueryRaw,
+  // `pg_advisory_xact_lock` returns a `void` column that Prisma's `$queryRaw`
+  // deserializer rejects (P2010), so the route uses `$executeRaw` — mock that.
+  $executeRaw: mocks.txExecuteRaw,
   user: { count: mocks.userCount, create: mocks.userCreate },
 };
 
@@ -75,14 +77,14 @@ beforeEach(() => {
   mocks.userCount.mockReset();
   mocks.userCreate.mockReset();
   mocks.userDelete.mockReset();
-  mocks.txQueryRaw.mockReset();
+  mocks.txExecuteRaw.mockReset();
   mocks.$transaction.mockReset();
   mocks.seedDemoWorkspace.mockReset();
 
   mocks.userCount.mockResolvedValue(0);
   mocks.userCreate.mockResolvedValue({ id: 'demo_user_1' });
   mocks.userDelete.mockResolvedValue({ id: 'demo_user_1' });
-  mocks.txQueryRaw.mockResolvedValue([]);
+  mocks.txExecuteRaw.mockResolvedValue(1);
   // Run the interactive-transaction callback against the shared tx client so the
   // cap-check + insert (and their thrown DemoAtCapacityError) propagate exactly
   // as they would against Postgres.
@@ -155,8 +157,10 @@ describe('GET /api/auth/demo-login (ENABLE_DEMO=true)', () => {
     // Exactly one interactive transaction wrapped the cap-check + insert...
     expect(mocks.$transaction).toHaveBeenCalledTimes(1);
     // ...and a pg_advisory_xact_lock was acquired inside it (before count/create).
-    expect(mocks.txQueryRaw).toHaveBeenCalledTimes(1);
-    const lockSql = (mocks.txQueryRaw.mock.calls[0]![0] as readonly string[]).join('');
+    // Must go through `$executeRaw` (not `$queryRaw`): the lock function returns
+    // a `void` column that `$queryRaw` can't deserialize (P2010 in prod).
+    expect(mocks.txExecuteRaw).toHaveBeenCalledTimes(1);
+    const lockSql = (mocks.txExecuteRaw.mock.calls[0]![0] as readonly string[]).join('');
     expect(lockSql).toMatch(/pg_advisory_xact_lock/);
   });
 
