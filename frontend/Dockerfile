@@ -59,6 +59,21 @@ FROM nginxinc/nginx-unprivileged:1.31-alpine@sha256:cc300bd2e8776708a8c2c8686a74
 # the same name (set on the web Container App). See frontend/nginx.conf.template.
 COPY frontend/nginx.conf.template /etc/nginx/templates/default.conf.template
 
+# Default EDGE_PROXY_SECRET to empty so the nginx entrypoint's envsubst ALWAYS
+# has a value to substitute for the ${EDGE_PROXY_SECRET} references in the
+# template (the `proxy_set_header X-ProdStack-Edge` lines). Without this default
+# the var is undefined at render time, envsubst leaves the literal
+# `${EDGE_PROXY_SECRET}`, and nginx then treats it as an unknown *runtime*
+# variable and refuses to start (`[emerg] unknown "edge_proxy_secret" variable`)
+# — so the marker was NOT "inert when unset" as the template comment claims; it
+# crash-looped the container, silently wedging every web roll on the last good
+# revision. With the empty default the header renders as "" (the API ignores an
+# empty/non-matching value and keys its limiters on req.ip as before), and a real
+# value set on the web Container App still OVERRIDES this to activate the
+# rate-limit-integrity check. See frontend/nginx.conf.template + the env-contract
+# note in CLAUDE.md + backend/src/middleware/rateLimit.ts.
+ENV EDGE_PROXY_SECRET=""
+
 # Security response headers, included by the site config at both the server level
 # and inside the locations that set their own add_header (which would otherwise
 # stop nginx from inheriting these). See frontend/nginx.security-headers.conf and
