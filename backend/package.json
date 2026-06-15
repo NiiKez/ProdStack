@@ -18,7 +18,7 @@
     "prisma:studio": "prisma studio"
   },
   "dependencies": {
-    "@azure/arm-appcontainers": "^2.1.0",
+    "@azure/arm-appcontainers": "^3.0.0",
     "@azure/arm-containerregistry": "^12.0.0",
     "@azure/identity": "^4.5.0",
     "@azure/keyvault-secrets": "^4.9.0",
