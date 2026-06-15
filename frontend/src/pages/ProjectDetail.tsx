@@ -427,10 +427,10 @@ function OverviewTab({ project }: OverviewTabProps) {
                   href={project.liveUrl}
                   target="_blank"
                   rel="noreferrer noopener"
-                  className="inline-flex w-fit items-center gap-1.5 rounded font-mono text-xs font-medium text-accent-400 transition-colors hover:text-accent-300"
+                  className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded font-mono text-xs font-medium text-accent-400 transition-colors hover:text-accent-300"
                 >
                   <ExternalLink size={12} aria-hidden className="shrink-0" />
-                  <span className="truncate">{project.liveUrl}</span>
+                  <span className="min-w-0 truncate">{project.liveUrl}</span>
                 </a>
               )}
             </>
