@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   beginCreateOrUpdateAndWait: vi.fn(),
   beginCreateOrUpdate: vi.fn(),
   beginDeleteAndWait: vi.fn(),
+  beginStopAndWait: vi.fn(),
+  beginStartAndWait: vi.fn(),
   get: vi.fn(),
   listSecrets: vi.fn(),
   DefaultAzureCredential: vi.fn(),
@@ -41,6 +43,8 @@ beforeEach(() => {
   mocks.beginCreateOrUpdateAndWait.mockReset();
   mocks.beginCreateOrUpdate.mockReset();
   mocks.beginDeleteAndWait.mockReset();
+  mocks.beginStopAndWait.mockReset();
+  mocks.beginStartAndWait.mockReset();
   mocks.get.mockReset();
   mocks.listSecrets.mockReset();
   mocks.DefaultAzureCredential.mockReset();
@@ -60,6 +64,8 @@ beforeEach(() => {
         beginCreateOrUpdateAndWait: mocks.beginCreateOrUpdateAndWait,
         beginCreateOrUpdate: mocks.beginCreateOrUpdate,
         beginDeleteAndWait: mocks.beginDeleteAndWait,
+        beginStopAndWait: mocks.beginStopAndWait,
+        beginStartAndWait: mocks.beginStartAndWait,
         get: mocks.get,
         listSecrets: mocks.listSecrets,
       },
@@ -138,6 +144,33 @@ describe('deleteContainerApp (real branch)', () => {
     const { deleteContainerApp } = await import('./containerApps.js');
     await deleteContainerApp('octocat-demo');
     expect(mocks.beginDeleteAndWait).toHaveBeenCalledWith('prodstack', 'octocat-demo');
+  });
+});
+
+describe('stopContainerApp / startContainerApp (real branch)', () => {
+  it('stopContainerApp calls beginStopAndWait with the resource group and name', async () => {
+    mocks.beginStopAndWait.mockResolvedValue({});
+    const { stopContainerApp } = await import('./containerApps.js');
+    await stopContainerApp('octocat-demo');
+    expect(mocks.beginStopAndWait).toHaveBeenCalledWith('prodstack', 'octocat-demo');
+    // A stop must never roll/modify a revision (no create-or-update PUT).
+    expect(mocks.beginCreateOrUpdateAndWait).not.toHaveBeenCalled();
+  });
+
+  it('startContainerApp calls beginStartAndWait with the resource group and name', async () => {
+    mocks.beginStartAndWait.mockResolvedValue({});
+    const { startContainerApp } = await import('./containerApps.js');
+    await startContainerApp('octocat-demo');
+    expect(mocks.beginStartAndWait).toHaveBeenCalledWith('prodstack', 'octocat-demo');
+    expect(mocks.beginCreateOrUpdateAndWait).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid app name before any SDK call', async () => {
+    const { stopContainerApp, startContainerApp } = await import('./containerApps.js');
+    await expect(stopContainerApp('Bad Name!')).rejects.toThrow();
+    await expect(startContainerApp('Bad Name!')).rejects.toThrow();
+    expect(mocks.beginStopAndWait).not.toHaveBeenCalled();
+    expect(mocks.beginStartAndWait).not.toHaveBeenCalled();
   });
 });
 

@@ -13,13 +13,20 @@ import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
 import { buildTriggerLimiter, expensiveLimiter } from '../middleware/rateLimit.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
-import { createContainerApp, deleteContainerApp } from '../services/azure/index.js';
+import {
+  createContainerApp,
+  deleteContainerApp,
+  startContainerApp,
+  stopContainerApp,
+} from '../services/azure/index.js';
 import { getAppMetrics, stubMetrics, type MetricRange } from '../services/azure/metrics.js';
 import { queryRuntimeLogs, stubRuntimeLogs } from '../services/azure/logs.js';
 import {
   createDemoProject,
+  resumeDemoProject,
   rollbackDemoDeployment,
   startDemoBuild,
+  stopDemoProject,
 } from '../services/demo/demoOrchestrator.js';
 import {
   IN_FLIGHT_BUILD_STATUSES,
@@ -202,6 +209,8 @@ function reshapeProject(project: ProjectWithRelations, opts: { allBuilds?: boole
     liveUrl: project.liveUrl,
     frameworkHint: project.frameworkHint,
     autoDeploy: project.autoDeploy,
+    status: project.status,
+    stoppedAt: project.stoppedAt,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     latestBuild,
@@ -307,6 +316,62 @@ async function requireOwnedProject(id: string, userId: string) {
     throw new HttpError(404, 'PROJECT_NOT_FOUND');
   }
   return project;
+}
+
+/**
+ * Resolve the commit to build for a project: prefer the live branch head from
+ * GitHub, fall back to the project's most recent stored build if GitHub is
+ * unreachable (token revoked, repo gone, transient API error). Returns null when
+ * no commit can be determined at all. Shared by manual rebuild and resume — for
+ * resume this naturally picks the NEWEST commit, so pushes ignored while the
+ * project was stopped converge to the current head (intermediate commits are
+ * skipped — only the branch tip matters). Throws HttpError(401) only if the
+ * authenticated user row has vanished.
+ */
+async function resolveLatestCommit(
+  project: { id: string; githubRepoFullName: string; branch: string },
+  userId: string,
+): Promise<{ sha: string; message: string; author: string } | null> {
+  let commit: { sha: string; message: string; author: string } | null = null;
+  const [owner, repo] = project.githubRepoFullName.split('/');
+  if (owner !== undefined && repo !== undefined) {
+    try {
+      const userRow = await prisma.user.findUnique({ where: { id: userId } });
+      if (userRow === null) {
+        throw new HttpError(401, 'UNAUTHENTICATED');
+      }
+      const githubToken = decrypt({
+        ciphertext: userRow.githubTokenCiphertext,
+        iv: userRow.githubTokenIv,
+        authTag: userRow.githubTokenAuthTag,
+        keyVersion: userRow.githubTokenKeyVersion,
+      });
+      const octokit = octokitForUser(githubToken);
+      commit = await fetchBranchHeadCommit(octokit, { owner, repo, ref: project.branch });
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      logger.warn(
+        { err, projectId: project.id, repo: project.githubRepoFullName },
+        'commit lookup failed; falling back to last build',
+      );
+    }
+  }
+
+  if (commit === null) {
+    const lastBuild = await prisma.build.findFirst({
+      where: { projectId: project.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (lastBuild !== null) {
+      commit = {
+        sha: lastBuild.commitSha,
+        message: lastBuild.commitMessage,
+        author: lastBuild.commitAuthor,
+      };
+    }
+  }
+
+  return commit;
 }
 
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
@@ -693,6 +758,16 @@ router.post(
         throw new HttpError(503, 'BUILDS_PAUSED', 'Builds are temporarily paused (usage limit).');
       }
 
+      // A stopped project is paused — don't build something that isn't running.
+      // The owner must resume it first (resume optionally auto-builds the head).
+      if (project.status === 'STOPPED') {
+        throw new HttpError(
+          409,
+          'PROJECT_STOPPED',
+          'This project is stopped. Resume it before triggering a build.',
+        );
+      }
+
       // One build at a time per project: a concurrent in-flight build already
       // owns the deploy, so a second one would race it. This check + insert is
       // not atomic (no serializable tx / unique index), so two near-simultaneous
@@ -723,51 +798,9 @@ router.post(
         return;
       }
 
-      // Resolve the commit to build: prefer the live branch head from GitHub,
-      // fall back to the project's most recent stored build if GitHub is
-      // unreachable (token revoked, repo gone, transient API error).
-      let commit: { sha: string; message: string; author: string } | null = null;
-      const [owner, repo] = project.githubRepoFullName.split('/');
-      if (owner !== undefined && repo !== undefined) {
-        try {
-          const userRow = await prisma.user.findUnique({ where: { id: user.id } });
-          if (userRow === null) {
-            throw new HttpError(401, 'UNAUTHENTICATED');
-          }
-          const githubToken = decrypt({
-            ciphertext: userRow.githubTokenCiphertext,
-            iv: userRow.githubTokenIv,
-            authTag: userRow.githubTokenAuthTag,
-            keyVersion: userRow.githubTokenKeyVersion,
-          });
-          const octokit = octokitForUser(githubToken);
-          commit = await fetchBranchHeadCommit(octokit, {
-            owner,
-            repo,
-            ref: project.branch,
-          });
-        } catch (err) {
-          if (err instanceof HttpError) throw err;
-          logger.warn(
-            { err, projectId: project.id, repo: project.githubRepoFullName },
-            'rebuild: github commit lookup failed; falling back to last build',
-          );
-        }
-      }
-
-      if (commit === null) {
-        const lastBuild = await prisma.build.findFirst({
-          where: { projectId: project.id },
-          orderBy: { createdAt: 'desc' },
-        });
-        if (lastBuild !== null) {
-          commit = {
-            sha: lastBuild.commitSha,
-            message: lastBuild.commitMessage,
-            author: lastBuild.commitAuthor,
-          };
-        }
-      }
+      // Resolve the commit to build (live branch head, falling back to the last
+      // stored build). Shared with the resume route's auto-build.
+      const commit = await resolveLatestCommit(project, user.id);
 
       if (commit === null) {
         throw new HttpError(
@@ -794,6 +827,178 @@ router.post(
         'manual rebuild queued',
       );
       res.status(202).json({ buildId: build.id });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// --- POST /:id/stop (pause the deployed app — Azure stop, $0 compute) ------
+
+router.post(
+  '/:id/stop',
+  requireXRequestedWith,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id } = idParamSchema.parse(req.params);
+      const user = getUser(req);
+      const project = await requireOwnedProject(id, user.id);
+
+      // Demo sessions: DB-only flip via the orchestrator (no Azure). It owns its
+      // own idempotent + in-flight guards (docs/DEMO_MODE.md §4 layer 3).
+      if (req.user?.isDemo === true) {
+        await stopDemoProject(id, user.id);
+        const fresh = await prisma.project.findUniqueOrThrow({
+          where: { id },
+          include: projectWithRelations.include,
+        });
+        res.json(reshapeProject(fresh));
+        return;
+      }
+
+      // Idempotent: already stopped → return current shape, no Azure call.
+      if (project.status !== 'STOPPED') {
+        // Reject while a build is in-flight: that build will deploy (a new active
+        // revision via updateContainerApp) and silently undo the stop. Make the
+        // owner wait for it to finish, then stop cleanly.
+        const inFlight = await prisma.build.findFirst({
+          where: { projectId: project.id, status: { in: IN_FLIGHT_BUILD_STATUSES } },
+          select: { id: true },
+        });
+        if (inFlight !== null) {
+          throw new HttpError(
+            409,
+            'BUILD_IN_PROGRESS',
+            'A build is running for this project. Wait for it to finish before stopping.',
+          );
+        }
+
+        // Stop the Azure Container App FIRST; only flip the DB if Azure succeeds,
+        // so a failed stop leaves the project ACTIVE. Surface an upstream Azure
+        // failure as a 502 (not a generic 500) so the client can distinguish
+        // "Azure is down, retry" from a real server fault.
+        try {
+          await stopContainerApp(project.containerAppName);
+        } catch (err) {
+          logger.error({ err, projectId: project.id }, 'azure stop failed');
+          throw new HttpError(
+            502,
+            'AZURE_STOP_FAILED',
+            'Failed to stop the app on Azure. The project is still active — try again.',
+          );
+        }
+        await prisma.project.update({
+          where: { id },
+          data: { status: 'STOPPED', stoppedAt: new Date() },
+        });
+        logger.info({ projectId: project.id }, 'project stopped');
+      }
+
+      const fresh = await prisma.project.findUniqueOrThrow({
+        where: { id },
+        include: projectWithRelations.include,
+      });
+      res.json(reshapeProject(fresh));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// --- POST /:id/resume (start the app; optionally build the newest commit) ---
+
+router.post(
+  '/:id/resume',
+  requireXRequestedWith,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id } = idParamSchema.parse(req.params);
+      const user = getUser(req);
+      const project = await requireOwnedProject(id, user.id);
+
+      // Demo sessions: DB-only flip, never auto-builds (no real git head).
+      if (req.user?.isDemo === true) {
+        await resumeDemoProject(id, user.id);
+        const fresh = await prisma.project.findUniqueOrThrow({
+          where: { id },
+          include: projectWithRelations.include,
+        });
+        res.json({ ...reshapeProject(fresh), resumedBuild: null });
+        return;
+      }
+
+      let resumedBuild: { id: string } | null = null;
+
+      if (project.status === 'STOPPED') {
+        // Start the Azure Container App FIRST; only flip the DB if it succeeds.
+        // A 502 (not a generic 500) on upstream Azure failure lets the client
+        // tell "Azure is down, retry" apart from a real server fault.
+        try {
+          await startContainerApp(project.containerAppName);
+        } catch (err) {
+          logger.error({ err, projectId: project.id }, 'azure start failed');
+          throw new HttpError(
+            502,
+            'AZURE_START_FAILED',
+            'Failed to start the app on Azure. The project is still stopped — try again.',
+          );
+        }
+        await prisma.project.update({
+          where: { id },
+          data: { status: 'ACTIVE', stoppedAt: null },
+        });
+        logger.info({ projectId: project.id }, 'project resumed');
+
+        // If auto-deploy is on, build the NEWEST commit so the resumed app
+        // converges to the current branch head — pushes made while stopped were
+        // ignored, and only the tip matters. Best-effort: the app is already back
+        // up on its last image, so a failed/absent build never fails the resume.
+        //
+        // The status is already ACTIVE here, so a webhook racing this enqueue is
+        // no longer gated and could create a second build — the same benign,
+        // single-replica-serialized race accepted for /rebuild above (the worker
+        // claims one at a time; the single-user gate makes the window vanishing).
+        if (project.autoDeploy && !env.KILL_SWITCH) {
+          try {
+            const inFlight = await prisma.build.findFirst({
+              where: { projectId: project.id, status: { in: IN_FLIGHT_BUILD_STATUSES } },
+              select: { id: true },
+            });
+            if (inFlight === null) {
+              const commit = await resolveLatestCommit(project, user.id);
+              if (commit !== null) {
+                const build = await prisma.build.create({
+                  data: {
+                    projectId: project.id,
+                    commitSha: commit.sha,
+                    commitMessage: commit.message,
+                    commitAuthor: commit.author,
+                    branch: project.branch,
+                    status: 'QUEUED',
+                  },
+                  select: { id: true },
+                });
+                resumedBuild = { id: build.id };
+                logger.info(
+                  { projectId: project.id, buildId: build.id, commitSha: commit.sha },
+                  'resume queued latest-commit build',
+                );
+              }
+            }
+          } catch (err) {
+            logger.warn(
+              { err, projectId: project.id },
+              'resume: auto-build of latest commit failed (app is up; non-fatal)',
+            );
+          }
+        }
+      }
+
+      const fresh = await prisma.project.findUniqueOrThrow({
+        where: { id },
+        include: projectWithRelations.include,
+      });
+      res.json({ ...reshapeProject(fresh), resumedBuild });
     } catch (err) {
       next(err);
     }

@@ -22,8 +22,10 @@ const mocks = vi.hoisted(() => ({
   userFindUniqueOrThrow: vi.fn(),
   projectFindMany: vi.fn(),
   projectFindUnique: vi.fn(),
+  projectFindFirst: vi.fn(),
   projectCount: vi.fn(),
   projectCreate: vi.fn(),
+  projectUpdate: vi.fn(),
   envVarCreate: vi.fn(),
   buildCreate: vi.fn(),
   buildFindFirst: vi.fn(),
@@ -47,8 +49,10 @@ vi.mock('../../db.js', () => ({
     project: {
       findMany: mocks.projectFindMany,
       findUnique: mocks.projectFindUnique,
+      findFirst: mocks.projectFindFirst,
       count: mocks.projectCount,
       create: mocks.projectCreate,
+      update: mocks.projectUpdate,
     },
     envVar: { create: mocks.envVarCreate },
     build: { create: mocks.buildCreate, findFirst: mocks.buildFindFirst, count: mocks.buildCount },
@@ -67,8 +71,14 @@ vi.mock('./demoBuildDriver.js', () => ({
   startDemoReplay: mocks.startDemoReplay,
 }));
 
-const { createDemoProject, startDemoBuild, seedDemoWorkspace, rollbackDemoDeployment } =
-  await import('./demoOrchestrator.js');
+const {
+  createDemoProject,
+  startDemoBuild,
+  seedDemoWorkspace,
+  rollbackDemoDeployment,
+  stopDemoProject,
+  resumeDemoProject,
+} = await import('./demoOrchestrator.js');
 const { SEED_PROJECTS } = await import('./fixtures/seed-workspace.js');
 
 const DEMO_USER = { id: 'demo-1', githubLogin: 'demo-abc123' };
@@ -92,6 +102,8 @@ beforeEach(() => {
   mocks.buildCreate.mockResolvedValue({ id: 'build-new' });
   mocks.buildFindFirst.mockResolvedValue(null);
   mocks.buildCount.mockResolvedValue(0);
+  mocks.projectFindFirst.mockResolvedValue({ id: 'proj-1', status: 'ACTIVE' });
+  mocks.projectUpdate.mockResolvedValue({ id: 'proj-1' });
   mocks.envVarCreate.mockResolvedValue({});
   mocks.logLineCreateMany.mockResolvedValue({});
   mocks.deploymentCreate.mockResolvedValue({ id: 'dep-new', active: true, build: {} });
@@ -314,5 +326,95 @@ describe('rollbackDemoDeployment', () => {
       code: 'BUILD_IN_PROGRESS',
     });
     expect(mocks.deploymentCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('stopDemoProject / resumeDemoProject', () => {
+  const PROJECT_ID = 'proj-1';
+  const USER_ID = 'demo-1';
+
+  it('stopDemoProject flips an ACTIVE demo project to STOPPED (DB-only, no Azure)', async () => {
+    mocks.projectFindFirst.mockResolvedValue({ id: PROJECT_ID, status: 'ACTIVE' });
+    mocks.buildFindFirst.mockResolvedValue(null);
+
+    await expect(stopDemoProject(PROJECT_ID, USER_ID)).resolves.toBeUndefined();
+
+    expect(mocks.projectUpdate).toHaveBeenCalledTimes(1);
+    const call = mocks.projectUpdate.mock.calls[0]![0];
+    expect(call.where).toEqual({ id: PROJECT_ID });
+    expect(call.data).toMatchObject({ status: 'STOPPED' });
+    expect(call.data.stoppedAt).toBeInstanceOf(Date);
+  });
+
+  it('stopDemoProject throws for a NON-demo user and never updates (fail-closed layer 4)', async () => {
+    mocks.userFindUnique.mockResolvedValue({ isDemo: false });
+    await expect(stopDemoProject(PROJECT_ID, USER_ID)).rejects.toThrow(/non-demo user/);
+    expect(mocks.projectFindFirst).not.toHaveBeenCalled();
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('stopDemoProject also fails closed when the user does not exist', async () => {
+    mocks.userFindUnique.mockResolvedValue(null);
+    await expect(stopDemoProject(PROJECT_ID, USER_ID)).rejects.toThrow(/non-demo user/);
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('stopDemoProject is an idempotent no-op when the project is already STOPPED', async () => {
+    mocks.projectFindFirst.mockResolvedValue({ id: PROJECT_ID, status: 'STOPPED' });
+    await expect(stopDemoProject(PROJECT_ID, USER_ID)).resolves.toBeUndefined();
+    expect(mocks.buildFindFirst).not.toHaveBeenCalled();
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('stopDemoProject throws 409 BUILD_IN_PROGRESS when a build is in flight (no update)', async () => {
+    mocks.projectFindFirst.mockResolvedValue({ id: PROJECT_ID, status: 'ACTIVE' });
+    mocks.buildFindFirst.mockResolvedValue({ id: 'b1' });
+    await expect(stopDemoProject(PROJECT_ID, USER_ID)).rejects.toMatchObject({
+      status: 409,
+      code: 'BUILD_IN_PROGRESS',
+    });
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('stopDemoProject throws 404 when the project is not found / foreign', async () => {
+    mocks.projectFindFirst.mockResolvedValue(null);
+    await expect(stopDemoProject(PROJECT_ID, USER_ID)).rejects.toMatchObject({
+      status: 404,
+      code: 'PROJECT_NOT_FOUND',
+    });
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('resumeDemoProject flips a STOPPED demo project back to ACTIVE (DB-only, no Azure)', async () => {
+    mocks.projectFindFirst.mockResolvedValue({ id: PROJECT_ID, status: 'STOPPED' });
+
+    await expect(resumeDemoProject(PROJECT_ID, USER_ID)).resolves.toBeUndefined();
+
+    expect(mocks.projectUpdate).toHaveBeenCalledTimes(1);
+    const call = mocks.projectUpdate.mock.calls[0]![0];
+    expect(call.where).toEqual({ id: PROJECT_ID });
+    expect(call.data).toMatchObject({ status: 'ACTIVE', stoppedAt: null });
+  });
+
+  it('resumeDemoProject throws for a NON-demo user and never updates (fail-closed layer 4)', async () => {
+    mocks.userFindUnique.mockResolvedValue({ isDemo: false });
+    await expect(resumeDemoProject(PROJECT_ID, USER_ID)).rejects.toThrow(/non-demo user/);
+    expect(mocks.projectFindFirst).not.toHaveBeenCalled();
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('resumeDemoProject is an idempotent no-op when the project is already ACTIVE', async () => {
+    mocks.projectFindFirst.mockResolvedValue({ id: PROJECT_ID, status: 'ACTIVE' });
+    await expect(resumeDemoProject(PROJECT_ID, USER_ID)).resolves.toBeUndefined();
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('resumeDemoProject throws 404 when the project is not found / foreign', async () => {
+    mocks.projectFindFirst.mockResolvedValue(null);
+    await expect(resumeDemoProject(PROJECT_ID, USER_ID)).rejects.toMatchObject({
+      status: 404,
+      code: 'PROJECT_NOT_FOUND',
+    });
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
   });
 });

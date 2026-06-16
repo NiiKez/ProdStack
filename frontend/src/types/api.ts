@@ -14,6 +14,15 @@ export interface ProjectActiveDeployment {
   createdAt: string;
 }
 
+/**
+ * Whether a project's deployed Azure app is running (`ACTIVE`) or paused
+ * (`STOPPED`). Stopping hard-stops the Container App (0 replicas, won't wake on
+ * traffic — not scale-to-zero) so the live URL goes dark at $0 compute;
+ * resuming brings it back and, when auto-deploy is on, builds the newest
+ * commit. See `useStopProject`/`useResumeProject`.
+ */
+export type ProjectStatus = 'ACTIVE' | 'STOPPED';
+
 export interface ProjectSummary {
   id: string;
   name: string;
@@ -24,6 +33,10 @@ export interface ProjectSummary {
   containerAppName: string;
   /** When false, a `git push` no longer auto-builds — deploy manually instead. */
   autoDeploy: boolean;
+  /** Running (`ACTIVE`) or paused (`STOPPED`). Present on list + detail. */
+  status: ProjectStatus;
+  /** ISO timestamp the project was last stopped, or null when active. */
+  stoppedAt: string | null;
   createdAt: string;
   updatedAt: string;
   latestBuild: ProjectLatestBuild | null;
@@ -252,6 +265,24 @@ export interface UpdateProjectResult extends ProjectDetail {
 /** `POST /api/projects/:id/rebuild` response. */
 export interface RebuildResult {
   buildId: string;
+}
+
+/**
+ * `POST /api/projects/:id/stop` response — the reshaped project (now STOPPED).
+ * The route returns the summary shape (no `builds`/`envVars`); callers read the
+ * status from the invalidated `['project', id]` query, not this payload.
+ */
+export type StopProjectResult = ProjectSummary;
+
+/**
+ * `POST /api/projects/:id/resume` response — the reshaped project (now ACTIVE)
+ * plus `resumedBuild`: non-null when auto-deploy was on and a build of the
+ * newest commit was queued, null otherwise (auto-deploy off, or no commit).
+ * Like stop, this is the summary shape (no `builds`/`envVars`) — only
+ * `resumedBuild` is consumed by the caller.
+ */
+export interface ResumeProjectResult extends ProjectSummary {
+  resumedBuild: { id: string } | null;
 }
 
 /** `POST /api/builds/:id/cancel` response. */

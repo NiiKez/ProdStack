@@ -9,6 +9,8 @@ import {
   ExternalLink,
   Github,
   GitBranch,
+  Pause,
+  Play,
   Rocket,
   RotateCcw,
   Terminal,
@@ -47,7 +49,7 @@ import {
 } from '@/components/ui';
 import type { EnvRow } from '@/components/ui';
 import { cn } from '@/lib/cn';
-import { api } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 import { buildEnvPayload, envRowsDirty, rowsFromServer } from '@/lib/envVars';
 import { isInFlight } from '@/lib/status';
 import { useProject } from '@/hooks/useProject';
@@ -59,6 +61,8 @@ import { useProjectMetrics } from '@/hooks/useProjectMetrics';
 import { useRuntimeLogs } from '@/hooks/useRuntimeLogs';
 import { useRollbackDeployment } from '@/hooks/useRollbackDeployment';
 import { useRebuildProject } from '@/hooks/useRebuildProject';
+import { useStopProject } from '@/hooks/useStopProject';
+import { useResumeProject } from '@/hooks/useResumeProject';
 import { useCancelBuild } from '@/hooks/useCancelBuild';
 import { MetricsChart } from '@/components/MetricsChart';
 import { formatLogClock } from '@/lib/runtimeLogs';
@@ -229,6 +233,48 @@ interface ProjectHeaderCardProps {
 }
 
 function ProjectHeaderCard({ project, onCopy }: ProjectHeaderCardProps) {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const stop = useStopProject();
+  const resume = useResumeProject();
+  const stopped = project.status === 'STOPPED';
+
+  const handleStop = async () => {
+    try {
+      await stop.mutateAsync(project.id);
+      toast({ title: 'Project stopped', variant: 'success' });
+    } catch (err) {
+      // 409 BUILD_IN_PROGRESS gets a clearer title; everything else surfaces the
+      // server message.
+      const inProgress = err instanceof ApiError && err.code === 'BUILD_IN_PROGRESS';
+      const description = err instanceof Error ? err.message : '';
+      toast({
+        title: inProgress ? "Can't stop — a build is running" : 'Could not stop project',
+        variant: 'error',
+        ...(description ? { description } : {}),
+      });
+    }
+  };
+
+  const handleResume = async () => {
+    try {
+      const result = await resume.mutateAsync(project.id);
+      if (result.resumedBuild) {
+        toast({ title: 'Resumed — building latest commit', variant: 'success' });
+        navigate(`/projects/${project.id}/builds/${result.resumedBuild.id}`);
+      } else {
+        toast({ title: 'Project resumed', variant: 'success' });
+      }
+    } catch (err) {
+      const description = err instanceof Error ? err.message : '';
+      toast({
+        title: 'Could not resume project',
+        variant: 'error',
+        ...(description ? { description } : {}),
+      });
+    }
+  };
+
   return (
     <Card className="relative flex flex-col gap-5 overflow-hidden p-6">
       {/* Subtle accent wash anchoring the hero to the brand. */}
@@ -252,7 +298,10 @@ function ProjectHeaderCard({ project, onCopy }: ProjectHeaderCardProps) {
             <ExternalLink size={12} aria-hidden className="shrink-0 opacity-70" />
           </a>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <Badge variant={stopped ? 'warn' : 'success'}>
+            {stopped ? 'Stopped' : 'Active'}
+          </Badge>
           <Badge mono variant="accent">
             <GitBranch size={12} aria-hidden />
             {project.branch}
@@ -261,6 +310,31 @@ function ProjectHeaderCard({ project, onCopy }: ProjectHeaderCardProps) {
             <StatusPill status={project.latestBuild.status} />
           ) : (
             <Badge>No builds yet</Badge>
+          )}
+          {stopped ? (
+            <Button
+              size="sm"
+              variant="primary"
+              leadingIcon={<Play size={14} />}
+              loading={resume.isPending}
+              disabled={resume.isPending}
+              title="Resume the project and bring its app back online"
+              onClick={() => void handleResume()}
+            >
+              Resume
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="secondary"
+              leadingIcon={<Pause size={14} />}
+              loading={stop.isPending}
+              disabled={stop.isPending}
+              title="Stop the project — pauses its app to save compute"
+              onClick={() => void handleStop()}
+            >
+              Stop
+            </Button>
           )}
         </div>
       </div>
@@ -306,6 +380,7 @@ function OverviewTab({ project }: OverviewTabProps) {
 
   const latest = project.latestBuild;
   const active = project.activeDeployment;
+  const stopped = project.status === 'STOPPED';
   // Look up author from builds list when available (richer than latestBuild).
   const latestBuildFull: BuildSummary | undefined = latest
     ? project.builds.find((b) => b.id === latest.id)
@@ -440,30 +515,51 @@ function OverviewTab({ project }: OverviewTabProps) {
         </Card>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          leadingIcon={<Rocket size={16} />}
-          variant="secondary"
-          disabled={buildInFlight || rebuild.isPending}
-          loading={rebuild.isPending}
-          title={buildInFlight ? 'A build is already running' : 'Build the latest commit on this branch'}
-          onClick={() => void handleRebuild()}
-        >
-          Trigger build
-        </Button>
-        <a
-          href={`https://github.com/${project.githubRepoFullName}`}
-          target="_blank"
-          rel="noreferrer noopener"
-          className={cn(
-            'inline-flex h-9 items-center gap-2 rounded-lg border border-slate-800 bg-slate-900 px-3.5 text-sm font-medium text-slate-100',
-            'transition-colors hover:border-slate-700 hover:bg-slate-800',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950'
-          )}
-        >
-          <Github size={16} aria-hidden />
-          Open in GitHub
-        </a>
+      {stopped && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2.5 text-sm text-amber-200">
+          <Pause size={14} aria-hidden className="shrink-0" />
+          <span>
+            This project is stopped — its app is paused and the live URL is offline. Resume it
+            from the header to bring it back online.
+          </span>
+        </div>
+      )}
+
+      <div className="flex flex-col gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            leadingIcon={<Rocket size={16} />}
+            variant="secondary"
+            disabled={stopped || buildInFlight || rebuild.isPending}
+            loading={rebuild.isPending}
+            title={
+              stopped
+                ? 'Resume the project to build'
+                : buildInFlight
+                  ? 'A build is already running'
+                  : 'Build the latest commit on this branch'
+            }
+            onClick={() => void handleRebuild()}
+          >
+            Trigger build
+          </Button>
+          <a
+            href={`https://github.com/${project.githubRepoFullName}`}
+            target="_blank"
+            rel="noreferrer noopener"
+            className={cn(
+              'inline-flex h-9 items-center gap-2 rounded-lg border border-slate-800 bg-slate-900 px-3.5 text-sm font-medium text-slate-100',
+              'transition-colors hover:border-slate-700 hover:bg-slate-800',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950'
+            )}
+          >
+            <Github size={16} aria-hidden />
+            Open in GitHub
+          </a>
+        </div>
+        {stopped && (
+          <p className="text-xs text-slate-500">Resume the project to build.</p>
+        )}
       </div>
 
       <ConfirmDialog

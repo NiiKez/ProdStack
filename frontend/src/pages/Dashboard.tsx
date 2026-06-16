@@ -78,11 +78,14 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
         >
           {deriveMonogram(project.name)}
         </span>
-        {project.latestBuild ? (
-          <StatusPill status={project.latestBuild.status} />
-        ) : (
-          <Badge>No builds yet</Badge>
-        )}
+        <div className="flex items-center gap-2">
+          {project.status === 'STOPPED' && <Badge variant="warn">Stopped</Badge>}
+          {project.latestBuild ? (
+            <StatusPill status={project.latestBuild.status} />
+          ) : (
+            <Badge>No builds yet</Badge>
+          )}
+        </div>
       </div>
 
       <div className="min-w-0">

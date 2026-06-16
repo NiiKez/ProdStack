@@ -34,6 +34,8 @@ export const sampleProjects: ProjectSummary[] = [
     liveUrl: 'https://alpha-service.example.com',
     containerAppName: 'app-alpha-service',
     autoDeploy: true,
+    status: 'ACTIVE',
+    stoppedAt: null,
     createdAt: '2026-05-01T10:00:00.000Z',
     updatedAt: '2026-05-20T10:00:00.000Z',
     latestBuild: {
@@ -58,6 +60,8 @@ export const sampleProjects: ProjectSummary[] = [
     liveUrl: null,
     containerAppName: 'app-beta-worker',
     autoDeploy: true,
+    status: 'ACTIVE',
+    stoppedAt: null,
     createdAt: '2026-05-10T10:00:00.000Z',
     updatedAt: '2026-05-18T10:00:00.000Z',
     latestBuild: {
@@ -108,6 +112,8 @@ export function makeProject(overrides: Partial<ProjectSummary> = {}): ProjectSum
     liveUrl: null,
     containerAppName: 'app-my-new-app',
     autoDeploy: true,
+    status: 'ACTIVE',
+    stoppedAt: null,
     createdAt: '2026-06-02T12:00:00.000Z',
     updatedAt: '2026-06-02T12:00:00.000Z',
     latestBuild: null,

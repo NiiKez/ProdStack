@@ -38,6 +38,8 @@ const projectRow = (() => {
     containerAppName: 'octocat-hello',
     liveUrl: 'https://octocat-hello.example.com',
     frameworkHint: null as string | null,
+    status: 'ACTIVE' as 'ACTIVE' | 'STOPPED',
+    stoppedAt: null as Date | null,
     autoDeploy: true,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -220,6 +222,32 @@ describe('POST /api/webhooks/github', () => {
     expect(state.builds).toHaveLength(0);
     // The delivery is still recorded for idempotency/audit.
     expect(state.webhookEvents.has('delivery-noauto')).toBe(true);
+  });
+
+  it('ignores a valid signed push with 202 when the project is STOPPED, creating no build or webhook event', async () => {
+    // Stop/Resume feature: a push to a stopped project must NOT queue a build.
+    // Unlike the autoDeploy-off path (which records a WebhookEvent for audit),
+    // a stopped project records NO WebhookEvent — resume rebuilds the branch
+    // head anyway, so the delivery is simply acknowledged (202) and dropped.
+    mocks.projectFindFirst.mockImplementationOnce(async () => ({
+      ...projectRow,
+      status: 'STOPPED' as const,
+    }));
+    const body = pushPayload();
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/webhooks/github')
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-GitHub-Delivery', 'delivery-stopped')
+      .set('X-Hub-Signature-256', sign(body))
+      .send(body);
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ ignored: 'project stopped' });
+    expect(state.builds).toHaveLength(0);
+    // No idempotency/audit row either — a stopped project drops the delivery.
+    expect(state.webhookEvents.size).toBe(0);
   });
 
   it('rejects an invalid signature with 401 and creates no build', async () => {
