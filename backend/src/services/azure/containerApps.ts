@@ -237,6 +237,16 @@ async function stubDelete(name: string): Promise<void> {
   await stubDelay();
 }
 
+async function stubStop(name: string): Promise<void> {
+  stubLog.info({ op: 'stopContainerApp', name }, 'stub: stop Container App');
+  await stubDelay();
+}
+
+async function stubStart(name: string): Promise<void> {
+  stubLog.info({ op: 'startContainerApp', name }, 'stub: start Container App');
+  await stubDelay();
+}
+
 // --- Real branch -----------------------------------------------------------
 
 let cachedClient: ContainerAppsAPIClient | undefined;
@@ -478,6 +488,31 @@ async function realDelete(name: string): Promise<void> {
   await client.containerApps.beginDeleteAndWait(resourceGroup, name);
 }
 
+/**
+ * Stop a Container App: deactivates all of its revisions so it drops to 0
+ * replicas and — unlike scale-to-zero (minReplicas=0) — does NOT wake on
+ * incoming traffic. Compute billing goes to $0 while stopped. The app
+ * definition (image, env, ingress, scale config) is fully preserved, so
+ * `startContainerApp` brings it back on the same revision with no rebuild.
+ */
+async function realStop(name: string): Promise<void> {
+  const client = getClient();
+  const resourceGroup = requireResourceGroup();
+  await client.containerApps.beginStopAndWait(resourceGroup, name);
+}
+
+/**
+ * Start a previously-stopped Container App: reactivates its latest revision
+ * with its stored scale configuration (e.g. an always-on app returns to
+ * minReplicas=1, a scale-to-zero app to minReplicas=0). The live URL is
+ * unchanged.
+ */
+async function realStart(name: string): Promise<void> {
+  const client = getClient();
+  const resourceGroup = requireResourceGroup();
+  await client.containerApps.beginStartAndWait(resourceGroup, name);
+}
+
 // --- Public API ------------------------------------------------------------
 
 export function isStub(): boolean {
@@ -501,6 +536,22 @@ export async function updateContainerApp(
 export async function deleteContainerApp(name: string): Promise<void> {
   assertValidName(name);
   return isStub() ? stubDelete(name) : realDelete(name);
+}
+
+/**
+ * Stop a deployed Container App (0 replicas, won't wake on traffic, $0 compute).
+ * Used by the project Stop/Resume feature. No-op-safe to call on an
+ * already-stopped app (Azure returns the app unchanged).
+ */
+export async function stopContainerApp(name: string): Promise<void> {
+  assertValidName(name);
+  return isStub() ? stubStop(name) : realStop(name);
+}
+
+/** Start a previously-stopped Container App, restoring its scale config. */
+export async function startContainerApp(name: string): Promise<void> {
+  assertValidName(name);
+  return isStub() ? stubStart(name) : realStart(name);
 }
 
 // --- Platform self-deploy (M6 "Option B") ----------------------------------

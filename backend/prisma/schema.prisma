@@ -26,6 +26,18 @@ enum LogLevel {
   SUCCESS
 }
 
+// A project is ACTIVE (its Azure Container App is running / scale-to-zero) or
+// STOPPED (the owner explicitly paused it — the Container App is stopped via
+// the SDK beginStop, so it reaches 0 replicas and stays there, NOT waking on
+// traffic, $0 compute). A STOPPED project rejects manual rebuilds and ignores
+// GitHub push webhooks (no build is queued). Resuming starts the app again and,
+// if autoDeploy is on, enqueues a build of the newest commit. See the
+// "Stop / Resume projects" feature notes in docs/.
+enum ProjectStatus {
+  ACTIVE
+  STOPPED
+}
+
 model User {
   id                     String    @id @default(cuid())
   githubUserId           Int       @unique
@@ -73,6 +85,12 @@ model Project {
   // are acknowledged (200) but no build is queued — the user deploys manually
   // via the "Trigger build" button. Manual rebuilds always ignore this flag.
   autoDeploy             Boolean      @default(true)
+  // Stop / Resume: ACTIVE (default) or STOPPED. When STOPPED the owner has
+  // paused the deployed app (Azure Container App stopped → 0 replicas, won't
+  // wake on traffic); webhooks are ignored and manual rebuilds are rejected
+  // until the project is resumed. `stoppedAt` records when it was paused.
+  status                 ProjectStatus @default(ACTIVE)
+  stoppedAt              DateTime?
   createdAt              DateTime     @default(now())
   updatedAt              DateTime     @updatedAt
   deletedAt              DateTime?

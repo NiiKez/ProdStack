@@ -425,6 +425,67 @@ export async function rollbackDemoDeployment(opts: {
 }
 
 /**
+ * DB-only "stop" for a demo project. The real path (`stopContainerApp`) tells
+ * Azure to stop the Container App; a demo project has none, so this just flips
+ * `status` to STOPPED. This is the §4-layer-3 demo branch for the stop route,
+ * which would otherwise reach real Azure (CORE INVARIANT breach). Mirrors the
+ * real path's guards: ownership scoping + reject while a build is in-flight.
+ */
+export async function stopDemoProject(projectId: string, userId: string): Promise<void> {
+  await assertDemoUser(userId);
+
+  const project = await prisma.project.findFirst({
+    where: { id: projectId, userId, deletedAt: null },
+    select: { id: true, status: true },
+  });
+  if (project === null) {
+    throw new HttpError(404, 'PROJECT_NOT_FOUND');
+  }
+  if (project.status === 'STOPPED') return; // idempotent no-op
+
+  const inFlight = await prisma.build.findFirst({
+    where: { projectId, status: { in: DEMO_IN_FLIGHT } },
+    select: { id: true },
+  });
+  if (inFlight !== null) {
+    throw new HttpError(
+      409,
+      'BUILD_IN_PROGRESS',
+      'A build is currently running for this project. Wait for it to finish before stopping.',
+    );
+  }
+
+  await prisma.project.update({
+    where: { id: projectId },
+    data: { status: 'STOPPED', stoppedAt: new Date() },
+  });
+}
+
+/**
+ * DB-only "resume" for a demo project — flips `status` back to ACTIVE. Unlike
+ * the real path, a demo resume never auto-builds (a demo session has no real
+ * git HEAD to build, and demo builds are always triggered explicitly), so there
+ * is no `resumedBuild`.
+ */
+export async function resumeDemoProject(projectId: string, userId: string): Promise<void> {
+  await assertDemoUser(userId);
+
+  const project = await prisma.project.findFirst({
+    where: { id: projectId, userId, deletedAt: null },
+    select: { id: true, status: true },
+  });
+  if (project === null) {
+    throw new HttpError(404, 'PROJECT_NOT_FOUND');
+  }
+  if (project.status === 'ACTIVE') return; // idempotent no-op
+
+  await prisma.project.update({
+    where: { id: projectId },
+    data: { status: 'ACTIVE', stoppedAt: null },
+  });
+}
+
+/**
  * Derive a plausible `owner/repo` full name for a demo project. A demo session's
  * repo is never fetched, so this is cosmetic; we reuse a parseable GitHub URL's
  * path when present, else synthesize `<login>/<slug>`. Never throws — a demo

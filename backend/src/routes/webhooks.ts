@@ -178,6 +178,21 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
       return;
     }
 
+    // Stopped project: the owner has paused it (the Container App is stopped).
+    // Don't queue a build for something that isn't running — acknowledge with 202
+    // so GitHub treats the delivery as accepted and won't retry. No WebhookEvent
+    // is recorded: there's no build to dedupe, and on resume the project rebuilds
+    // the current branch head anyway, so pushes made while stopped aren't "lost"
+    // — only the newest one matters, and resume picks it up.
+    if (project.status === 'STOPPED') {
+      logger.info(
+        { projectId: project.id, deliveryId, commitSha },
+        'webhook push ignored: project is stopped',
+      );
+      res.status(202).json({ ignored: 'project stopped' });
+      return;
+    }
+
     // Auto-deploy gate: when the project has `autoDeploy` turned off, a push is
     // acknowledged (200, so GitHub doesn't retry) but no Build is queued — the
     // user deploys manually via "Trigger build". We still record the
