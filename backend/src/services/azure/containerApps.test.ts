@@ -293,7 +293,7 @@ describe('forceNewRevision (env-redeploy rolls a fresh revision)', () => {
     expect(envelope.template.revisionSuffix).toMatch(/^cfg[0-9a-f]{12}$/);
   });
 
-  it('omits the revisionSuffix without the flag (so a plain image roll is unaffected)', async () => {
+  it('blanks the revisionSuffix without the flag (so ACA auto-generates a fresh one)', async () => {
     mocks.get.mockResolvedValue(existingApp('demo--0000001'));
     mocks.beginCreateOrUpdateAndWait.mockResolvedValue({ configuration: { ingress: {} } });
 
@@ -305,7 +305,32 @@ describe('forceNewRevision (env-redeploy rolls a fresh revision)', () => {
     });
 
     const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
-    expect(envelope.template.revisionSuffix).toBeUndefined();
+    // Empty string ≡ unset for ARM → ACA picks a unique suffix.
+    expect(envelope.template.revisionSuffix).toBe('');
+  });
+
+  it('does NOT inherit an explicit suffix from the live revision on a plain roll', async () => {
+    // Regression: a prior env-redeploy (or a manual `--revision-suffix`) leaves the
+    // live revision created with an explicit suffix, which `get()` echoes back in
+    // `template.revisionSuffix`. Re-PUTting it makes ARM reject the roll with
+    // "revision with suffix <x> already exists" — wedging every future build deploy.
+    // A plain image roll must blank it, not carry it over.
+    mocks.get.mockResolvedValue({
+      ...existingApp('demo--cfg9950b2a7451b'),
+      template: {
+        containers: [{ name: 'demo', image: 'old:tag' }],
+        scale: {},
+        revisionSuffix: 'cfg9950b2a7451b',
+      },
+    });
+    mocks.beginCreateOrUpdateAndWait.mockResolvedValue({ configuration: { ingress: {} } });
+
+    const { updateContainerApp } = await import('./containerApps.js');
+    await updateContainerApp({ name: 'demo', image: 'new:tag' });
+
+    const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    expect(envelope.template.revisionSuffix).toBe('');
+    expect(envelope.template.revisionSuffix).not.toBe('cfg9950b2a7451b');
   });
 
   it('changes the suffix when an env value changes (so the rotation actually rolls)', async () => {
