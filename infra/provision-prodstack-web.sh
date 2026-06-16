@@ -102,12 +102,14 @@ az containerapp ingress update \
   --target-port 8080 >/dev/null
 
 # --- 4. Cap scaling per the single-user safety policy ----------------------
-# Tighten from the ACA default max=10 down to max=1. min=0 lets it scale to
-# zero when idle (accepts the ~1-2s cold start — fine for a portfolio demo).
-echo "==> Setting scale bounds min=0 max=1"
+# Tighten from the ACA default max=10 down to max=1. min=1 keeps the frontend
+# always-on (no cold start on prodstack.live) — owner-requested 2026-06-16 so
+# the live site responds instantly. (Was min=0/scale-to-zero; the ~1-2s cold
+# start was acceptable for a demo but the owner wants it running constantly.)
+echo "==> Setting scale bounds min=1 max=1"
 az containerapp update \
   -n $APP -g $RG \
-  --min-replicas 0 \
+  --min-replicas 1 \
   --max-replicas 1 >/dev/null
 
 # --- 5. Show current state -------------------------------------------------

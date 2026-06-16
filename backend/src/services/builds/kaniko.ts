@@ -23,7 +23,11 @@ import path from 'node:path';
 
 import { env } from '../../env.js';
 
-const KANIKO_IMAGE = 'gcr.io/kaniko-project/executor:v1.23.2';
+// Only used by the `docker` runner mode (local dev). The prod `kaniko` mode
+// invokes the in-image `/kaniko/executor` binary instead (see worker/Dockerfile,
+// pinned to v1.24.0 by Dependabot #23). Keep this tag in lockstep with that
+// FROM so local docker-mode builds match what ships in the builder image.
+const KANIKO_IMAGE = 'gcr.io/kaniko-project/executor:v1.24.0';
 
 /** Grace period after an abort's SIGTERM before escalating to SIGKILL. */
 const ABORT_KILL_GRACE_MS = 10_000;

@@ -33,7 +33,7 @@ RUN npm prune --omit=dev
 # --- Kaniko binary --------------------------------------------------------
 # Pulling the official kaniko image just so we can copy its executor out.
 # Pinned to match the version `kaniko.ts` documents, and digest-pinned (M3).
-# The digest is for gcr.io/kaniko-project/executor:v1.23.2.
+# The digest is for gcr.io/kaniko-project/executor:v1.24.0 (Dependabot #23).
 FROM gcr.io/kaniko-project/executor:v1.24.0@sha256:4e7a52dd1f14872430652bb3b027405b8dfd17c4538751c620ac005741ef9698 AS kaniko
 
 # --- Runtime --------------------------------------------------------------

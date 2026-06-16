@@ -37,18 +37,20 @@ RUN npm run build --workspace=@prodstack/web
 # Hardening history: M3 moved off floating `nginx:alpine` → minor-pinned
 # `nginx:1.27-alpine`, digest-pinned to an immutable @sha256. Then (2026-06-12,
 # off the back of the Trivy image scan) switched to the FULLY-ROOTLESS
-# `nginxinc/nginx-unprivileged:1.29-alpine`:
+# `nginxinc/nginx-unprivileged` (first 1.29-alpine; Dependabot has since rolled
+# the tag forward — currently 1.31-alpine, PR #27/#42):
 #   1. Security: stock nginx runs its master process as root (only to bind the
 #      privileged port :80). The unprivileged image runs the whole stack as uid
 #      101 and listens on :8080 — clears Trivy AVD-DS-0002 (run-as-root HIGH).
 #   2. Freshness: `nginx:1.27-alpine` was stuck on alpine 3.21.3 and had
-#      accumulated 32 HIGH/CRITICAL OS CVEs; `1.29-alpine` is on alpine 3.23.4
-#      (down to ~3, the rest unfixed-upstream).
+#      accumulated 32 HIGH/CRITICAL OS CVEs; the nginx-unprivileged alpine line
+#      (3.23.x+) is down to ~3 HIGH, the rest unfixed-upstream.
 # Listening on :8080 (not :80) REQUIRES the web Container App's ingress
 # targetPort to be 8080 — done live + made durable in infra/provision-prodstack-web.sh.
 # It still ships the same envsubst entrypoint (/docker-entrypoint.d/...) so the
 # /etc/nginx/templates/*.template render below is unchanged.
-# The digest below is for nginxinc/nginx-unprivileged:1.29-alpine.
+# The digest below is for nginxinc/nginx-unprivileged:1.31-alpine (Dependabot
+# keeps the tag + digest current; update both together, never the tag alone).
 FROM nginxinc/nginx-unprivileged:1.31-alpine@sha256:cc300bd2e8776708a8c2c8686a74f06eadf221c5ce01e85d0e821955d7a730ab AS runner
 
 # Install our site config as an envsubst TEMPLATE. nginx:alpine's
