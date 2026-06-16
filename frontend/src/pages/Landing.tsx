@@ -121,26 +121,33 @@ export default function Landing() {
             ProdStack connects a GitHub repo to Azure Container Apps. Push a commit, get a live URL.
           </p>
           <div className="mt-9">
-            <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
-              <Button
-                size="lg"
-                onClick={handleLaunchDemo}
-                leadingIcon={<Play className="h-4 w-4" aria-hidden />}
-              >
-                Launch demo
-              </Button>
-              <Button
-                size="lg"
-                variant="secondary"
-                onClick={handleSignIn}
-                leadingIcon={<Github className="h-4 w-4" aria-hidden />}
-              >
-                Sign in with GitHub
-              </Button>
+            <div className="flex flex-col items-center justify-center gap-6 sm:flex-row sm:items-start">
+              <div className="flex flex-col items-center gap-3">
+                <Button
+                  size="lg"
+                  onClick={handleLaunchDemo}
+                  leadingIcon={<Play className="h-4 w-4" aria-hidden />}
+                >
+                  Launch demo
+                </Button>
+                <p className="max-w-[15rem] text-xs text-slate-500">
+                  No GitHub account needed — explore a sandboxed deploy.
+                </p>
+              </div>
+              <div className="flex flex-col items-center gap-3">
+                <Button
+                  size="lg"
+                  variant="secondary"
+                  onClick={handleSignIn}
+                  leadingIcon={<Github className="h-4 w-4" aria-hidden />}
+                >
+                  Sign in with GitHub
+                </Button>
+                <p className="max-w-[15rem] text-xs text-slate-500">
+                  Owner-only — public visitors use the demo.
+                </p>
+              </div>
             </div>
-            <p className="mt-3.5 text-xs text-slate-500">
-              No GitHub account needed — explore a sandboxed deploy.
-            </p>
           </div>
         </section>
 

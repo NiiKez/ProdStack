@@ -63,4 +63,11 @@ describe('Landing buttons wire to the right navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: /sign in with github/i }));
     expect(assign).toHaveBeenCalledWith(githubBeginUrl('/projects/abc'));
   });
+
+  it('sets expectations up front that GitHub sign-in is owner-only', () => {
+    // The owner-gating denial toast only fires *after* a non-owner round-trips
+    // through OAuth. The landing caption is what warns them before they click.
+    renderLanding('/dashboard');
+    expect(screen.getByText(/owner-only — public visitors use the demo/i)).toBeInTheDocument();
+  });
 });
