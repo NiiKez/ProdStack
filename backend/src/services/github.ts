@@ -76,8 +76,17 @@ function extractGithubMessage(err: unknown): string | undefined {
 }
 
 /**
- * Register a `push` webhook on `{owner}/{repo}`. Returns the GitHub hook id.
- * On failure, throws `GithubWebhookError` so the route can branch on status.
+ * Webhook events ProdStack subscribes to. `push` drives auto-deploy of the
+ * tracked branch; `pull_request` drives preview/PR environments (only acted on
+ * when previews are enabled + the author is trusted — see services/previews).
+ * Subscribing to `pull_request` is harmless when previews are off: the webhook
+ * receiver acknowledges and ignores it.
+ */
+export const PRODSTACK_WEBHOOK_EVENTS = ['push', 'pull_request'] as const;
+
+/**
+ * Register the ProdStack webhook on `{owner}/{repo}`. Returns the GitHub hook
+ * id. On failure, throws `GithubWebhookError` so the route can branch on status.
  */
 export async function createRepoWebhook(
   octokit: Octokit,
@@ -89,7 +98,7 @@ export async function createRepoWebhook(
       repo: opts.repo,
       name: 'web',
       active: true,
-      events: ['push'],
+      events: [...PRODSTACK_WEBHOOK_EVENTS],
       config: {
         url: opts.url,
         content_type: 'json',
@@ -101,6 +110,65 @@ export async function createRepoWebhook(
   } catch (err) {
     throw new GithubWebhookError(
       'failed to create repo webhook',
+      extractStatus(err),
+      extractGithubMessage(err),
+      err,
+    );
+  }
+}
+
+/**
+ * Read an existing hook's currently-subscribed events. Used by the backfill to
+ * merge (rather than blindly replace) the event list. Throws `GithubWebhookError`
+ * so the caller can branch on status (incl. 404 for a hook deleted on GitHub).
+ */
+export async function getRepoWebhookEvents(
+  octokit: Octokit,
+  opts: { owner: string; repo: string; hookId: number },
+): Promise<string[]> {
+  try {
+    const res = await octokit.request('GET /repos/{owner}/{repo}/hooks/{hook_id}', {
+      owner: opts.owner,
+      repo: opts.repo,
+      hook_id: opts.hookId,
+    });
+    return Array.isArray(res.data.events) ? res.data.events : [];
+  } catch (err) {
+    throw new GithubWebhookError(
+      'failed to read repo webhook',
+      extractStatus(err),
+      extractGithubMessage(err),
+      err,
+    );
+  }
+}
+
+/**
+ * Update an EXISTING hook's subscribed events (a PATCH that preserves the hook
+ * id + secret — no delete/recreate). Used by the one-off backfill that adds
+ * `pull_request` to projects whose webhook was created before previews shipped.
+ * Throws `GithubWebhookError` so the caller can branch on status (incl. 404 for
+ * a hook deleted on the GitHub side).
+ *
+ * ⚠️ REPLACE-semantics: GitHub's PATCH overwrites the entire `events` array — it
+ * is NOT additive. Pass the full desired set (the backfill reads the current
+ * events via {@link getRepoWebhookEvents} and passes the union so it can't drop a
+ * pre-existing event).
+ */
+export async function updateRepoWebhookEvents(
+  octokit: Octokit,
+  opts: { owner: string; repo: string; hookId: number; events?: readonly string[] },
+): Promise<void> {
+  try {
+    await octokit.request('PATCH /repos/{owner}/{repo}/hooks/{hook_id}', {
+      owner: opts.owner,
+      repo: opts.repo,
+      hook_id: opts.hookId,
+      events: [...(opts.events ?? PRODSTACK_WEBHOOK_EVENTS)],
+    });
+  } catch (err) {
+    throw new GithubWebhookError(
+      'failed to update repo webhook events',
       extractStatus(err),
       extractGithubMessage(err),
       err,

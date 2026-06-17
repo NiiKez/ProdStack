@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { containerAppName, dedupedSlug, slugify } from './slug.js';
+import { containerAppName, dedupedSlug, previewContainerAppName, slugify } from './slug.js';
 
 const CONTAINER_APP_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 
@@ -106,5 +106,47 @@ describe('containerAppName', () => {
   it('never ends with -', () => {
     const name = containerAppName('user', 'trailing-');
     expect(/[a-z0-9]$/.test(name)).toBe(true);
+  });
+});
+
+describe('previewContainerAppName', () => {
+  it('has the pr<N>-<hash> shape', () => {
+    expect(previewContainerAppName('clproj123', 7)).toMatch(/^pr7-[0-9a-f]{8}$/);
+  });
+
+  it('is a valid ACA name and well under 32 chars even for a huge PR number', () => {
+    const name = previewContainerAppName('clproj123', 999999);
+    expect(name.length).toBeLessThanOrEqual(32);
+    expect(CONTAINER_APP_PATTERN.test(name)).toBe(true);
+  });
+
+  it('is deterministic for the same (project, pr)', () => {
+    expect(previewContainerAppName('clproj123', 12)).toBe(previewContainerAppName('clproj123', 12));
+  });
+
+  it('differs per PR number within a project', () => {
+    expect(previewContainerAppName('clproj123', 1)).not.toBe(previewContainerAppName('clproj123', 2));
+  });
+
+  it('differs per project for the same PR number (no cross-project collision)', () => {
+    expect(previewContainerAppName('projA', 5)).not.toBe(previewContainerAppName('projB', 5));
+  });
+
+  it('starts and ends with an alphanumeric', () => {
+    const name = previewContainerAppName('whatever', 3);
+    expect(/^[a-z0-9]/.test(name)).toBe(true);
+    expect(/[a-z0-9]$/.test(name)).toBe(true);
+  });
+
+  it('stays a valid ACA name regardless of projectId length', () => {
+    const name = previewContainerAppName('a'.repeat(200), 4242);
+    expect(name.length).toBeLessThanOrEqual(32);
+    expect(CONTAINER_APP_PATTERN.test(name)).toBe(true);
+  });
+
+  it('rejects a non-positive / non-integer PR number (defense-in-depth at the sink)', () => {
+    expect(() => previewContainerAppName('clproj123', 0)).toThrow(/invalid PR number/);
+    expect(() => previewContainerAppName('clproj123', -5)).toThrow(/invalid PR number/);
+    expect(() => previewContainerAppName('clproj123', 1.5)).toThrow(/invalid PR number/);
   });
 });

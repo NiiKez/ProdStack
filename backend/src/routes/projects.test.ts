@@ -533,7 +533,8 @@ describe('POST /api/projects', () => {
     expect(args.repo).toBe('hello');
     expect(args.name).toBe('web');
     expect(args.active).toBe(true);
-    expect(args.events).toEqual(['push']);
+    // Preview/PR environments: new hooks subscribe to pull_request too.
+    expect(args.events).toEqual(['push', 'pull_request']);
     expect(args.config.content_type).toBe('json');
     // PUBLIC_API_URL defaults to http://localhost:3000; webhook path is fixed.
     expect(args.config.url).toBe('http://localhost:3000/api/webhooks/github');

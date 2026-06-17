@@ -65,6 +65,7 @@ import { useStopProject } from '@/hooks/useStopProject';
 import { useResumeProject } from '@/hooks/useResumeProject';
 import { useCancelBuild } from '@/hooks/useCancelBuild';
 import { MetricsChart } from '@/components/MetricsChart';
+import { PreviewsTab } from '@/components/PreviewsTab';
 import { formatLogClock } from '@/lib/runtimeLogs';
 import type { MetricKey, MetricRange } from '@/lib/metrics';
 import type {
@@ -75,12 +76,20 @@ import type {
   UpdateProjectResult,
 } from '@/types/api';
 
-type TabValue = 'overview' | 'builds' | 'deployments' | 'logs' | 'metrics' | 'settings';
+type TabValue =
+  | 'overview'
+  | 'builds'
+  | 'deployments'
+  | 'previews'
+  | 'logs'
+  | 'metrics'
+  | 'settings';
 
 const TAB_VALUES: ReadonlySet<TabValue> = new Set<TabValue>([
   'overview',
   'builds',
   'deployments',
+  'previews',
   'logs',
   'metrics',
   'settings',
@@ -179,6 +188,7 @@ export default function ProjectDetail() {
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="builds">Builds</TabsTrigger>
           <TabsTrigger value="deployments">Deployments</TabsTrigger>
+          <TabsTrigger value="previews">Previews</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
           <TabsTrigger value="metrics">Metrics</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
@@ -192,6 +202,9 @@ export default function ProjectDetail() {
         </TabsContent>
         <TabsContent value="deployments">
           <DeploymentsTab project={project} />
+        </TabsContent>
+        <TabsContent value="previews">
+          <PreviewsTab project={project} />
         </TabsContent>
         <TabsContent value="logs">
           <LogsTab project={project} />
@@ -1123,6 +1136,7 @@ function useUpdateProject(id: string) {
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.branch !== undefined ? { branch: input.branch } : {}),
           ...(input.autoDeploy !== undefined ? { autoDeploy: input.autoDeploy } : {}),
+          ...(input.previewsEnabled !== undefined ? { previewsEnabled: input.previewsEnabled } : {}),
         });
       }
       return prev ? { prev } : {};
@@ -1145,13 +1159,14 @@ function useUpdateProject(id: string) {
   });
 }
 
-function SettingsTab({ project }: SettingsTabProps) {
+export function SettingsTab({ project }: SettingsTabProps) {
   const navigate = useNavigate();
   const { toast } = useToast();
 
   const [name, setName] = useState(project.name);
   const [branch, setBranch] = useState(project.branch);
   const [autoDeploy, setAutoDeploy] = useState(project.autoDeploy);
+  const [previewsEnabled, setPreviewsEnabled] = useState(project.previewsEnabled);
   const [deleteInput, setDeleteInput] = useState('');
 
   // Re-sync when the project data updates from elsewhere.
@@ -1159,7 +1174,8 @@ function SettingsTab({ project }: SettingsTabProps) {
     setName(project.name);
     setBranch(project.branch);
     setAutoDeploy(project.autoDeploy);
-  }, [project.name, project.branch, project.autoDeploy]);
+    setPreviewsEnabled(project.previewsEnabled);
+  }, [project.name, project.branch, project.autoDeploy, project.previewsEnabled]);
 
   // Env vars: seed masked rows from the server (values are write-only — the
   // server sends only {key,hasValue}, so a stored secret shows a "(set)"
@@ -1180,7 +1196,10 @@ function SettingsTab({ project }: SettingsTabProps) {
   const deleteProject = useDeleteProject();
 
   const dirty =
-    name !== project.name || branch !== project.branch || autoDeploy !== project.autoDeploy;
+    name !== project.name ||
+    branch !== project.branch ||
+    autoDeploy !== project.autoDeploy ||
+    previewsEnabled !== project.previewsEnabled;
   const canSave = dirty && name.trim().length > 0 && branch.trim().length > 0;
 
   const envDirty = envRowsDirty(envVars, project.envVars);
@@ -1251,6 +1270,7 @@ function SettingsTab({ project }: SettingsTabProps) {
     if (name !== project.name) patch.name = name.trim();
     if (branch !== project.branch) patch.branch = branch.trim();
     if (autoDeploy !== project.autoDeploy) patch.autoDeploy = autoDeploy;
+    if (previewsEnabled !== project.previewsEnabled) patch.previewsEnabled = previewsEnabled;
     try {
       await updateProject.mutateAsync(patch);
       toast({ title: 'Project settings saved.', variant: 'success' });
@@ -1341,6 +1361,34 @@ function SettingsTab({ project }: SettingsTabProps) {
               className={cn(
                 'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
                 autoDeploy ? 'translate-x-6' : 'translate-x-1',
+              )}
+            />
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm font-medium text-slate-200">Preview environments</span>
+            <span className="text-xs text-slate-500">
+              Spin up an ephemeral per-PR app for each pull request from a trusted author
+              (owner/collaborator, same repo). Torn down when the PR closes.
+            </span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={previewsEnabled}
+            aria-label="Preview environments"
+            onClick={() => setPreviewsEnabled((v) => !v)}
+            className={cn(
+              'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900',
+              previewsEnabled ? 'border-accent-500 bg-accent-500/80' : 'border-slate-700 bg-slate-800',
+            )}
+          >
+            <span
+              className={cn(
+                'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                previewsEnabled ? 'translate-x-6' : 'translate-x-1',
               )}
             />
           </button>

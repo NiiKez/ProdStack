@@ -86,6 +86,19 @@ describe('cleanupBuilds', () => {
     expect(arg.where.deployments).toEqual({ none: {} });
   });
 
+  it('never reaps a build that backs an OPEN preview (no Deployment row protects it)', async () => {
+    // Preview builds create NO Deployment, so the `deployments:{none:{}}` guard
+    // doesn't cover them. An OPEN preview's lastBuildId / log history must survive
+    // pruning (Build.previewId is SetNull — no cascade protects it). The filter
+    // keeps non-preview builds + torn-down-preview builds prunable.
+    await cleanupBuilds();
+    const arg = mocks.buildDeleteMany.mock.calls[0][0];
+    expect(arg.where.OR).toEqual([
+      { previewId: null },
+      { preview: { closedAt: { not: null } } },
+    ]);
+  });
+
   it('returns the counts reported by Prisma', async () => {
     mocks.logLineDeleteMany.mockResolvedValue({ count: 100 });
     mocks.buildDeleteMany.mockResolvedValue({ count: 7 });

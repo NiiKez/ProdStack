@@ -22,6 +22,7 @@ import { env } from '../../env.js';
 import { logger } from '../../lib/logger.js';
 import { cleanupBuilds } from './cleanupBuilds.js';
 import { cleanupDemo } from './cleanupDemo.js';
+import { cleanupExpiredPreviews } from './cleanupPreviews.js';
 import { cleanupImages } from './cleanupImages.js';
 
 const log = logger.child({ component: 'cleanup-scheduler' });
@@ -37,6 +38,14 @@ const CRON_SCHEDULE = '17 3 * * *';
  * top-of-hour jobs.
  */
 const DEMO_CRON_SCHEDULE = '42 * * * *';
+
+/**
+ * Preview-environment reaper cadence: hourly at :27. Previews carry a sliding
+ * TTL (PREVIEW_TTL_HOURS, default 72) refreshed on every push; this backstops a
+ * missed PR-closed webhook so a leaked preview Container App can't idle forever.
+ * Offset off :00 and off the demo reaper's :42 to spread the load.
+ */
+const PREVIEW_CRON_SCHEDULE = '27 * * * *';
 
 export interface CleanupSchedulerHandle {
   stop: () => void;
@@ -72,11 +81,22 @@ async function runDemoCleanup(): Promise<void> {
   }
 }
 
+async function runPreviewCleanup(): Promise<void> {
+  log.info('preview cleanup job starting');
+  try {
+    const res = await cleanupExpiredPreviews();
+    log.info({ ...res }, 'preview cleanup job finished');
+  } catch (err) {
+    log.error({ err }, 'preview cleanup job failed');
+  }
+}
+
 export function startCleanupScheduler(): CleanupSchedulerHandle {
   log.info(
     {
       schedule: CRON_SCHEDULE,
       demoSchedule: DEMO_CRON_SCHEDULE,
+      previewSchedule: PREVIEW_CRON_SCHEDULE,
       retentionDaysImages: env.RETENTION_DAYS_IMAGES,
       retentionDaysLogs: env.RETENTION_DAYS_LOGS,
       retentionDaysBuilds: env.RETENTION_DAYS_BUILDS,
@@ -94,6 +114,9 @@ export function startCleanupScheduler(): CleanupSchedulerHandle {
     }),
     cron.schedule(DEMO_CRON_SCHEDULE, () => {
       void runDemoCleanup();
+    }),
+    cron.schedule(PREVIEW_CRON_SCHEDULE, () => {
+      void runPreviewCleanup();
     }),
   ];
 

@@ -40,6 +40,7 @@ import {
   GithubWebhookError,
   octokitForUser,
 } from '../services/github.js';
+import { listPreviews, teardownPreview } from '../services/previews/previewService.js';
 import { loadDecryptedEnvVars, loadEnvVarMeta } from '../services/projectEnv.js';
 import { containerAppName, dedupedSlug, slugify } from '../services/slug.js';
 
@@ -114,6 +115,7 @@ const patchBodySchema = z.object({
   branch: branchSchema.optional(),
   name: z.string().min(1).max(50).optional(),
   autoDeploy: z.boolean().optional(),
+  previewsEnabled: z.boolean().optional(),
   envVars: z
     .array(
       z.object({
@@ -209,6 +211,7 @@ function reshapeProject(project: ProjectWithRelations, opts: { allBuilds?: boole
     liveUrl: project.liveUrl,
     frameworkHint: project.frameworkHint,
     autoDeploy: project.autoDeploy,
+    previewsEnabled: project.previewsEnabled,
     status: project.status,
     stoppedAt: project.stoppedAt,
     createdAt: project.createdAt,
@@ -698,6 +701,94 @@ router.get('/:id/deployments', async (req: Request, res: Response, next: NextFun
   }
 });
 
+// --- Preview / PR environments ---------------------------------------------
+
+const previewParamSchema = z.object({
+  id: z.string().min(1).max(40),
+  previewId: z.string().min(1).max(40),
+});
+
+function serializePreview(p: {
+  id: string;
+  prNumber: number;
+  title: string;
+  headRef: string;
+  headSha: string;
+  authorLogin: string;
+  status: string;
+  liveUrl: string | null;
+  lastBuildId: string | null;
+  expiresAt: Date;
+  closedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return {
+    id: p.id,
+    prNumber: p.prNumber,
+    title: p.title,
+    headRef: p.headRef,
+    headSha: p.headSha,
+    authorLogin: p.authorLogin,
+    status: p.status,
+    liveUrl: p.liveUrl,
+    lastBuildId: p.lastBuildId,
+    expiresAt: p.expiresAt,
+    closedAt: p.closedAt,
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+  };
+}
+
+// GET /:id/previews — list this project's preview environments (open first by
+// recency). Demo projects never have previews (no real PRs), so this is just an
+// empty list for a demo session.
+router.get('/:id/previews', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = idParamSchema.parse(req.params);
+    const user = getUser(req);
+    await requireOwnedProject(id, user.id);
+    const previews = await listPreviews(id);
+    res.json({ previews: previews.map(serializePreview) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /:id/previews/:previewId/teardown — manually tear down a preview (delete
+// its Container App + mark TORN_DOWN). Idempotent.
+router.post(
+  '/:id/previews/:previewId/teardown',
+  requireXRequestedWith,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { id, previewId } = previewParamSchema.parse(req.params);
+      const user = getUser(req);
+      await requireOwnedProject(id, user.id);
+
+      // Demo sessions have no real previews / Container Apps — never reach Azure.
+      if (req.user?.isDemo === true) {
+        throw new HttpError(403, 'DEMO_NOT_SUPPORTED', 'Preview environments are not available in the demo.');
+      }
+
+      // Scope the preview to the owned project so one user can't tear down
+      // another's preview by guessing an id.
+      const preview = await prisma.previewEnvironment.findFirst({
+        where: { id: previewId, projectId: id },
+      });
+      if (preview === null) {
+        throw new HttpError(404, 'PREVIEW_NOT_FOUND');
+      }
+
+      await teardownPreview(preview.id);
+      const fresh = await prisma.previewEnvironment.findUniqueOrThrow({ where: { id: preview.id } });
+      res.json(serializePreview(fresh));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 // --- POST /:id/deployments/:deploymentId/rollback --------------------------
 
 router.post(
@@ -1025,6 +1116,7 @@ router.patch(
       if (body.branch !== undefined) updates.branch = body.branch;
       if (body.name !== undefined) updates.name = body.name;
       if (body.autoDeploy !== undefined) updates.autoDeploy = body.autoDeploy;
+      if (body.previewsEnabled !== undefined) updates.previewsEnabled = body.previewsEnabled;
 
       // When env vars are submitted, diff the desired set against what's stored
       // so we only trigger a config-only redeploy when something actually

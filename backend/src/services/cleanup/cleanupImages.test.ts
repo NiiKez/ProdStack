@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => ({
   deleteManifestByTag: vi.fn(),
   getContainerAppImage: vi.fn(),
   findManyDeployments: vi.fn(),
+  findManyPreviews: vi.fn(),
+  findManyBuilds: vi.fn(),
 }));
 
 vi.mock('./acrRegistry.js', () => ({
@@ -45,7 +47,11 @@ vi.mock('../azure/containerApps.js', () => ({
 }));
 
 vi.mock('../../db.js', () => ({
-  prisma: { deployment: { findMany: mocks.findManyDeployments } },
+  prisma: {
+    deployment: { findMany: mocks.findManyDeployments },
+    previewEnvironment: { findMany: mocks.findManyPreviews },
+    build: { findMany: mocks.findManyBuilds },
+  },
 }));
 
 const { cleanupImages, parseImageRef } = await import('./cleanupImages.js');
@@ -91,6 +97,8 @@ describe('cleanupImages', () => {
     mocks.deleteManifestByTag.mockReset().mockResolvedValue(undefined);
     mocks.getContainerAppImage.mockReset().mockResolvedValue(null);
     mocks.findManyDeployments.mockReset().mockResolvedValue([]);
+    mocks.findManyPreviews.mockReset().mockResolvedValue([]);
+    mocks.findManyBuilds.mockReset().mockResolvedValue([]);
   });
   afterEach(() => vi.clearAllMocks());
 
@@ -143,6 +151,31 @@ describe('cleanupImages', () => {
     const deletedTags = mocks.deleteManifestByTag.mock.calls.map((c) => c[1]);
     expect(deletedTags).toContain('junk');
     expect(deletedTags).not.toContain('pinned');
+  });
+
+  it('keeps the image of an open (PENDING/ACTIVE) preview even if old', async () => {
+    // A preview's latest build image must survive GC while the preview is open,
+    // else a live preview app becomes un-pullable on a replica restart.
+    mocks.findManyPreviews.mockResolvedValue([{ lastBuildId: 'pb1' }]);
+    mocks.findManyBuilds.mockResolvedValue([{ imageTag: `${HOST}/proj-app:pr-preview` }]);
+    mocks.listRepositories.mockResolvedValue(['proj-app']);
+    mocks.listTags.mockResolvedValue([
+      tag('n1', 40),
+      tag('n2', 45),
+      tag('n3', 50),
+      tag('n4', 55),
+      tag('n5', 60),
+      tag('pr-preview', 200), // old + outside newest-5, but open preview → KEEP
+      tag('junk', 210), // old + unprotected → DELETE
+    ]);
+
+    await cleanupImages();
+    // It queried only open (non-torn-down) previews with a build.
+    const previewWhere = mocks.findManyPreviews.mock.calls[0]![0].where;
+    expect(previewWhere.closedAt).toBeNull();
+    const deletedTags = mocks.deleteManifestByTag.mock.calls.map((c) => c[1]);
+    expect(deletedTags).toContain('junk');
+    expect(deletedTags).not.toContain('pr-preview');
   });
 
   it('keeps the live platform image tag even if old', async () => {

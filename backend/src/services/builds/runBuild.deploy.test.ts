@@ -61,6 +61,10 @@ function stubBuildRow(over: Record<string, unknown> = {}) {
     projectId: 'project-1',
     commitSha: 'abc1234def5678',
     branch: 'main',
+    // Prisma returns `null` (never undefined) for an unset nullable column. The
+    // deploy step branches on `build.previewId` to route preview vs main-app
+    // builds, so the fixture must mirror that shape: this is a MAIN-app build.
+    previewId: null,
     startedAt: new Date('2026-06-13T00:00:00Z'),
     project: {
       id: 'project-1',
