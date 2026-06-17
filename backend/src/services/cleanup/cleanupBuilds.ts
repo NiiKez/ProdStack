@@ -63,11 +63,19 @@ export async function cleanupBuilds(): Promise<CleanupBuildsResult> {
   //    remaining LogLines. `deployments: { none: {} }` is the data-loss guard —
   //    see the header note: never reap a build that backs a (possibly active)
   //    deployment, or its onDelete:Cascade would take the live Deployment with it.
+  //    The OR guard adds the same protection for preview builds, which create NO
+  //    Deployment row: never reap a build that backs an OPEN preview (closedAt
+  //    null) — it's that preview's lastBuildId / log history, and Build.previewId
+  //    is SetNull (no cascade protects it), so pruning it would dangle the
+  //    "view logs" link. Builds of a torn-down preview (closedAt set) and
+  //    non-preview builds still prune normally. (Unreachable today since the
+  //    preview TTL ≪ RETENTION_DAYS_BUILDS, but a raised TTL would expose it.)
   const buildDelete = await prisma.build.deleteMany({
     where: {
       status: { in: TERMINAL_STATUSES },
       createdAt: { lt: buildsCutoff },
       deployments: { none: {} },
+      OR: [{ previewId: null }, { preview: { closedAt: { not: null } } }],
     },
   });
 

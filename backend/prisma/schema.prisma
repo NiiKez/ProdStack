@@ -38,6 +38,21 @@ enum ProjectStatus {
   STOPPED
 }
 
+// Preview / PR environments. Each open pull request on a project's repo (when
+// previews are enabled and the PR author is trusted — owner/member/collaborator
+// on the same repo, never a fork) gets its own ephemeral Azure Container App,
+// built and deployed through the exact same Kaniko pipeline as the main app but
+// targeting a per-PR app name. PENDING = created, first build not yet deployed;
+// ACTIVE = deployed and serving (has liveUrl); FAILED = the latest build failed;
+// TORN_DOWN = PR closed or TTL-expired and the Container App was deleted. See
+// docs/PREVIEW_ENVIRONMENTS.md.
+enum PreviewStatus {
+  PENDING
+  ACTIVE
+  FAILED
+  TORN_DOWN
+}
+
 model User {
   id                     String    @id @default(cuid())
   githubUserId           Int       @unique
@@ -91,6 +106,11 @@ model Project {
   // until the project is resumed. `stoppedAt` records when it was paused.
   status                 ProjectStatus @default(ACTIVE)
   stoppedAt              DateTime?
+  // Preview / PR environments. When true (default), an open pull request from a
+  // trusted author auto-spins an ephemeral per-PR Container App (built through
+  // the normal pipeline) and tears it down on PR close. Gated behind the global
+  // ENABLE_PREVIEWS master switch too. See docs/PREVIEW_ENVIRONMENTS.md.
+  previewsEnabled        Boolean      @default(true)
   createdAt              DateTime     @default(now())
   updatedAt              DateTime     @updatedAt
   deletedAt              DateTime?
@@ -100,6 +120,7 @@ model Project {
   deployments            Deployment[]
   envVars                EnvVar[]
   webhookEvents          WebhookEvent[]
+  previews               PreviewEnvironment[]
 
   // NOTE: slug uniqueness is enforced by a hand-maintained *partial* unique
   // index so it only applies to live projects: `CREATE UNIQUE INDEX
@@ -160,18 +181,26 @@ model Build {
   // User and filter on this flag directly (defense-in-depth — demo builds are
   // also pre-claimed so the worker never sees them). See docs/DEMO_MODE.md §4.
   isDemo         Boolean     @default(false)
+  // Preview / PR environments: when set, this build deploys to the ephemeral
+  // per-PR Container App tracked by the PreviewEnvironment row instead of the
+  // project's main app (and does NOT create a Deployment row or touch
+  // Project.liveUrl). NULL for normal main-branch builds. SetNull on preview
+  // delete so build history survives a preview teardown/cascade.
+  previewId      String?
   startedAt      DateTime?
   finishedAt     DateTime?
   durationMs     Int?
   errorMessage   String?
   createdAt      DateTime    @default(now())
 
-  project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project        Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  preview        PreviewEnvironment? @relation(fields: [previewId], references: [id], onDelete: SetNull)
   logLines       LogLine[]
   deployments    Deployment[]
 
   @@index([projectId, createdAt])
   @@index([status, claimedAt, createdAt])
+  @@index([previewId])
 }
 
 model Deployment {
@@ -223,4 +252,42 @@ model WebhookEvent {
   project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, receivedAt])
+}
+
+// One ephemeral preview deployment per open pull request (see PreviewStatus and
+// docs/PREVIEW_ENVIRONMENTS.md). `containerAppName` is a distinct per-PR Azure
+// Container App (always min=0/max=1, scale-to-zero). `expiresAt` is a sliding
+// TTL backstop refreshed on every push; the hourly reaper tears down previews
+// past it even if the PR-closed webhook was missed. `closedAt` is set on
+// teardown (PR closed or expired) — kept (not deleted) for history.
+model PreviewEnvironment {
+  id               String        @id @default(cuid())
+  projectId        String
+  prNumber         Int
+  title            String
+  headRef          String
+  headSha          String
+  authorLogin      String
+  status           PreviewStatus @default(PENDING)
+  containerAppName String
+  liveUrl          String?
+  revisionName     String?
+  lastBuildId      String?
+  expiresAt        DateTime
+  closedAt         DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  project          Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  builds           Build[]
+
+  // NOTE: a hand-maintained partial unique index enforces "one open preview per
+  // (project, PR number)": `CREATE UNIQUE INDEX preview_project_pr_open ON
+  // "PreviewEnvironment"("projectId","prNumber") WHERE "closedAt" IS NULL;`
+  // (so a PR number is reusable once its preview is torn down). Prisma can't
+  // express a WHERE-filtered unique in the schema — applied via committed SQL,
+  // see the migration. DO NOT `prisma migrate dev` against prod without checking
+  // it isn't dropped as drift; prod uses `migrate deploy` (committed SQL only).
+  @@index([projectId, createdAt])
+  @@index([status, expiresAt])
 }

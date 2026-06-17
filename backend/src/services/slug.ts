@@ -74,3 +74,26 @@ export function containerAppName(login: string, slug: string): string {
 
   return name;
 }
+
+/**
+ * Azure Container App name for a preview (per-PR) environment.
+ *
+ * Distinct from the project's main `containerAppName` and always well within
+ * ACA's 2–32 char, lowercase-alphanumeric-plus-hyphen, must-start-and-end-with-
+ * alphanumeric rule: `pr<prNumber>-<8 hex of sha256(projectId)>`. Salting the
+ * hash with the (globally unique) projectId — not the app name — guarantees two
+ * different projects' PR #5 previews never collide, and the short, fixed shape
+ * (`pr99999-xxxxxxxx` = 16 chars worst case) can never overflow 32. Deterministic
+ * so re-deploying the same PR always targets the same app.
+ */
+export function previewContainerAppName(projectId: string, prNumber: number): string {
+  // Re-assert at the sink (defense-in-depth, mirroring assertValidCommitSha in
+  // runBuild): the webhook validates prNumber, but this name-builder is a naming
+  // boundary and must not trust callers — a 0/negative/non-integer would produce
+  // a semantically-wrong app name (`pr0-…`, `pr-5-…`).
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    throw new Error(`refusing to build preview app name: invalid PR number ${prNumber}`);
+  }
+  const hash = createHash('sha256').update(projectId).digest('hex').slice(0, 8);
+  return `pr${prNumber}-${hash}`;
+}

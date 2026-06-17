@@ -33,6 +33,12 @@ export interface ProjectSummary {
   containerAppName: string;
   /** When false, a `git push` no longer auto-builds — deploy manually instead. */
   autoDeploy: boolean;
+  /**
+   * When true (default), an open pull request from a trusted author spins up an
+   * ephemeral per-PR preview environment (gated behind the server-side
+   * ENABLE_PREVIEWS master switch too). See `PreviewSummary`.
+   */
+  previewsEnabled: boolean;
   /** Running (`ACTIVE`) or paused (`STOPPED`). Present on list + detail. */
   status: ProjectStatus;
   /** ISO timestamp the project was last stopped, or null when active. */
@@ -202,8 +208,40 @@ export interface UpdateProjectInput {
   branch?: string;
   name?: string;
   autoDeploy?: boolean;
+  previewsEnabled?: boolean;
   /** Partial save: see `UpdateEnvVar`. `null`/absent = leave env vars untouched. */
   envVars?: UpdateEnvVar[] | null;
+}
+
+/**
+ * A preview / PR environment lifecycle state:
+ *  - `PENDING`   — created, first build in flight (not yet deployed).
+ *  - `ACTIVE`    — deployed and serving (has a `liveUrl`).
+ *  - `FAILED`    — the build failed and it never deployed.
+ *  - `TORN_DOWN` — the PR closed (or the TTL lapsed); the app was deleted.
+ */
+export type PreviewStatus = 'PENDING' | 'ACTIVE' | 'FAILED' | 'TORN_DOWN';
+
+/**
+ * A row from `GET /api/projects/:id/previews` — one ephemeral per-PR preview
+ * environment. `liveUrl` is set once deployed (status ACTIVE); `lastBuildId`
+ * links to the most recent preview build's logs; `expiresAt` is the sliding TTL
+ * after which the reaper tears it down; `closedAt` is set on teardown.
+ */
+export interface PreviewSummary {
+  id: string;
+  prNumber: number;
+  title: string;
+  headRef: string;
+  headSha: string;
+  authorLogin: string;
+  status: PreviewStatus;
+  liveUrl: string | null;
+  lastBuildId: string | null;
+  expiresAt: string;
+  closedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** A line of the running container's stdout/stderr (`GET …/runtime/logs`). */

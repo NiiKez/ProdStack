@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   cleanupImages: vi.fn(),
   cleanupBuilds: vi.fn(),
   cleanupDemo: vi.fn(),
+  cleanupPreviews: vi.fn(),
 }));
 
 mocks.schedule.mockImplementation((expression: string, fn: () => unknown) => {
@@ -44,6 +45,7 @@ vi.mock('node-cron', () => ({
 vi.mock('./cleanupImages.js', () => ({ cleanupImages: mocks.cleanupImages }));
 vi.mock('./cleanupBuilds.js', () => ({ cleanupBuilds: mocks.cleanupBuilds }));
 vi.mock('./cleanupDemo.js', () => ({ cleanupDemo: mocks.cleanupDemo }));
+vi.mock('./cleanupPreviews.js', () => ({ cleanupExpiredPreviews: mocks.cleanupPreviews }));
 
 const { startCleanupScheduler } = await import('./scheduler.js');
 
@@ -54,18 +56,20 @@ describe('startCleanupScheduler', () => {
     mocks.cleanupImages.mockReset().mockResolvedValue({ deleted: 0 });
     mocks.cleanupBuilds.mockReset().mockResolvedValue({ logLines: 0, builds: 0 });
     mocks.cleanupDemo.mockReset().mockResolvedValue({ demoUsersDeleted: 0 });
+    mocks.cleanupPreviews.mockReset().mockResolvedValue({ scanned: 0, tornDown: 0 });
   });
 
-  it('schedules the two daily jobs at 03:17 and the hourly demo reaper at :42', () => {
+  it('schedules the two daily jobs at 03:17, the demo reaper at :42, and the preview reaper at :27', () => {
     startCleanupScheduler();
-    expect(mocks.schedule).toHaveBeenCalledTimes(3);
+    expect(mocks.schedule).toHaveBeenCalledTimes(4);
     const expressions = mocks.scheduled.map((t) => t.expression);
-    // Two daily (image + build/log) + one hourly (demo reaper).
+    // Two daily (image + build/log) + two hourly (demo reaper :42, preview reaper :27).
     expect(expressions.filter((e) => e === '17 3 * * *')).toHaveLength(2);
     expect(expressions.filter((e) => e === '42 * * * *')).toHaveLength(1);
+    expect(expressions.filter((e) => e === '27 * * * *')).toHaveLength(1);
   });
 
-  it('wires the scheduled callbacks to the image, build, and demo cleanup jobs', async () => {
+  it('wires the scheduled callbacks to the image, build, demo, and preview cleanup jobs', async () => {
     startCleanupScheduler();
     // Fire each scheduled callback as node-cron would on a tick.
     for (const task of mocks.scheduled) task.fn();
@@ -73,6 +77,7 @@ describe('startCleanupScheduler', () => {
       expect(mocks.cleanupImages).toHaveBeenCalledTimes(1);
       expect(mocks.cleanupBuilds).toHaveBeenCalledTimes(1);
       expect(mocks.cleanupDemo).toHaveBeenCalledTimes(1);
+      expect(mocks.cleanupPreviews).toHaveBeenCalledTimes(1);
     });
   });
 

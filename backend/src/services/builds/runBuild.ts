@@ -30,7 +30,8 @@ import { prisma } from '../../db.js';
 import { env } from '../../env.js';
 import { decrypt } from '../../lib/crypto.js';
 import { logger } from '../../lib/logger.js';
-import { updateContainerApp } from '../azure/index.js';
+import { createContainerApp, deleteContainerApp, updateContainerApp } from '../azure/index.js';
+import { markPreviewFailedIfPending } from '../previews/previewService.js';
 import { loadDecryptedEnvVars } from '../projectEnv.js';
 import { selectBuildArgs } from './buildArgs.js';
 import { runKaniko } from './kaniko.js';
@@ -339,6 +340,19 @@ export async function runBuild(buildId: string): Promise<void> {
         finishedAt: new Date(),
         errorMessage: 'cancelled by user',
       });
+      // A cancelled FIRST preview build never deployed — flip the preview
+      // PENDING→FAILED too, exactly like the FAILED branch below. Without this a
+      // cancelled preview is left PENDING and the UI polls it as "building"
+      // forever (only the TTL reaper would ever resolve it). A cancelled REBUILD
+      // of an already-ACTIVE preview leaves it ACTIVE (markPreviewFailedIfPending
+      // only flips PENDING). Best-effort: must not mask the CANCELLED status.
+      if (build.previewId) {
+        try {
+          await markPreviewFailedIfPending(build.previewId);
+        } catch (markErr) {
+          logger.warn({ err: markErr, buildId, previewId: build.previewId }, 'failed to mark cancelled preview FAILED');
+        }
+      }
     } else {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err, buildId }, 'build failed');
@@ -347,6 +361,17 @@ export async function runBuild(buildId: string): Promise<void> {
         finishedAt: new Date(),
         errorMessage: message,
       });
+      // A failed preview build that never deployed → mark the preview FAILED so
+      // the UI shows it (a failed rebuild of an already-ACTIVE preview leaves the
+      // prior app serving, so markPreviewFailedIfPending only flips PENDING).
+      // Best-effort: a failure here must not mask the build's FAILED status.
+      if (build.previewId) {
+        try {
+          await markPreviewFailedIfPending(build.previewId);
+        } catch (markErr) {
+          logger.warn({ err: markErr, buildId, previewId: build.previewId }, 'failed to mark preview FAILED');
+        }
+      }
     }
   } finally {
     clearInterval(cancelTimer);
@@ -882,6 +907,17 @@ async function deployAndRecord(
   resolved?: ResolvedDockerfile,
 ): Promise<void> {
   await setStatus(ctx.buildId, 'DEPLOYING');
+
+  // Preview / PR build: deploy to the ephemeral per-PR Container App instead of
+  // the project's main app, and DON'T create a Deployment row or touch
+  // Project.liveUrl. Branch before any main-app logging/work. Truthy check (not
+  // `!== null`) so a Build object that merely omits the field can't misroute to
+  // the preview path — Prisma always returns null for the unset column.
+  if (build.previewId) {
+    await deployPreviewAndRecord(build, ctx, image, resolved);
+    return;
+  }
+
   await ctx.logs.write(
     'STEP',
     `rolling ${build.project.containerAppName} to ${image}`,
@@ -999,6 +1035,201 @@ async function deployAndRecord(
   logger.info(
     { buildId: ctx.buildId, image, liveUrl: deploy.liveUrl },
     'build complete',
+  );
+}
+
+// --- Preview (PR) deploy step ----------------------------------------------
+
+/**
+ * Deploy a preview build to its ephemeral per-PR Container App.
+ *
+ * Differences from the main-app deploy:
+ *  - Targets the PreviewEnvironment's own app name (always min=0/max=1
+ *    scale-to-zero — a preview must never inherit an always-on pin).
+ *  - Uses `createContainerApp` (an idempotent ACA upsert): the first push
+ *    creates the app, later pushes roll it. The image tag is the commit SHA, so
+ *    each build is a fresh revision — no revisionSuffix juggling needed.
+ *  - Does NOT write a Deployment row and does NOT touch Project.liveUrl — the
+ *    preview tracks its own state on the PreviewEnvironment row.
+ *  - Stateless v1: reuses the project's runtime env vars (any external DB URL
+ *    the owner set), no per-preview database.
+ * If the PR closed (preview torn down) mid-build, skips the deploy and just
+ * records the build READY — we must not resurrect a torn-down app.
+ */
+async function deployPreviewAndRecord(
+  build: BuildWithRelations,
+  ctx: RunBuildContext,
+  image: string,
+  resolved?: ResolvedDockerfile,
+): Promise<void> {
+  const finishedAt = new Date();
+  const startedAtMs = build.startedAt?.getTime() ?? finishedAt.getTime();
+  const durationMs = finishedAt.getTime() - startedAtMs;
+
+  const preview = await prisma.previewEnvironment.findUnique({
+    where: { id: build.previewId as string },
+  });
+
+  if (preview === null || preview.closedAt !== null || preview.status === 'TORN_DOWN') {
+    await ctx.logs.write(
+      'WARN',
+      'preview environment was closed before deploy — skipping deploy (image built + pushed)',
+    );
+    await prisma.build.update({
+      where: { id: ctx.buildId },
+      data: { status: 'READY', finishedAt, durationMs, imageTag: image },
+    });
+    return;
+  }
+
+  await ctx.logs.write(
+    'STEP',
+    `deploying preview for PR #${preview.prNumber} → ${preview.containerAppName}`,
+  );
+
+  const envVars = await loadDecryptedEnvVars(build.projectId);
+  if (envVars.length > 0) {
+    await ctx.logs.write('STEP', `applying ${envVars.length} env var(s) as secrets`);
+  }
+
+  const targetPort = resolved?.port ?? undefined;
+  if (targetPort !== undefined) {
+    await ctx.logs.write('STEP', `routing ingress → port ${targetPort}`);
+  }
+
+  // `createContainerApp` is an idempotent full-replace upsert (createOrUpdate
+  // from a freshly-built envelope, NOT a get-merge). On a rebuild it re-pins
+  // minReplicas:0/maxReplicas:1 every time, so a preview app can never inherit an
+  // always-on pin — but it also means any out-of-band tweak on the preview app is
+  // reset each push (intentional for ephemeral previews). If this is ever changed
+  // to a merge, re-verify the min=0 guarantee.
+  const deploy = await createContainerApp({
+    name: preview.containerAppName,
+    image,
+    envVars,
+    minReplicas: 0,
+    maxReplicas: 1,
+    ...(targetPort !== undefined ? { targetPort } : {}),
+  });
+
+  const fallbackRevision =
+    env.BUILD_RUNNER_MODE === 'stub' ? 'stub' : build.commitSha.slice(0, 12);
+  const revisionName = deploy.revisionName ?? fallbackRevision;
+  // Slide the TTL forward on every successful deploy.
+  const expiresAt = new Date(Date.now() + env.PREVIEW_TTL_HOURS * 60 * 60 * 1000);
+  const activeData = {
+    status: 'ACTIVE' as const,
+    liveUrl: deploy.liveUrl,
+    revisionName,
+    lastBuildId: build.id,
+    headSha: build.commitSha,
+    expiresAt,
+  };
+
+  // Azure has ALREADY created/rolled the preview Container App — it is LIVE. The
+  // DB writes below must therefore never let a transient failure (the wide-open
+  // shared Postgres) masquerade as a build failure: if this threw up to
+  // runBuild's catch, the build would be marked FAILED and the preview flipped
+  // PENDING→FAILED while its app is actually serving (an orphan the reaper only
+  // reclaims on PR-close/TTL). Mirrors the main-path reconcile philosophy
+  // (deployAndRecord's P2002 branch): on a post-Azure DB error, log loudly so
+  // the live app is greppable, then best-effort record the build READY (it
+  // genuinely deployed) + the preview ACTIVE out of band, and do NOT rethrow.
+  //
+  // The preview write is a conditional compare-and-set on `closedAt IS NULL`
+  // (updateMany, not update): if the PR was CLOSED while the slow
+  // createContainerApp call above was in flight, teardownPreview already deleted
+  // the app AND set closedAt/TORN_DOWN — but our idempotent create re-spawned the
+  // app it deleted. The guard matches 0 rows in that case, so we never resurrect
+  // a torn-down row to ACTIVE; instead we tear the re-created app down again
+  // below.
+  //
+  // `confirmedClosed` is set ONLY when the conditional write *ran successfully*
+  // and matched 0 rows — positive proof the PR closed. A thrown DB error leaves
+  // the state unknown, and we must NOT delete the (live) app on a transient
+  // error — that would turn a bookkeeping blip into destroying a healthy preview.
+  // The TTL reaper is the backstop for the unknown case.
+  let confirmedClosed = false;
+  try {
+    const [previewResult] = await prisma.$transaction([
+      prisma.previewEnvironment.updateMany({
+        where: { id: preview.id, closedAt: null },
+        data: activeData,
+      }),
+      prisma.build.update({
+        where: { id: ctx.buildId },
+        data: { status: 'READY', finishedAt, durationMs, imageTag: image },
+      }),
+    ]);
+    confirmedClosed = previewResult.count === 0;
+  } catch (err) {
+    logger.error(
+      {
+        err,
+        buildId: ctx.buildId,
+        previewId: preview.id,
+        containerAppName: preview.containerAppName,
+        liveUrl: deploy.liveUrl,
+      },
+      'preview deploy: Azure app is LIVE but the DB transaction failed — reconciling build READY + preview ACTIVE out of band',
+    );
+    await ctx.logs.write(
+      'WARN',
+      'preview deployed, but recording its state hit a database error — the app is live; reconciling',
+    );
+    // Build first: getting it terminal (READY) keeps the runner's finally-net
+    // from force-FAILING a build whose image is live + serving.
+    await prisma.build
+      .update({
+        where: { id: ctx.buildId },
+        data: { status: 'READY', finishedAt, durationMs, imageTag: image },
+      })
+      .catch((e: unknown) =>
+        logger.error({ err: e, buildId: ctx.buildId }, 'preview deploy reconcile: build READY update failed'),
+      );
+    try {
+      const reconciled = await prisma.previewEnvironment.updateMany({
+        where: { id: preview.id, closedAt: null },
+        data: activeData,
+      });
+      confirmedClosed = reconciled.count === 0;
+    } catch (e: unknown) {
+      // State unknown — leave the live app in place (do NOT delete on a transient
+      // error); the reaper reclaims it on PR-close/TTL.
+      logger.error(
+        { err: e, previewId: preview.id },
+        'preview deploy reconcile: preview ACTIVE update failed — leaving the live app (TTL reaper backstops)',
+      );
+    }
+  }
+
+  if (confirmedClosed) {
+    // The PR was closed (preview torn down) while createContainerApp was in
+    // flight: teardown deleted the app + set closedAt, but our idempotent create
+    // re-spawned it. Delete it again and leave the row TORN_DOWN — we must never
+    // resurrect a closed preview (the orphan/cost-leak the close check guards
+    // against). Best-effort; the TTL reaper is the backstop.
+    await ctx.logs.write(
+      'WARN',
+      'preview was closed mid-deploy — removing the re-created app (PR already closed)',
+    );
+    logger.warn(
+      { buildId: ctx.buildId, previewId: preview.id, containerAppName: preview.containerAppName },
+      'preview closed mid-deploy; deleting the re-created container app',
+    );
+    await deleteContainerApp(preview.containerAppName).catch((e: unknown) =>
+      logger.error(
+        { err: e, containerAppName: preview.containerAppName },
+        'preview close-race cleanup: deleteContainerApp failed (TTL reaper is the backstop)',
+      ),
+    );
+    return;
+  }
+
+  await ctx.logs.write('SUCCESS', `preview deployed → ${deploy.liveUrl}`);
+  logger.info(
+    { buildId: ctx.buildId, previewId: preview.id, prNumber: preview.prNumber, liveUrl: deploy.liveUrl },
+    'preview build complete',
   );
 }
 

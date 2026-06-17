@@ -215,6 +215,26 @@ const EnvSchema = z.object({
   DEMO_MAX_BUILDS_PER_PROJECT: z.coerce.number().int().positive().default(25),
   DEMO_MAX_INFLIGHT_BUILDS_PER_USER: z.coerce.number().int().positive().default(3),
 
+  // Preview / PR environments (docs/PREVIEW_ENVIRONMENTS.md). An open pull
+  // request from a TRUSTED author (owner/member/collaborator on the SAME repo —
+  // never a fork) spins up an ephemeral per-PR Azure Container App (built
+  // through the normal Kaniko pipeline, always min=0/max=1 scale-to-zero) and
+  // tears it down on PR close. ENABLE_PREVIEWS is the master switch: when false
+  // (default) the `pull_request` webhook is acknowledged but ignored (no preview,
+  // no build) — so the feature is fully off until explicitly enabled, mirroring
+  // ENABLE_DEMO. Safe under prod (AZURE_STUB=false): preview safety is the
+  // trusted-author gate + per-project toggle, not the stub.
+  ENABLE_PREVIEWS: boolFromString(false),
+  // Sliding TTL backstop (hours) for a preview environment. Refreshed on every
+  // push to the PR; the hourly reaper tears down any preview past it even if the
+  // PR-closed webhook was missed, so a leaked preview can't idle forever. The
+  // cost ceiling for orphaned previews.
+  PREVIEW_TTL_HOURS: z.coerce.number().int().positive().default(72),
+  // Hard cap on concurrent OPEN previews per project; a `pull_request` that would
+  // exceed it is acknowledged but skipped (no preview created) so a burst of PRs
+  // can't multiply Container Apps / builds without bound.
+  PREVIEW_MAX_ACTIVE_PER_PROJECT: z.coerce.number().int().positive().default(5),
+
   // Feature gates
   ENABLE_WORKER: boolFromString(false),
   // Starts the in-process node-cron cleanup scheduler (image GC + build/log

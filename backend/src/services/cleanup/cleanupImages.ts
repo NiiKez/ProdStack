@@ -19,6 +19,8 @@
  * In stub mode or without ACR creds it's a no-op returning zeros, so local dev
  * and tests never reach for a real registry.
  */
+import { PreviewStatus } from '@prisma/client';
+
 import { prisma } from '../../db.js';
 import { env } from '../../env.js';
 import { logger } from '../../lib/logger.js';
@@ -134,6 +136,32 @@ async function collectProtectedTags(): Promise<{
     const imageTag = d.build?.imageTag;
     if (!imageTag) continue;
     protect(imageTag, 'active-deployment');
+  }
+
+  // Open preview environments → their latest build's image tag. A preview's TTL
+  // (default 72h) is normally well under RETENTION_DAYS_IMAGES (30d) so the
+  // recency rule already covers it, but protect explicitly so a long-lived
+  // preview (raised TTL) can't lose its image and break on a replica restart.
+  // Previews are never demo, so these are real ACR tags worth protecting.
+  const openPreviews = await prisma.previewEnvironment.findMany({
+    where: {
+      closedAt: null,
+      status: { in: [PreviewStatus.PENDING, PreviewStatus.ACTIVE] },
+      lastBuildId: { not: null },
+    },
+    select: { lastBuildId: true },
+  });
+  const previewBuildIds = openPreviews
+    .map((p) => p.lastBuildId)
+    .filter((v): v is string => v !== null);
+  if (previewBuildIds.length > 0) {
+    const previewBuilds = await prisma.build.findMany({
+      where: { id: { in: previewBuildIds }, isDemo: false },
+      select: { imageTag: true },
+    });
+    for (const b of previewBuilds) {
+      if (b.imageTag) protect(b.imageTag, 'preview');
+    }
   }
 
   // Live platform Container App images (authoritative).
