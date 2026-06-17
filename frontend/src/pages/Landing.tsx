@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Hexagon, Rocket, ScrollText, Undo2, Github, Play } from 'lucide-react';
+import { Hexagon, Rocket, ScrollText, Undo2, GitPullRequest, Github, Play } from 'lucide-react';
 import { Button, useToast } from '@/components/ui';
 import { usePageTitle } from '@/hooks/usePageTitle';
 
@@ -40,6 +40,12 @@ const FEATURES: Feature[] = [
     icon: Undo2,
     title: 'One-click rollback',
     description: 'Roll back to any previous successful deployment in a single click.',
+  },
+  {
+    icon: GitPullRequest,
+    title: 'Preview every pull request',
+    description:
+      'Every open PR gets its own throwaway URL, built through the same pipeline and torn down on close.',
   },
 ];
 
@@ -152,7 +158,7 @@ export default function Landing() {
         </section>
 
         <section className="mx-auto w-full max-w-6xl px-6 pb-28">
-          <ul className="grid gap-5 sm:grid-cols-3">
+          <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
             {FEATURES.map(({ icon: Icon, title, description }) => (
               <li
                 key={title}
