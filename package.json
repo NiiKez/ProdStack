@@ -10,6 +10,7 @@
     "dev:api": "npm --workspace=@prodstack/api run dev",
     "dev:web": "npm --workspace=@prodstack/web run dev",
     "dev:db": "docker compose up -d postgres",
+    "test:integration:api": "npm --workspace=@prodstack/api run test:integration",
     "build": "npm --workspaces --if-present run build",
     "typecheck": "npm --workspaces --if-present run typecheck",
     "lint": "eslint .",

@@ -1,10 +1,15 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
     include: ['src/**/*.test.ts'],
+    // The real-Postgres integration tier (vitest.integration.config.ts) is
+    // strictly OPT-IN — keep it out of this hermetic suite so `npm run test`
+    // needs no Docker/DB. `configDefaults.exclude` preserves vitest's built-in
+    // excludes (node_modules, dist, .idea, .git, .cache, …).
+    exclude: [...configDefaults.exclude, '**/*.integration.test.ts'],
     setupFiles: ['src/test/setup.ts'],
     passWithNoTests: false,
     coverage: {

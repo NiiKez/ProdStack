@@ -1,0 +1,4 @@
+# Ephemeral handoff written by globalSetup.ts (the live container's connection
+# URL) and read by setupEnv.ts. Never commit — it points at a throwaway
+# testcontainers Postgres that only exists during a `test:integration` run.
+.integration-db-url
