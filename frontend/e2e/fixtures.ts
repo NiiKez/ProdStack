@@ -1,6 +1,16 @@
 import type { Page, Route, Request } from '@playwright/test';
 import type { CurrentUser } from '../src/hooks/useCurrentUser';
-import type { DetectFrameworkResult, GithubRepo, ProjectSummary } from '../src/types/api';
+import type {
+  BuildDetail,
+  BuildListItem,
+  DeploymentListItem,
+  DetectFrameworkResult,
+  GithubRepo,
+  LogLine,
+  PreviewSummary,
+  ProjectDetail,
+  ProjectSummary,
+} from '../src/types/api';
 
 /**
  * Hermetic backend stub for the E2E suite.
@@ -21,6 +31,7 @@ export const ownerUser: CurrentUser = {
   githubLogin: 'octocat',
   email: 'octocat@example.com',
   avatarUrl: null,
+  isDemo: false,
 };
 
 /** Two fully-populated projects for the dashboard list test. */
@@ -34,6 +45,7 @@ export const sampleProjects: ProjectSummary[] = [
     liveUrl: 'https://alpha-service.example.com',
     containerAppName: 'app-alpha-service',
     autoDeploy: true,
+    previewsEnabled: true,
     status: 'ACTIVE',
     stoppedAt: null,
     createdAt: '2026-05-01T10:00:00.000Z',
@@ -60,6 +72,7 @@ export const sampleProjects: ProjectSummary[] = [
     liveUrl: null,
     containerAppName: 'app-beta-worker',
     autoDeploy: true,
+    previewsEnabled: false,
     status: 'ACTIVE',
     stoppedAt: null,
     createdAt: '2026-05-10T10:00:00.000Z',
@@ -112,6 +125,7 @@ export function makeProject(overrides: Partial<ProjectSummary> = {}): ProjectSum
     liveUrl: null,
     containerAppName: 'app-my-new-app',
     autoDeploy: true,
+    previewsEnabled: true,
     status: 'ACTIVE',
     stoppedAt: null,
     createdAt: '2026-06-02T12:00:00.000Z',
@@ -121,6 +135,195 @@ export function makeProject(overrides: Partial<ProjectSummary> = {}): ProjectSum
     ...overrides,
   };
 }
+
+/**
+ * Build a full `ProjectDetail` (the `GET /api/projects/:id` body) for the
+ * deploy-lifecycle specs. Adds the detail-only `builds` + `envVars` fields on
+ * top of the summary factory; pass `envVars` as the masked `{key,hasValue}`
+ * server shape.
+ */
+export function makeProjectDetail(
+  overrides: Partial<ProjectDetail> = {},
+): ProjectDetail {
+  const { builds, envVars, ...summaryOverrides } = overrides;
+  return {
+    ...makeProject(summaryOverrides),
+    builds: builds ?? [],
+    envVars: envVars ?? [],
+  };
+}
+
+/**
+ * Visible-copy the deploy-lifecycle specs assert on, centralized here so a
+ * restyle that keeps the same flows only has to touch this module (the
+ * "test logic not markup" rule from docs/TESTING.md). Each string is the
+ * literal toast title / button name / status label the component renders.
+ */
+export const copy = {
+  // Build logs page (BuildLogs.tsx + StageStepper).
+  buildLogsHeading: 'Build logs',
+  stageReady: 'Ready',
+  // Rollback (ProjectDetail DeploymentsTab + ConfirmDialog).
+  // The table action button is one word ("Rollback"); the dialog's confirm
+  // button is two words ("Roll back") — they're deliberately distinct.
+  rollbackButton: 'Rollback',
+  rollbackConfirmButton: 'Roll back',
+  rollbackConfirmTitle: 'Roll back to this deployment?',
+  // Env-var save (SettingsTab — RedeployReason toasts).
+  envSavedRedeploying: 'Environment variables saved — redeploying with your latest image.',
+  envSavedNoActive: "Saved. They'll apply on your first deploy.",
+  envSaveButton: 'Save variables',
+  // Stop / resume (ProjectHeaderCard).
+  statusActive: 'Active',
+  statusStopped: 'Stopped',
+  stopButton: 'Stop',
+  resumeButton: 'Resume',
+  stoppedToast: 'Project stopped',
+  resumedToast: 'Project resumed',
+  // Previews (PreviewsTab).
+  previewTeardownButton: 'Tear down',
+  previewTeardownConfirmTitle: 'Tear down this preview?',
+  previewsDisabledNote:
+    'Preview environments are disabled for this project — enable them in Settings.',
+  previewsEmptyTitle: 'No preview environments yet',
+} as const;
+
+/**
+ * Build a `BuildListItem` (a row in `GET /api/projects/:id/builds`). Defaults to
+ * a finished READY build; override `status` for in-flight rows.
+ */
+export function makeBuildListItem(overrides: Partial<BuildListItem> = {}): BuildListItem {
+  return {
+    id: 'build_1',
+    status: 'ready',
+    commitSha: 'cccccccccccccccccccccccccccccccccccccccc',
+    commitMessage: 'Add a feature',
+    commitAuthor: 'octocat',
+    branch: 'main',
+    imageTag: 'prodstack.azurecr.io/app:ccccccc',
+    errorMessage: null,
+    startedAt: '2026-06-10T10:00:00.000Z',
+    finishedAt: '2026-06-10T10:02:00.000Z',
+    durationMs: 120_000,
+    createdAt: '2026-06-10T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/**
+ * Build a `BuildDetail` (`GET /api/builds/:id`) for the Build Logs page. The
+ * embedded `project.liveUrl` is what surfaces under the stepper once READY.
+ */
+export function makeBuildDetail(overrides: Partial<BuildDetail> = {}): BuildDetail {
+  return {
+    id: 'build_1',
+    status: 'READY',
+    commitSha: 'cccccccccccccccccccccccccccccccccccccccc',
+    commitMessage: 'Add a feature',
+    commitAuthor: 'octocat',
+    branch: 'main',
+    imageTag: 'prodstack.azurecr.io/app:ccccccc',
+    startedAt: '2026-06-10T10:00:00.000Z',
+    finishedAt: '2026-06-10T10:02:00.000Z',
+    durationMs: 120_000,
+    errorMessage: null,
+    createdAt: '2026-06-10T10:00:00.000Z',
+    project: {
+      id: 'proj_1',
+      name: 'My App',
+      githubRepoFullName: 'octocat/my-app',
+      liveUrl: 'https://my-app.example.com',
+    },
+    ...overrides,
+  };
+}
+
+/** Build a `DeploymentListItem` (`GET /api/projects/:id/deployments`). */
+export function makeDeployment(overrides: Partial<DeploymentListItem> = {}): DeploymentListItem {
+  return {
+    id: 'dep_1',
+    revisionName: 'app--0000001',
+    active: false,
+    rolledBack: false,
+    createdAt: '2026-06-10T10:05:00.000Z',
+    build: {
+      id: 'build_1',
+      status: 'READY',
+      commitSha: 'cccccccccccccccccccccccccccccccccccccccc',
+      commitMessage: 'Add a feature',
+      commitAuthor: 'octocat',
+      branch: 'main',
+      imageTag: 'prodstack.azurecr.io/app:ccccccc',
+    },
+    ...overrides,
+  };
+}
+
+/** Build a `PreviewSummary` (`GET /api/projects/:id/previews`). */
+export function makePreview(overrides: Partial<PreviewSummary> = {}): PreviewSummary {
+  return {
+    id: 'preview_1',
+    prNumber: 42,
+    title: 'Add a shiny feature',
+    headRef: 'feature/shiny',
+    headSha: 'dddddddddddddddddddddddddddddddddddddddd',
+    authorLogin: 'octocat',
+    status: 'ACTIVE',
+    liveUrl: 'https://pr-42.preview.example.com',
+    lastBuildId: 'build_preview_1',
+    // Far-future TTL so the row reads "expires …" not "expired …".
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    closedAt: null,
+    createdAt: '2026-06-10T10:00:00.000Z',
+    updatedAt: '2026-06-10T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/**
+ * Serialize a pre-scripted SSE event sequence as a single `text/event-stream`
+ * body. Playwright's `route.fulfill` can't stream, so we hand `EventSource` the
+ * whole transcript at once: it parses the events in order and the `useBuildLogs`
+ * hook closes the stream on the terminal `done` event (no reconnect storm).
+ *
+ * Each entry becomes `event: <name>\ndata: <json>\n\n`; `log` events also carry
+ * an `id: <seq>` line (the real server stamps these for Last-Event-ID resume).
+ */
+export function sseBody(
+  events: ReadonlyArray<{ event: 'log' | 'status' | 'done'; data: unknown }>,
+): string {
+  return (
+    events
+      .map(({ event, data }) => {
+        const idLine =
+          event === 'log' && data && typeof data === 'object' && 'seq' in data
+            ? `id: ${(data as LogLine).seq}\n`
+            : '';
+        return `${idLine}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      })
+      .join('')
+  );
+}
+
+/**
+ * A happy-path build transcript: a few log lines, status events climbing
+ * through the build stages, and a terminal `done: READY`. Drives the Build Logs
+ * UI from "Connecting…" to the Ready stage.
+ */
+export const readyBuildStream: ReadonlyArray<{
+  event: 'log' | 'status' | 'done';
+  data: unknown;
+}> = [
+  { event: 'status', data: { status: 'CLONING' } },
+  { event: 'log', data: { seq: 1, level: 'STEP', message: 'Cloning octocat/my-app', ts: '2026-06-10T10:00:01.000Z' } },
+  { event: 'status', data: { status: 'BUILDING' } },
+  { event: 'log', data: { seq: 2, level: 'INFO', message: 'Building image with Kaniko', ts: '2026-06-10T10:00:30.000Z' } },
+  { event: 'status', data: { status: 'PUSHING' } },
+  { event: 'log', data: { seq: 3, level: 'INFO', message: 'Pushing image to ACR', ts: '2026-06-10T10:01:30.000Z' } },
+  { event: 'status', data: { status: 'DEPLOYING' } },
+  { event: 'log', data: { seq: 4, level: 'SUCCESS', message: 'Deployed revision app--0000002', ts: '2026-06-10T10:02:00.000Z' } },
+  { event: 'done', data: { status: 'READY' } },
+];
 
 export interface MockBackendOptions {
   /**
@@ -143,6 +346,32 @@ export interface MockBackendOptions {
    * preview then stays hidden, as it does for the tokenless dev-login user).
    */
   detect?: DetectFrameworkResult | 'error';
+
+  // --- Deploy-lifecycle surfaces (project detail page) --------------------
+  // These let a spec stub a single project's detail page + its tabs. Provide
+  // `detail` for the project under test; the per-tab arrays default to empty so
+  // an unconfigured tab renders its empty state rather than 404-ing.
+
+  /**
+   * Full `GET /api/projects/:id` detail body for the project under test. When
+   * set, it's returned verbatim for that id (and `builds`/`envVars` come from
+   * here). When unset, the catch-all synthesizes a minimal detail (as before).
+   */
+  detail?: ProjectDetail;
+  /** `GET /api/projects/:id/builds` items (wrapped as a `Paginated` page). */
+  builds?: BuildListItem[];
+  /** `GET /api/projects/:id/deployments` items (wrapped as a `Paginated` page). */
+  deployments?: DeploymentListItem[];
+  /** `GET /api/projects/:id/previews` items (wrapped as `{ previews }`). */
+  previews?: PreviewSummary[];
+  /** Per-build-id `GET /api/builds/:buildId` detail bodies for the logs page. */
+  buildDetails?: Record<string, BuildDetail>;
+  /**
+   * Per-build-id SSE transcript for `GET /api/builds/:buildId/logs/stream`,
+   * built with `sseBody(...)`. When a build id isn't listed the stream replies
+   * with an empty body (the page falls back to the fetched build status).
+   */
+  buildStreams?: Record<string, string>;
 }
 
 function json(route: Route, status: number, body: unknown): Promise<void> {
@@ -173,10 +402,61 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
   const repos = options.repos === undefined ? sampleRepos : options.repos;
   const detect: DetectFrameworkResult | 'error' =
     options.detect === undefined ? { hasDockerfile: false, framework: 'Express', port: 3000 } : options.detect;
+  const detail = options.detail;
+  const builds = options.builds ?? [];
+  const deployments = options.deployments ?? [];
+  const previews = options.previews ?? [];
+  const buildDetails = options.buildDetails ?? {};
+  const buildStreams = options.buildStreams ?? {};
 
   await page.route('**/api/**', async (route: Route, request: Request) => {
     const method = request.method();
     const path = new URL(request.url()).pathname;
+
+    // --- Deploy-lifecycle GET endpoints (matched before the generic /:id) ---
+
+    // Build-log SSE stream. A single `text/event-stream` body containing the
+    // whole pre-scripted transcript; EventSource parses it in order.
+    const streamMatch = path.match(/^\/api\/builds\/([^/]+)\/logs\/stream$/);
+    if (streamMatch && method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+        body: buildStreams[streamMatch[1]!] ?? '',
+      });
+    }
+
+    // Build detail (`GET /api/builds/:buildId`).
+    const buildMatch = path.match(/^\/api\/builds\/([^/]+)$/);
+    if (buildMatch && method === 'GET') {
+      const b = buildDetails[buildMatch[1]!];
+      if (b) return json(route, 200, b);
+      return json(route, 404, { error: 'NOT_FOUND', message: 'No such build' });
+    }
+
+    // Per-project list tabs (builds / deployments / previews).
+    const buildsMatch = path.match(/^\/api\/projects\/[^/]+\/builds$/);
+    if (buildsMatch && method === 'GET') {
+      return json(route, 200, { items: builds, nextCursor: null });
+    }
+    const depsMatch = path.match(/^\/api\/projects\/[^/]+\/deployments$/);
+    if (depsMatch && method === 'GET') {
+      return json(route, 200, { items: deployments, nextCursor: null });
+    }
+    const previewsMatch = path.match(/^\/api\/projects\/[^/]+\/previews$/);
+    if (previewsMatch && method === 'GET') {
+      return json(route, 200, { previews });
+    }
+    // Runtime logs + metrics tabs degrade gracefully if a spec lands on them.
+    const runtimeMatch = path.match(/^\/api\/projects\/[^/]+\/runtime\/logs$/);
+    if (runtimeMatch && method === 'GET') {
+      return json(route, 200, { lines: [], available: true });
+    }
+    const metricsMatch = path.match(/^\/api\/projects\/[^/]+\/metrics$/);
+    if (metricsMatch && method === 'GET') {
+      return json(route, 200, { available: true, series: [] });
+    }
 
     if (path === '/api/auth/me' && method === 'GET') {
       if (!user) {
@@ -208,9 +488,11 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
     }
 
     // Project detail — lets the create flow's post-success navigation resolve
-    // without hitting a real backend. Returns a minimal valid detail body.
+    // without hitting a real backend. A spec can pass a full `detail` body for
+    // the deploy-lifecycle flows; otherwise we synthesize a minimal one.
     if (/^\/api\/projects\/[^/]+$/.test(path) && method === 'GET') {
       const id = path.split('/').pop()!;
+      if (detail && detail.id === id) return json(route, 200, detail);
       const known = projects.find((p) => p.id === id);
       const base = known ?? makeProject({ id });
       return json(route, 200, { ...base, builds: [], envVars: [] });
