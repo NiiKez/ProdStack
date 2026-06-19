@@ -104,6 +104,10 @@ export async function seedDemoWorkspace(userId: string): Promise<void> {
         containerAppName: containerAppName(user.githubLogin, p.slug),
         liveUrl: p.live,
         frameworkHint: p.framework,
+        // Denormalized from the demo user — keeps demo projects out of the
+        // `project_repo_live_real` unique index (demo sessions reuse synthetic
+        // repo ids) and mirrors Build.isDemo.
+        isDemo: true,
       },
     });
 
@@ -245,6 +249,10 @@ export async function createDemoProject(
         // Set when the replay finishes (mirrors a real create — null until deploy).
         liveUrl: null,
         frameworkHint: null,
+        // Demo project — denormalized from the demo user. Keeps it out of the
+        // `project_repo_live_real` unique index (demo repo ids are synthetic and
+        // can collide across demo sessions). Mirrors Build.isDemo.
+        isDemo: true,
       },
     });
   });

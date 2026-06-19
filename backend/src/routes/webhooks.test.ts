@@ -126,10 +126,15 @@ beforeEach(() => {
   mocks.buildCreate.mockReset();
 
   mocks.projectFindFirst.mockImplementation(
-    async (args: { where?: { githubRepoId?: number; deletedAt?: null | Date } }) => {
+    async (args: {
+      where?: { githubRepoId?: number; deletedAt?: null | Date; isDemo?: boolean };
+    }) => {
       if (
         args?.where?.githubRepoId === projectRow.githubRepoId &&
-        args.where.deletedAt === null
+        args.where.deletedAt === null &&
+        // The lookup must scope to non-demo projects (Project.isDemo, denormalized
+        // from the owning user). The default fixture is a real project.
+        args.where.isDemo === false
       ) {
         return { ...projectRow };
       }
@@ -429,18 +434,22 @@ describe('POST /api/webhooks/github', () => {
     expect(state.webhookEvents.has('delivery-validsha')).toBe(true);
   });
 
-  it('scopes the project lookup to non-demo projects and 404s a demo-project delivery (no build)', async () => {
+  it('scopes the project lookup to non-demo projects (deterministically) and 404s a demo-project delivery (no build)', async () => {
     // Demo-isolation invariant (docs/DEMO_MODE.md §4): the webhook is the only
     // mutation path not behind requireAuth, so it can't branch on req.user.isDemo.
     // It must instead exclude demo projects at the DB query — otherwise a forged
     // delivery for a demo project would create a real, claimable Build that the
     // Kaniko worker would deploy to Azure under a sandboxed session. Assert the
-    // `user: { isDemo: false }` filter is present and that a filtered-out (demo)
-    // project yields a clean 404 with no Build/WebhookEvent written.
+    // `isDemo: false` filter (Project.isDemo, denormalized from the owning user)
+    // is present, the lookup is ordered deterministically (oldest-first, so it
+    // never verifies the HMAC against an arbitrary project's secret), and that a
+    // filtered-out (demo) project yields a clean 404 with no Build/WebhookEvent.
     let capturedWhere: Record<string, unknown> | undefined;
+    let capturedOrderBy: unknown;
     mocks.projectFindFirst.mockImplementationOnce(
-      async (args: { where?: Record<string, unknown> }) => {
+      async (args: { where?: Record<string, unknown>; orderBy?: unknown }) => {
         capturedWhere = args?.where;
+        capturedOrderBy = args?.orderBy;
         // Simulate the DB: a demo project is filtered out by the isDemo guard.
         return null;
       },
@@ -457,7 +466,8 @@ describe('POST /api/webhooks/github', () => {
       .send(body);
 
     expect(res.status).toBe(404);
-    expect(capturedWhere).toMatchObject({ user: { isDemo: false } });
+    expect(capturedWhere).toMatchObject({ isDemo: false, deletedAt: null });
+    expect(capturedOrderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }]);
     expect(state.builds).toHaveLength(0);
     expect(state.webhookEvents.size).toBe(0);
   });

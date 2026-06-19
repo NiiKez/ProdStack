@@ -106,12 +106,22 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
     // delivery matching one is forged — and without this filter it would create
     // a real, claimable (`isDemo=false`, `claimedAt=null`) Build that the Kaniko
     // worker would clone + push + deploy to Azure under a demo session, bypassing
-    // all four structural layers at once. `user: { isDemo: false }` makes demo
-    // projects invisible here (they 404), and it also resolves a synthetic-repo-id
-    // collision in favour of the real project. The runBuild backstop is the
-    // belt-and-suspenders fifth layer.
+    // all four structural layers at once. Filtering on Project.isDemo (denormalized
+    // from the owning user) makes demo projects invisible here (they 404), and it
+    // also resolves a synthetic-repo-id collision in favour of the real project.
+    // The runBuild backstop is the belt-and-suspenders fifth layer.
+    //
+    // The `project_repo_live_real` partial unique index guarantees at most ONE
+    // live non-demo project per `githubRepoId`, so this resolves deterministically
+    // to that project (its secret is the one the HMAC is verified against). The
+    // `orderBy` is defense-in-depth: were the index ever absent (e.g. a DB rebuilt
+    // off an older migration), routing to the OLDEST matching project still beats a
+    // non-deterministic pick that could verify the HMAC against the wrong secret. `id`
+    // is the tiebreaker so the pick stays deterministic even if two rows share an
+    // identical `createdAt` (the exact case the index-absent fallback must survive).
     const project = await prisma.project.findFirst({
-      where: { githubRepoId: repoIdRaw, deletedAt: null, user: { isDemo: false } },
+      where: { githubRepoId: repoIdRaw, deletedAt: null, isDemo: false },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
     if (project === null) {
       throw new HttpError(404, 'PROJECT_NOT_FOUND');
