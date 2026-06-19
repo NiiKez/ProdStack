@@ -1,8 +1,14 @@
 # ProdStack
 
+### ▶︎ Live at **[prodstack.live](https://prodstack.live)**
+
+The platform is deployed in production on Azure Container Apps and continuously ships its own updates from `main`. Sign-in is gated to the owner's GitHub account to protect a student cloud budget — but the **[public demo](https://prodstack.live)** (the "Launch demo" button) lets anyone explore the full product, end to end, with no account.
+
+---
+
 > A self-hostable, Vercel-style PaaS that connects a GitHub repo, builds a Docker image from your code on every push, and deploys it to Azure Container Apps — with live build logs, deployment history, and one-click rollback.
 
-ProdStack turns a Git push into a running app. Sign in with GitHub, connect a repository — bring your own `Dockerfile` or let ProdStack auto-detect the framework and generate one — and every push to the configured branch automatically builds a Docker image, pushes it to a private registry, and rolls a new revision of your app behind a public URL. A real-time dashboard streams build logs as they happen, keeps a full deployment history, and lets you roll back to any previous version in one click. The platform even deploys **itself** through its own CI/CD pipeline.
+ProdStack turns a Git push into a running app: connect a repository — bring your own `Dockerfile` or let ProdStack auto-detect the framework and generate one — and every push builds a Docker image, pushes it to a private registry, and rolls a new revision behind a public URL, with live build logs, full deployment history, and one-click rollback. The platform even deploys **itself** through its own CI/CD pipeline.
 
 It is designed to run on Azure Container Apps and is **self-hostable on your own Azure subscription** — and it runs end-to-end on your laptop with **zero cloud account** thanks to a built-in stub mode.
 
@@ -47,6 +53,8 @@ The whole pipeline is queue-driven and crash-tolerant: the database *is* the bui
 - **Push-to-deploy** — an HMAC-verified GitHub webhook enqueues a build. Idempotent on the GitHub delivery id, so redelivered webhooks never double-build.
 - **In-cluster Docker builds with [Kaniko](https://github.com/GoogleContainerTools/kaniko)** — daemonless image builds with **no Docker-in-Docker and no privileged mode**, run in a dedicated worker.
 - **Zero-Dockerfile builds** — no `Dockerfile`? ProdStack detects your framework (Node, Python, …), synthesizes a Kaniko-safe one, and sets the app's ingress port automatically (it also honours a BYO `Dockerfile`'s `EXPOSE`).
+- **Registry-backed build cache** *(opt-in, off by default)* — Kaniko can push each image layer to the registry and reuse it on the next build, so warm rebuilds skip `npm ci` / `pip install`. The cache lives in the registry, so it survives the scale-to-zero builder, and the image GC bounds it on a shorter retention window than real images.
+- **Preview environments per pull request** — opening a PR builds it through the same Kaniko pipeline and spins up an ephemeral, scale-to-zero Container App at its own URL; the preview is torn down when the PR closes and reaped on a TTL. Gated to trusted authors (no fork builds), with a per-project open-preview cap.
 - **Self-deploying CI/CD** — a token-gated `POST /api/admin/deploy` endpoint plus GitHub Actions roll the platform's own apps; database migrations run automatically on container boot.
 
 ### Observe
@@ -60,6 +68,7 @@ The whole pipeline is queue-driven and crash-tolerant: the database *is* the bui
 - **One-click rollback** — re-deploy the image from any previous successful build.
 - **Per-project environment variables** — stored **AES-256-GCM encrypted at rest** and **write-only** (the API returns only key names, never decrypted values), surfaced to the running app as Container App secrets, with automatic redeploy on change. Keys prefixed `NEXT_PUBLIC_*` / `VITE_*` are additionally threaded into the build as `--build-arg`s, so client frameworks can inline them at build time.
 - **Manual rebuild & auto-deploy toggle** — trigger a build without pushing to Git, or turn automatic push-to-deploy off per project to build only on demand.
+- **Stop & resume** — pause a deployed app to **zero cost** (the Container App is stopped via the Azure SDK) and resume it instantly, auto-building the newest commit on resume when auto-deploy is on.
 - **Build cancellation** — fast-cancel a queued build, or cooperatively abort an in-flight build via `AbortController`.
 
 ### Operate
@@ -140,7 +149,7 @@ ProdStack is three first-party components, each its own Azure Container App in a
 
 | Area | Technologies |
 |---|---|
-| **Backend** | Node 20 · TypeScript 5.7 · Express 4.21 · Prisma 6.19 + PostgreSQL 16 · Zod · `jsonwebtoken` · helmet · cors · cookie-parser · `express-rate-limit` · pino + pino-http · node-cron · `@octokit/rest` · Azure SDKs (`@azure/identity` `DefaultAzureCredential`, `@azure/arm-appcontainers`, `@azure/arm-containerregistry`, `@azure/keyvault-secrets`, `@azure/storage-blob`) · SSE over plain HTTP |
+| **Backend** | Node 20 · TypeScript 5.7 · Express 5.2 · Prisma 6.19 + PostgreSQL 16 · Zod · `jsonwebtoken` · helmet · cors · cookie-parser · `express-rate-limit` · pino + pino-http · node-cron · `@octokit/rest` · Azure SDKs (`@azure/identity` `DefaultAzureCredential`, `@azure/arm-appcontainers`, `@azure/arm-containerregistry`, `@azure/keyvault-secrets`, `@azure/storage-blob`) · SSE over plain HTTP |
 | **Frontend** | React 19 · Vite 6 · TypeScript 5.7 · Tailwind CSS 4 · `react-router-dom` 7 · `@tanstack/react-query` 5 · Radix UI primitives · `lucide-react` · `react-hook-form` + Zod |
 | **Build & runtime** | Kaniko · Docker · nginx · Azure Container Apps · Azure Container Registry · Azure Database for PostgreSQL Flexible Server · Azure Key Vault |
 | **Tooling** | npm workspaces · ESLint 9 · Prettier 3 · Vitest 4 + Supertest · Playwright (E2E) · GitHub Actions (CI + self-deploy) |
@@ -304,7 +313,7 @@ Idempotent provisioning and deploy scripts live in `infra/`. They are the source
 
 ## Status
 
-Core functionality is implemented and working: push-to-deploy with Kaniko builds (including **zero-Dockerfile framework auto-detection**), live SSE build logs, runtime logs and metrics, build/deployment history, one-click rollback, encrypted per-project environment variables, manual rebuild and cancellation, an optional public demo mode, self-deploying CI/CD, and the operational cost safeguards (image GC, log/build pruning, kill switch, scale-to-zero, budget alert). The codebase has an extensive automated test suite — Vitest + Supertest across the API and worker, plus Vitest and Playwright end-to-end tests on the frontend.
+**Live in production** at [prodstack.live](https://prodstack.live), continuously deployed from `main` by its own CI/CD. Everything described above is implemented and working end-to-end: push-to-deploy with Kaniko builds (including zero-Dockerfile framework auto-detection), preview environments per PR, stop/resume, live SSE build logs, runtime logs and metrics, build/deployment history with one-click rollback, encrypted per-project environment variables, an optional public demo mode, and the operational cost safeguards. It is backed by an extensive automated test suite — Vitest + Supertest across the API and worker, plus Vitest and Playwright end-to-end tests on the frontend.
 
 ---
 
@@ -314,9 +323,7 @@ Ideas and stretch goals, not commitments:
 
 - Infrastructure-as-Code (Bicep) to replace the bash provisioning scripts.
 - A dedicated message queue (e.g. Azure Service Bus) as an alternative to the Postgres-backed queue.
-- Preview deployments per pull request.
-- Custom domains for user apps.
-- Kaniko build-cache reuse to speed up rebuilds.
+- Self-serve custom domains for **user** apps (the platform itself already runs on the custom domain [prodstack.live](https://prodstack.live)).
 
 ---
 

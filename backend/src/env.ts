@@ -152,6 +152,27 @@ const EnvSchema = z.object({
   // clone takes seconds; 5 min is a generous ceiling for a large repo.
   GIT_TIMEOUT_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
   BUILD_WORK_DIR: z.string().default('/tmp/prodstack-builds'),
+  // Registry-backed Kaniko layer cache (docs/BUILD_CACHE.md). BUILDER-ONLY:
+  // only the prodstack-builder runs Kaniko. When enabled, Kaniko pushes each
+  // built layer to `buildcache/<projectId>` in ACR keyed by a content hash and
+  // pulls it on the next build instead of re-running `npm ci`/`pip install`.
+  // The cache lives in ACR (not the builder's disk) so it survives the
+  // scale-to-zero builder. Ships OFF by default → byte-identical Kaniko argv,
+  // zero behaviour change, until the flag is flipped per the rollout runbook.
+  BUILD_CACHE_ENABLED: boolFromString(false),
+  // Kaniko `--cache-ttl`: how long Kaniko will REUSE a cached layer on read. It
+  // does NOT delete blobs — cost is bounded by RETENTION_DAYS_CACHE + the image
+  // GC, not this. Go-duration string (default 168h = 7d, matching the GC clock).
+  // Validated as a Go duration so a typo (`7d` — Go has no day unit — or a
+  // missing unit like `168`) fails loudly at boot instead of aborting every
+  // build deep inside Kaniko's `--cache-ttl` parse.
+  BUILD_CACHE_TTL: z
+    .string()
+    .regex(
+      /^(\d+(?:\.\d+)?(ns|us|µs|ms|s|m|h))+$/,
+      'must be a Go duration like "168h" or "1h30m"',
+    )
+    .default('168h'),
   ACR_USERNAME: z.string().optional(),
   ACR_PASSWORD: z.string().optional(),
   WORKER_ID: z.string().default(`worker-${process.pid}`),
@@ -181,6 +202,12 @@ const EnvSchema = z.object({
   RETENTION_DAYS_IMAGES: z.coerce.number().int().positive().default(30),
   RETENTION_DAYS_LOGS: z.coerce.number().int().positive().default(30),
   RETENTION_DAYS_BUILDS: z.coerce.number().int().positive().default(90),
+  // Shorter GC clock for the registry build-cache repos (`buildcache/*`, see
+  // docs/BUILD_CACHE.md). API-side: the cleanup cron runs in the API
+  // (ENABLE_CLEANUP_JOBS), and it's the GC — NOT Kaniko's --cache-ttl — that
+  // actually deletes old cache manifests and bounds ACR storage cost. Kept well
+  // under RETENTION_DAYS_IMAGES so stale cache layers age out fast (default 7d).
+  RETENTION_DAYS_CACHE: z.coerce.number().int().positive().default(7),
   // Gates the cleanup admin endpoints (POST /api/admin/cleanup/*). Inert (503
   // CLEANUP_DISABLED) until set, exactly like DEPLOY_TOKEN gates /deploy. Min
   // 16 chars so a misconfigured short/empty value can't enable a weak gate.

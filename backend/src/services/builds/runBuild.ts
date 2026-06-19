@@ -34,7 +34,7 @@ import { createContainerApp, deleteContainerApp, updateContainerApp } from '../a
 import { markPreviewFailedIfPending } from '../previews/previewService.js';
 import { loadDecryptedEnvVars } from '../projectEnv.js';
 import { selectBuildArgs } from './buildArgs.js';
-import { runKaniko } from './kaniko.js';
+import { BUILD_CACHE_REPO_PREFIX, runKaniko } from './kaniko.js';
 import { resolveDockerfile, type ResolvedDockerfile } from './resolveDockerfile.js';
 
 const STUB_IMAGES = [
@@ -493,6 +493,15 @@ async function runRealBuild(
     dockerfile: resolved.dockerfilePath,
     destinations: [shaTag, latestTag],
     buildArgs,
+    // Registry-backed layer cache (docs/BUILD_CACHE.md), opt-in via the
+    // builder-only flag. Keyed on projectId — NOT previewId — so preview/PR
+    // builds (same runKaniko path) warm and reuse the parent project's cache,
+    // maximising hit rate. The repo lives under `buildcache/*` so the image GC
+    // bounds it on a shorter clock (RETENTION_DAYS_CACHE). Off → undefined →
+    // byte-identical Kaniko argv (still `--single-snapshot`).
+    cache: env.BUILD_CACHE_ENABLED
+      ? { repo: `${acrHost}/${BUILD_CACHE_REPO_PREFIX}${build.projectId}`, ttl: env.BUILD_CACHE_TTL }
+      : undefined,
     timeoutMs: env.BUILD_TIMEOUT_MS,
     signal,
     onLine: (line, stream) => {

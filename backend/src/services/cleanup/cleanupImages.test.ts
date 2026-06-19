@@ -21,6 +21,9 @@ process.env.ACR_NAME = 'prodstack';
 process.env.ACR_USERNAME = 'acr-user';
 process.env.ACR_PASSWORD = 'acr-pass';
 process.env.RETENTION_DAYS_IMAGES = '30';
+// Shorter window for `buildcache/*` repos (docs/BUILD_CACHE.md). Explicit even
+// though 7 is the default, since a test below pivots on the 30-vs-7 split.
+process.env.RETENTION_DAYS_CACHE = '7';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -130,6 +133,28 @@ describe('cleanupImages', () => {
     expect(deletedTags.sort()).toEqual(['old-e', 'old-f']);
     expect(res.deleted).toBe(2);
     expect(res.perRepo).toEqual([{ repo: 'proj-app', deleted: 2, kept: 7 }]);
+  });
+
+  it('uses the shorter cache window for buildcache/* repos, the image window otherwise', async () => {
+    // RETENTION_DAYS_IMAGES=30, RETENTION_DAYS_CACHE=7. A 10-day-old tag that is
+    // outside the newest-5 is OLDER than the cache window but YOUNGER than the
+    // image window — so the SAME shape must be deleted in a buildcache repo and
+    // kept in a normal repo. That divergence is the whole per-repo-window point.
+    mocks.listRepositories.mockResolvedValue(['buildcache/p1', 'proj-app']);
+    mocks.listTags.mockImplementation(async (repo: string) => [
+      // 5 fresh tags fill the newest-5 slots so `mid` is judged purely by age.
+      tag(`${repo}-f1`, 1),
+      tag(`${repo}-f2`, 2),
+      tag(`${repo}-f3`, 3),
+      tag(`${repo}-f4`, 4),
+      tag(`${repo}-f5`, 5),
+      tag(`${repo}-mid`, 10), // 7d < 10d < 30d → cache:DELETE, image:KEEP
+    ]);
+
+    await cleanupImages();
+    const deleted = mocks.deleteManifestByTag.mock.calls.map((c) => `${c[0]}:${c[1]}`);
+    expect(deleted).toContain('buildcache/p1:buildcache/p1-mid');
+    expect(deleted).not.toContain('proj-app:proj-app-mid');
   });
 
   it('keeps a tag referenced by an active deployment even if old', async () => {

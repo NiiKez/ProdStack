@@ -152,6 +152,8 @@ az containerapp update -n $APP -g $RG --set-env-vars \
   BUILD_WORK_DIR=/var/builds \
   BUILD_TIMEOUT_MS=600000 \
   WORKER_POLL_INTERVAL_MS=2000 \
+  BUILD_CACHE_ENABLED=false \
+  BUILD_CACHE_TTL=168h \
   DATABASE_URL=secretref:database-url \
   JWT_SECRET=secretref:jwt-secret \
   COOKIE_SECRET=secretref:cookie-secret \

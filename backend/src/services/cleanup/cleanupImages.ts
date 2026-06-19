@@ -9,7 +9,9 @@
  * Safety is the whole point — a wrong delete makes a deployed app un-pullable on
  * its next replica restart. The keep-set is deliberately belt-and-suspenders:
  *   - moving tags (`latest`, `latest-success`) — never deleted
- *   - any tag newer than RETENTION_DAYS_IMAGES
+ *   - any tag newer than the repo's retention window (RETENTION_DAYS_IMAGES,
+ *     or the shorter RETENTION_DAYS_CACHE for the `buildcache/*` cache repos —
+ *     see docs/BUILD_CACHE.md)
  *   - the image tag of every project's currently-active Deployment (DB)
  *   - the LIVE image of each platform Container App (Azure, authoritative)
  *   - the newest 5 tags per repo regardless of age
@@ -25,6 +27,7 @@ import { prisma } from '../../db.js';
 import { env } from '../../env.js';
 import { logger } from '../../lib/logger.js';
 import { getContainerAppImage, isStub } from '../azure/containerApps.js';
+import { BUILD_CACHE_REPO_PREFIX } from '../builds/kaniko.js';
 import {
   deleteManifestByTag,
   hasAcrCredentials,
@@ -196,8 +199,18 @@ export async function cleanupImages(
     return empty;
   }
 
-  const retentionDays = env.RETENTION_DAYS_IMAGES;
-  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  // Per-repo retention: the registry build-cache repos (`buildcache/*`, see
+  // docs/BUILD_CACHE.md) age out on a SHORTER clock than real images so old
+  // cache manifests can't leak ACR storage cost. Kaniko's `--cache-ttl` only
+  // stops REUSE — this GC is what actually deletes them. Everything else keeps
+  // the normal image window. One `now` snapshot keeps all repos on one instant.
+  const cutoffForRepo = (repo: string): number => {
+    const days = repo.startsWith(BUILD_CACHE_REPO_PREFIX)
+      ? env.RETENTION_DAYS_CACHE
+      : env.RETENTION_DAYS_IMAGES;
+    return now - days * 24 * 60 * 60 * 1000;
+  };
   const { tags: protectedByRepo, digests: protectedDigests } = await collectProtectedTags();
 
   let repos: string[];
@@ -240,6 +253,7 @@ export async function cleanupImages(
     const sorted = [...tags].sort((a, b) => ts(b) - ts(a));
     const newestN = new Set(sorted.slice(0, KEEP_NEWEST_PER_REPO).map((t) => t.name));
     const protectedTags = protectedByRepo.get(repo) ?? new Set<string>();
+    const cutoff = cutoffForRepo(repo);
 
     const keep = (tag: AcrTag): boolean => {
       if (MOVING_TAGS.has(tag.name)) return true;
@@ -313,7 +327,14 @@ export async function cleanupImages(
   }
 
   log.info(
-    { scanned: result.scanned, deleted: result.deleted, kept: result.kept, retentionDays, dryRun },
+    {
+      scanned: result.scanned,
+      deleted: result.deleted,
+      kept: result.kept,
+      retentionDaysImages: env.RETENTION_DAYS_IMAGES,
+      retentionDaysCache: env.RETENTION_DAYS_CACHE,
+      dryRun,
+    },
     'image cleanup complete',
   );
   return result;
