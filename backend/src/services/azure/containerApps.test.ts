@@ -387,10 +387,11 @@ describe('forceNewRevision (env-redeploy rolls a fresh revision)', () => {
     expect(a).not.toBe(b);
   });
 
-  it('stays unique on an A→B→A revert by salting with the current revision name', async () => {
-    // Same env value, but the app has rolled to a new latest revision in between
-    // — the salt must make the suffix differ so ACA does not reject reusing a
-    // historical revision name.
+  it('stays unique per call even with identical env + identical latest revision', async () => {
+    // Same env value AND same latestRevisionName both times — a per-roll random
+    // nonce must still make the suffix differ. (Salting on latestRevisionName
+    // alone would collapse to a config-only hash and recompute an identical
+    // suffix, which ARM rejects as "revision with suffix <x> already exists".)
     const suffixWithRevision = async (rev: string): Promise<string> => {
       mocks.beginCreateOrUpdateAndWait.mockReset();
       mocks.get.mockResolvedValue(existingApp(rev));
@@ -407,8 +408,41 @@ describe('forceNewRevision (env-redeploy rolls a fresh revision)', () => {
     };
 
     const first = await suffixWithRevision('demo--cfgaaaaaaaaaaaa');
-    const second = await suffixWithRevision('demo--cfgbbbbbbbbbbbb');
+    const second = await suffixWithRevision('demo--cfgaaaaaaaaaaaa');
     expect(first).not.toBe(second);
+  });
+
+  it('stays unique on an A→B→A revert when latestRevisionName is empty (H1 regression)', async () => {
+    // The bug: a freshly-created / mid-provisioning / stopped app has no
+    // latestRevisionName, so salting on it collapsed the suffix to a pure
+    // function of the sorted env pairs. An A→B→A revert (same env as the first
+    // A) then recomputed the SAME `cfg…` suffix → ARM fails the async provision
+    // with "revision with suffix <x> already exists" → the env-save silently
+    // no-ops on the running replica. The per-roll nonce must make every redeploy
+    // unique even with no latest revision and identical env.
+    const suffixForRevert = async (): Promise<string> => {
+      mocks.beginCreateOrUpdateAndWait.mockReset();
+      // No latestRevisionName at all → salt is '' both times.
+      const app = existingApp('demo--0000001');
+      delete (app as { latestRevisionName?: string }).latestRevisionName;
+      mocks.get.mockResolvedValue(app);
+      mocks.beginCreateOrUpdateAndWait.mockResolvedValue({ configuration: { ingress: {} } });
+      const { updateContainerApp } = await import('./containerApps.js');
+      await updateContainerApp({
+        name: 'demo',
+        image: 'img:tag',
+        envVars: [{ name: 'SITE_PASSWORD', value: 'A' }],
+        forceNewRevision: true,
+      });
+      const [, , envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+      return envelope.template.revisionSuffix as string;
+    };
+
+    const firstA = await suffixForRevert();
+    const secondA = await suffixForRevert();
+    expect(firstA).toMatch(/^cfg[0-9a-f]{12}$/);
+    expect(secondA).toMatch(/^cfg[0-9a-f]{12}$/);
+    expect(firstA).not.toBe(secondA);
   });
 });
 
@@ -678,7 +712,7 @@ describe('rollPlatformApp (real branch — M6 CI/CD self-deploy)', () => {
     expect(envelope.template.revisionSuffix).toMatch(/^roll[0-9a-f]{12}$/);
   });
 
-  it('derives a different suffix once the latest revision advances (same image redeploy)', async () => {
+  it('derives a unique suffix on every same-image redeploy', async () => {
     const rollWith = async (latestRevisionName: string): Promise<string> => {
       mocks.get.mockResolvedValue({
         location: 'francecentral',
@@ -691,14 +725,45 @@ describe('rollPlatformApp (real branch — M6 CI/CD self-deploy)', () => {
       mocks.beginCreateOrUpdate.mockReset();
       mocks.beginCreateOrUpdate.mockResolvedValue({});
       const { rollPlatformApp } = await import('./containerApps.js');
-      // Same image both times — only the live revision name differs (as it does
-      // after a successful roll), which must still produce a unique suffix.
+      // Same image both times — even with the SAME live revision name a per-roll
+      // nonce must still produce a unique suffix.
       await rollPlatformApp({ name: 'prodstack-api', image: 'prodstack.azurecr.io/prodstack-api:samesha' });
       return mocks.beginCreateOrUpdate.mock.calls[0]![2].template.revisionSuffix as string;
     };
 
     const first = await rollWith('prodstack-api--demoon1');
-    const second = await rollWith('prodstack-api--roll-after-first');
+    const second = await rollWith('prodstack-api--demoon1');
+    expect(first).not.toBe(second);
+  });
+
+  it('derives a unique suffix re-rolling the same image with no latestRevisionName (H1 regression)', async () => {
+    // The bug: a platform app with all revisions deactivated (e.g. mid-
+    // provisioning, or never successfully rolled) has no latestRevisionName, so
+    // salting on it collapsed the `roll…` suffix to a pure function of the image.
+    // Re-rolling the SAME image then recomputed an identical suffix → ARM fails
+    // the async provision ("revision with suffix <x> already exists") → the roll
+    // returns 202 to CI while the app silently stays on the old image. The per-
+    // roll nonce must make every roll of the same image unique.
+    const rollNoLatest = async (): Promise<string> => {
+      mocks.get.mockResolvedValue({
+        location: 'francecentral',
+        environmentId: process.env.CONTAINER_APPS_ENV_ID,
+        // No latestRevisionName → salt is '' both times.
+        configuration: { ingress: { external: true, targetPort: 3000, fqdn: 'x.example.azurecontainerapps.io' } },
+        template: { containers: [{ name: 'prodstack-api', image: 'prodstack.azurecr.io/prodstack-api:old' }] },
+      });
+      mocks.listSecrets.mockResolvedValue({ value: [] });
+      mocks.beginCreateOrUpdate.mockReset();
+      mocks.beginCreateOrUpdate.mockResolvedValue({});
+      const { rollPlatformApp } = await import('./containerApps.js');
+      await rollPlatformApp({ name: 'prodstack-api', image: 'prodstack.azurecr.io/prodstack-api:samesha' });
+      return mocks.beginCreateOrUpdate.mock.calls[0]![2].template.revisionSuffix as string;
+    };
+
+    const first = await rollNoLatest();
+    const second = await rollNoLatest();
+    expect(first).toMatch(/^roll[0-9a-f]{12}$/);
+    expect(second).toMatch(/^roll[0-9a-f]{12}$/);
     expect(first).not.toBe(second);
   });
 
