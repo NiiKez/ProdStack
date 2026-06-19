@@ -446,6 +446,21 @@ router.post(
         throw new HttpError(502, 'GITHUB_API_ERROR');
       }
 
+      // One live project per GitHub repo among real (non-demo) users — the
+      // webhook handler routes a delivery to its project by `githubRepoId`, so
+      // two live projects on the same repo would make HMAC verification
+      // non-deterministic (dropped deploys / a build queued under the wrong
+      // owner). The DB partial unique index `project_repo_live_real` is the hard
+      // backstop (a P2002 surfaces as a clean 409 via the error middleware);
+      // this pre-check returns a friendly, specific error instead.
+      const existingForRepo = await prisma.project.findFirst({
+        where: { githubRepoId: repoData.id, deletedAt: null, isDemo: false },
+        select: { id: true },
+      });
+      if (existingForRepo !== null) {
+        throw new HttpError(409, 'REPO_ALREADY_CONNECTED');
+      }
+
       // Pick a slug that's free among the user's *live* projects so recreating
       // a project with the same name after a soft-delete just works. Retry once
       // on the rare race where two concurrent creates collide on the unique
@@ -528,6 +543,10 @@ router.post(
               webhookSecretKeyVersion: encryptedSecret.keyVersion,
               containerAppName: appName,
               liveUrl,
+              // Denormalized from the owning user (false for real users — this
+              // path only runs for non-demo users; demo creates dispatch to the
+              // orchestrator earlier). Feeds the project_repo_live_real index.
+              isDemo: userRow.isDemo,
             },
             include: projectWithRelations.include,
           });
@@ -1391,12 +1410,28 @@ async function rollbackContainerApp(appName: string): Promise<void> {
  * (userId, slug) — which only happens when two concurrent creates pick the
  * same slug — retry once. The second pass re-reads the live slug set and
  * picks a different number.
+ *
+ * Retry ONLY on the slug index. A P2002 on `project_repo_live_real`
+ * (githubRepoId) means a concurrent create already claimed this repo — retrying
+ * is futile (the repo stays taken) and would re-provision the Container App +
+ * re-register the GitHub webhook a second time before failing again. Let that
+ * one propagate (it surfaces as a clean 409 via the error middleware).
  */
+function isSlugCollision(err: Prisma.PrismaClientKnownRequestError): boolean {
+  const target = err.meta?.target;
+  if (Array.isArray(target)) return target.includes('slug');
+  return typeof target === 'string' && target.includes('slug');
+}
+
 async function createWithSlugRetry<T>(attempt: () => Promise<T>): Promise<T> {
   try {
     return await attempt();
   } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === 'P2002' &&
+      isSlugCollision(err)
+    ) {
       return attempt();
     }
     throw err;

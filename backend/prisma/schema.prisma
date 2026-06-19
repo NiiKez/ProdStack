@@ -111,6 +111,12 @@ model Project {
   // the normal pipeline) and tears it down on PR close. Gated behind the global
   // ENABLE_PREVIEWS master switch too. See docs/PREVIEW_ENVIRONMENTS.md.
   previewsEnabled        Boolean      @default(true)
+  // Demo mode: denormalized from the owning user's isDemo. A Postgres partial
+  // unique index can only reference the table's own columns, so to enforce
+  // "one live project per GitHub repo among REAL (non-demo) users" we mirror
+  // the flag here instead of joining to User (same pattern + rationale as
+  // Build.isDemo above). See the project_repo_live_real NOTE below.
+  isDemo                 Boolean      @default(false)
   createdAt              DateTime     @default(now())
   updatedAt              DateTime     @updatedAt
   deletedAt              DateTime?
@@ -132,6 +138,18 @@ model Project {
   // NOT `prisma migrate dev` against a prod DB without re-checking it isn't
   // dropped as "drift". Prod uses `migrate deploy` (committed SQL only, no
   // introspection), so it's safe there.
+  //
+  // NOTE: a second hand-maintained *partial* unique index makes inbound webhook
+  // routing deterministic — `CREATE UNIQUE INDEX project_repo_live_real ON
+  // "Project"("githubRepoId") WHERE "deletedAt" IS NULL AND "isDemo" = false;`
+  // (migration 20260619120000). The webhook handler resolves a delivery to its
+  // project by `githubRepoId` and verifies the HMAC against that project's
+  // secret; with no uniqueness, two live real projects on the same repo would
+  // make the lookup non-deterministic (dropped deploys / cross-tenant build).
+  // Demo rows are excluded because demo sessions reuse synthetic/fixture repo
+  // ids. Prisma can't express a WHERE-filtered unique in the schema — applied
+  // via committed SQL; DO NOT `prisma migrate dev` against prod without checking
+  // it isn't dropped as drift (prod uses `migrate deploy`, committed SQL only).
   @@index([githubRepoId])
 }
 

@@ -141,18 +141,35 @@ async function collectProtectedTags(): Promise<{
     protect(imageTag, 'active-deployment');
   }
 
-  // Open preview environments → their latest build's image tag. A preview's TTL
-  // (default 72h) is normally well under RETENTION_DAYS_IMAGES (30d) so the
-  // recency rule already covers it, but protect explicitly so a long-lived
-  // preview (raised TTL) can't lose its image and break on a replica restart.
-  // Previews are never demo, so these are real ACR tags worth protecting.
+  // Open preview environments. Protected by TWO independent sources:
+  //
+  //   1. DB-based (belt): each open preview's latest build's image tag. A
+  //      preview's TTL (default 72h) is normally well under
+  //      RETENTION_DAYS_IMAGES (30d) so the recency rule already covers it, but
+  //      protect explicitly so a long-lived preview (raised TTL) can't lose its
+  //      image and break on a replica restart. Previews are never demo, so these
+  //      are real ACR tags worth protecting.
+  //
+  //   2. Azure-authoritative (suspenders): the image each open preview's LIVE
+  //      Container App is actually running, read straight from Azure — the same
+  //      strongest protection source used for the platform apps and active
+  //      deployments. Preview builds push to the project's OWN ACR repo and
+  //      write no Deployment row, so the DB source (status/lastBuildId/imageTag)
+  //      can drift from the live app (e.g. runBuild's post-deploy reconcile
+  //      partially failed, leaving the app LIVE but `lastBuildId` stale/null).
+  //      Without this layer such a live preview image becomes GC-eligible and
+  //      the preview goes un-pullable on its next replica restart. Reading the
+  //      live image makes protection independent of DB/Azure consistency.
+  //
+  // We select the container app name too (and don't require a non-null
+  // lastBuildId) so the Azure-authoritative layer still fires for an open
+  // preview whose DB pointer is missing — the exact drift case it guards.
   const openPreviews = await prisma.previewEnvironment.findMany({
     where: {
       closedAt: null,
       status: { in: [PreviewStatus.PENDING, PreviewStatus.ACTIVE] },
-      lastBuildId: { not: null },
     },
-    select: { lastBuildId: true },
+    select: { lastBuildId: true, containerAppName: true },
   });
   const previewBuildIds = openPreviews
     .map((p) => p.lastBuildId)
@@ -167,17 +184,27 @@ async function collectProtectedTags(): Promise<{
     }
   }
 
-  // Live platform Container App images (authoritative).
-  for (const appName of PLATFORM_APP_NAMES) {
+  // Live platform Container App images + live open-preview Container App images
+  // (Azure-authoritative). One loop so both share identical per-app error
+  // handling: a missing/unreadable app (e.g. not yet provisioned, or a preview
+  // mid-teardown) must NEVER abort the whole GC — worst case we lose one
+  // protection source and the DB/recency/newest-5 rules still cover it.
+  const liveAppSources = new Map<string, string>();
+  for (const name of PLATFORM_APP_NAMES) liveAppSources.set(name, `platform:${name}`);
+  // Dedup by app name so a repeated containerAppName (e.g. two open preview rows
+  // left for the same app by a partial teardown) is only read from Azure once.
+  for (const p of openPreviews) {
+    if (!liveAppSources.has(p.containerAppName)) {
+      liveAppSources.set(p.containerAppName, `preview:${p.containerAppName}`);
+    }
+  }
+  for (const [name, source] of liveAppSources) {
     try {
-      const image = await getContainerAppImage(appName);
+      const image = await getContainerAppImage(name);
       if (!image) continue;
-      protect(image, `platform:${appName}`);
+      protect(image, source);
     } catch (err) {
-      // A missing app (e.g. not yet provisioned) must not abort the whole GC —
-      // worst case we lose one protection source and the recency/newest-5 rules
-      // still cover it.
-      log.warn({ err, app: appName }, 'could not read live platform image — skipping');
+      log.warn({ err, app: name }, 'could not read live container app image — skipping');
     }
   }
 

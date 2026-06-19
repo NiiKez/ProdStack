@@ -18,7 +18,7 @@
  * The two branches share the public shape so callers (e.g. the Project
  * service) never need to know which is active beyond `isStub()`.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import {
   ContainerAppsAPIClient,
@@ -362,14 +362,19 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
   // Force a fresh revision when asked (the env-redeploy path). A value-only env
   // change leaves the template identical (env vars are `secretRef`s, not inline
   // values), so without this ACA would no-op the re-PUT and the running replica
-  // would keep serving the old value. A content-addressed suffix makes any value
-  // change roll a new revision; salting with the current latest revision name
-  // keeps the suffix unique even when reverting to a prior exact config (ACA
-  // rejects reusing a historical revision name).
+  // would keep serving the old value. The suffix must be UNIQUE per roll (ACA
+  // rejects reusing a historical revision name), but it is never read back, so it
+  // need not be deterministic. Uniqueness is guaranteed by a per-roll random
+  // nonce — crucially this holds even when `latestRevisionName` is empty
+  // (freshly-created / mid-provisioning / stopped apps), where salting on it
+  // alone would collapse to a config-only hash and make an A→B→A revert recompute
+  // the first A's suffix → "revision with suffix <x> already exists". The salt +
+  // sorted env are kept for continuity/debuggability only.
   const revisionSuffix = opts.forceNewRevision
     ? `cfg${createHash('sha1')
         .update(
           JSON.stringify({
+            nonce: randomBytes(9).toString('hex'),
             salt: existing.latestRevisionName ?? '',
             env: (opts.envVars ?? [])
               .map((e) => [e.name, e.value] as const)
@@ -616,14 +621,20 @@ async function realRollPlatformApp(opts: RollPlatformAppOpts): Promise<Container
   // (201) but then FAIL the async revision provisioning with `revision with
   // suffix <x> already exists`, discarding the new revision — so the roll
   // returns 202 to CI while the app silently stays on the old image. (This is
-  // why every CI self-deploy was a no-op after a manual roll.) A content-
-  // addressed suffix salted with `latestRevisionName` keeps it unique across
-  // re-deploys of the same image (after a successful roll the latest revision
-  // name changes, so the next roll computes a different suffix), mirroring the
-  // env-redeploy `forceNewRevision` path in `realUpdate`.
+  // why every CI self-deploy was a no-op after a manual roll.) The suffix is
+  // never read back — it only needs to be UNIQUE per roll. A per-roll random
+  // nonce guarantees that even when `latestRevisionName` is empty (freshly-
+  // created / mid-provisioning / stopped apps), where salting on it alone would
+  // collapse to an image-only hash and make re-rolling the SAME image recompute
+  // a colliding suffix. The salt + image are kept for continuity/debuggability
+  // only, mirroring the env-redeploy `forceNewRevision` path in `realUpdate`.
   const revisionSuffix = `roll${createHash('sha1')
     .update(
-      JSON.stringify({ salt: existing.latestRevisionName ?? '', image: opts.image }),
+      JSON.stringify({
+        nonce: randomBytes(9).toString('hex'),
+        salt: existing.latestRevisionName ?? '',
+        image: opts.image,
+      }),
     )
     .digest('hex')
     .slice(0, 12)}`;

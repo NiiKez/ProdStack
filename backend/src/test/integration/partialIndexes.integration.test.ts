@@ -72,6 +72,47 @@ describe('partial unique indexes (real Postgres)', () => {
     });
   });
 
+  describe('project_repo_live_real ON Project(githubRepoId) WHERE deletedAt IS NULL AND isDemo=false', () => {
+    it('rejects a second LIVE non-demo project for the same repo (P2002) but allows reuse after soft-delete', async () => {
+      const userId = await createUser(prisma);
+      const repoId = 9_001;
+      await createProject(prisma, userId, { githubRepoId: repoId });
+
+      // A second live, non-demo project backing the same GitHub repo would make
+      // webhook routing non-deterministic — the index forbids it.
+      await expectP2002(
+        () => createProject(prisma, userId, { githubRepoId: repoId }),
+        ['githubRepoId'],
+      );
+
+      // Soft-delete the first -> excluded by WHERE deletedAt IS NULL -> reusable.
+      const first = await prisma.project.findFirstOrThrow({ where: { githubRepoId: repoId } });
+      await prisma.project.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
+
+      const recreated = await createProject(prisma, userId, { githubRepoId: repoId });
+      expect(recreated).toBeTruthy();
+
+      const live = await prisma.project.count({
+        where: { githubRepoId: repoId, deletedAt: null, isDemo: false },
+      });
+      expect(live).toBe(1);
+    });
+
+    it('allows many DEMO projects to share a repo id (demo excluded by WHERE isDemo=false)', async () => {
+      const demoUser = await createUser(prisma, { isDemo: true });
+      const repoId = 9_002;
+      // Demo sessions reuse fixture repo ids; the partial index must not fire.
+      await createProject(prisma, demoUser, { githubRepoId: repoId, isDemo: true });
+      const second = await createProject(prisma, demoUser, { githubRepoId: repoId, isDemo: true });
+      expect(second).toBeTruthy();
+
+      // A LIVE non-demo project can still coexist with demo rows on the same repo.
+      const realUser = await createUser(prisma);
+      const real = await createProject(prisma, realUser, { githubRepoId: repoId, isDemo: false });
+      expect(real).toBeTruthy();
+    });
+  });
+
   describe('one_active_per_project ON Deployment(projectId) WHERE active=true', () => {
     async function seedBuild(projectId: string): Promise<string> {
       const b = await prisma.build.create({

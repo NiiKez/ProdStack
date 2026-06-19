@@ -40,7 +40,12 @@ export async function createUser(
 export async function createProject(
   prisma: PrismaClient,
   userId: string,
-  opts: { slug?: string; deletedAt?: Date | null } = {},
+  opts: {
+    slug?: string;
+    deletedAt?: Date | null;
+    githubRepoId?: number;
+    isDemo?: boolean;
+  } = {},
 ): Promise<string> {
   const slug = opts.slug ?? `proj-${randomUUID().slice(0, 8)}`;
   const project = await prisma.project.create({
@@ -49,12 +54,13 @@ export async function createProject(
       name: slug,
       slug,
       githubRepoFullName: `it/${slug}`,
-      githubRepoId: nextExternalId++,
+      githubRepoId: opts.githubRepoId ?? nextExternalId++,
       webhookSecretCiphertext: dummyBytes(),
       webhookSecretIv: dummyBytes(),
       webhookSecretAuthTag: dummyBytes(),
       containerAppName: `app-${slug}`,
       deletedAt: opts.deletedAt ?? null,
+      isDemo: opts.isDemo ?? false,
     },
   });
   return project.id;

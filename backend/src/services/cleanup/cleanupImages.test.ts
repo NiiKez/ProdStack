@@ -203,6 +203,40 @@ describe('cleanupImages', () => {
     expect(deletedTags).not.toContain('pr-preview');
   });
 
+  it('keeps an open preview live image (Azure-authoritative) when the DB pointer is stale/null', async () => {
+    // Drift case: the preview's live Container App is running `pr-live`, but the
+    // DB has no usable build pointer (lastBuildId null) — e.g. runBuild's
+    // post-deploy reconcile partially failed, leaving the app LIVE but the DB
+    // stale. The DB-based protection MISSES `pr-live` entirely; only the
+    // Azure-authoritative read of the live preview app protects it. It must
+    // survive even though it's old and outside newest-5.
+    mocks.findManyPreviews.mockResolvedValue([
+      { lastBuildId: null, containerAppName: 'preview-pr-7' },
+    ]);
+    // No build to look up → DB-based preview protection contributes nothing.
+    mocks.findManyBuilds.mockResolvedValue([]);
+    mocks.getContainerAppImage.mockImplementation(async (name: string) =>
+      name === 'preview-pr-7' ? `${HOST}/proj-app:pr-live` : null,
+    );
+    mocks.listRepositories.mockResolvedValue(['proj-app']);
+    mocks.listTags.mockResolvedValue([
+      tag('n1', 40),
+      tag('n2', 45),
+      tag('n3', 50),
+      tag('n4', 55),
+      tag('n5', 60),
+      tag('pr-live', 200), // live preview image per Azure — KEEP despite stale DB
+      tag('junk', 210), // old + unprotected → DELETE
+    ]);
+
+    await cleanupImages();
+    // The live preview container app was queried by name, authoritatively.
+    expect(mocks.getContainerAppImage).toHaveBeenCalledWith('preview-pr-7');
+    const deletedTags = mocks.deleteManifestByTag.mock.calls.map((c) => c[1]);
+    expect(deletedTags).toContain('junk');
+    expect(deletedTags).not.toContain('pr-live');
+  });
+
   it('keeps the live platform image tag even if old', async () => {
     mocks.getContainerAppImage.mockImplementation(async (name: string) =>
       name === 'prodstack-api' ? `${HOST}/prodstack-api:m5-rev1` : null,

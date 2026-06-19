@@ -27,6 +27,7 @@ interface ProjectRecord {
   containerAppName: string;
   liveUrl: string | null;
   frameworkHint: string | null;
+  isDemo: boolean;
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
@@ -49,6 +50,7 @@ const state = vi.hoisted(() => ({
     containerAppName: string;
     liveUrl: string | null;
     frameworkHint: string | null;
+    isDemo: boolean;
     createdAt: Date;
     updatedAt: Date;
     deletedAt: Date | null;
@@ -71,6 +73,9 @@ const userRow = {
   githubTokenIv: tokenField.iv,
   githubTokenAuthTag: tokenField.authTag,
   githubTokenKeyVersion: tokenField.keyVersion,
+  // Real (non-demo) user — the create handler denormalizes this onto the new
+  // project (feeds the project_repo_live_real partial unique index).
+  isDemo: false,
 };
 
 const mocks = vi.hoisted(() => ({
@@ -281,6 +286,7 @@ beforeEach(() => {
       containerAppName: data.containerAppName as string,
       liveUrl: (data.liveUrl as string | null) ?? null,
       frameworkHint: null,
+      isDemo: (data.isDemo as boolean | undefined) ?? false,
       createdAt: new Date(),
       updatedAt: new Date(),
       deletedAt: null,
@@ -440,6 +446,40 @@ describe('POST /api/projects', () => {
     expect(mocks.createContainerApp).toHaveBeenCalledWith({ name: 'octocat-hello' });
   });
 
+  it('persists isDemo=false for a real authenticated user', async () => {
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/projects')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ repoUrl: 'https://github.com/octocat/hello', name: 'Hello' });
+    expect(res.status).toBe(201);
+    // The create handler denormalizes the owning user's isDemo onto the project
+    // (false for a real user) — feeds the project_repo_live_real unique index.
+    const createCall = mocks.projectCreate.mock.calls[0]![0] as { data: { isDemo?: unknown } };
+    expect(createCall.data.isDemo).toBe(false);
+    expect(state.projects[0]!.isDemo).toBe(false);
+  });
+
+  it('rejects connecting a repo already backed by a live non-demo project with 409', async () => {
+    // Webhook routing resolves a delivery to its project by githubRepoId, so two
+    // live non-demo projects on the same repo would make HMAC verification
+    // non-deterministic. The create handler pre-checks for an existing live
+    // non-demo project on that repo and returns a friendly 409 (the DB partial
+    // unique index project_repo_live_real is the hard backstop). The GET repo
+    // lookup returns id 12345; simulate one already connected.
+    mocks.projectFindFirst.mockResolvedValueOnce({ id: 'p-existing' });
+    const app = createApp();
+    const res = await supertest(app)
+      .post('/api/projects')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .send({ repoUrl: 'https://github.com/octocat/hello', name: 'Hello' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('REPO_ALREADY_CONNECTED');
+    // No project/container app is created when the repo is already connected.
+    expect(mocks.projectCreate).not.toHaveBeenCalled();
+    expect(mocks.createContainerApp).not.toHaveBeenCalled();
+  });
+
   it('dedupes the slug on a second create with the same name', async () => {
     const app = createApp();
     await supertest(app)
@@ -492,6 +532,7 @@ describe('POST /api/projects', () => {
       containerAppName: 'octocat-hello',
       liveUrl: null,
       frameworkHint: null,
+      isDemo: false,
       createdAt: new Date(),
       updatedAt: new Date(),
       deletedAt: null,
@@ -691,6 +732,7 @@ describe('DELETE /api/projects/:id', () => {
       containerAppName: 'octocat-hello',
       liveUrl: 'https://octocat-hello.example.com',
       frameworkHint: null,
+      isDemo: false,
       createdAt: new Date(),
       updatedAt: new Date(),
       deletedAt: null,
@@ -770,6 +812,7 @@ describe('demo mode', () => {
       containerAppName: 'octocat-demo-app',
       liveUrl: null,
       frameworkHint: null,
+      isDemo: true,
       createdAt: new Date(),
       updatedAt: new Date(),
       deletedAt: null,

@@ -128,6 +128,9 @@ describe('createDemoProject', () => {
     const projectData = mocks.projectCreate.mock.calls[0]![0].data;
     expect(projectData.webhookId).toBeNull();
     expect(projectData.slug).toBe('my-cool-app');
+    // Demo project — denormalized isDemo keeps it out of the
+    // project_repo_live_real unique index (demo repo ids are synthetic).
+    expect(projectData.isDemo).toBe(true);
 
     // Like a real create, NO build is started on create — the first build is
     // kicked explicitly via "Trigger build" (the /rebuild demo branch →
@@ -247,6 +250,10 @@ describe('seedDemoWorkspace', () => {
     );
 
     expect(mocks.projectCreate).toHaveBeenCalledTimes(expectedProjects);
+    // Every seeded project carries isDemo=true (out of project_repo_live_real).
+    for (const call of mocks.projectCreate.mock.calls) {
+      expect(call[0].data.isDemo).toBe(true);
+    }
 
     // Every seeded build carries isDemo=true.
     expect(mocks.buildCreate).toHaveBeenCalledTimes(expectedBuilds);
