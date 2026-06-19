@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildArgFlags, buildCommand, type KanikoOptions } from './kaniko.js';
+import {
+  buildArgFlags,
+  buildCommand,
+  cacheOrSnapshotFlags,
+  type KanikoOptions,
+} from './kaniko.js';
 
 describe('buildArgFlags', () => {
   it('renders one --build-arg=NAME=VALUE token per var', () => {
@@ -56,5 +61,56 @@ describe('buildCommand — build args', () => {
   it('emits no --build-arg flags when there are none', () => {
     const { args } = buildCommand(base, '/var/builds/b1/auth/.docker');
     expect(args.some((a) => a.startsWith('--build-arg'))).toBe(false);
+  });
+});
+
+describe('cacheOrSnapshotFlags', () => {
+  it('emits --single-snapshot and no cache flags when cache is unset', () => {
+    expect(cacheOrSnapshotFlags(undefined)).toEqual(['--single-snapshot']);
+  });
+
+  it('emits --cache flags and drops --single-snapshot when cache is set', () => {
+    expect(
+      cacheOrSnapshotFlags({ repo: 'acr.azurecr.io/buildcache/p1', ttl: '168h' }),
+    ).toEqual([
+      '--cache=true',
+      '--cache-repo=acr.azurecr.io/buildcache/p1',
+      '--cache-ttl=168h',
+    ]);
+  });
+});
+
+describe('buildCommand — layer cache', () => {
+  // Same default test env as above: BUILD_RUNNER_MODE=stub → kaniko-executor
+  // branch. Both runner modes spread the shared cacheOrSnapshotFlags() helper,
+  // so the argv shape proven here is identical in docker mode.
+  const base: KanikoOptions = {
+    contextDir: '/var/builds/b1/repo',
+    authDir: '/var/builds/b1/auth',
+    dockerfile: '/var/builds/b1/repo/.prodstack.Dockerfile',
+    destinations: ['acr.azurecr.io/app:sha'],
+    onLine: () => {},
+    timeoutMs: 1000,
+  };
+
+  it('keeps --single-snapshot and emits no cache flags when cache is unset', () => {
+    const { args } = buildCommand(base, '/var/builds/b1/auth/.docker');
+    expect(args).toContain('--single-snapshot');
+    expect(args.some((a) => a.startsWith('--cache'))).toBe(false);
+  });
+
+  it('adds --cache flags and drops --single-snapshot when cache is set', () => {
+    const { args } = buildCommand(
+      { ...base, cache: { repo: 'acr.azurecr.io/buildcache/p1', ttl: '168h' } },
+      '/var/builds/b1/auth/.docker',
+    );
+    expect(args).toContain('--cache=true');
+    expect(args).toContain('--cache-repo=acr.azurecr.io/buildcache/p1');
+    expect(args).toContain('--cache-ttl=168h');
+    expect(args).not.toContain('--single-snapshot');
+    // Cache flags sit before the destinations, like the build-args do.
+    const cacheIdx = args.indexOf('--cache=true');
+    const destIdx = args.indexOf('--destination=acr.azurecr.io/app:sha');
+    expect(destIdx).toBeGreaterThan(cacheIdx);
   });
 });

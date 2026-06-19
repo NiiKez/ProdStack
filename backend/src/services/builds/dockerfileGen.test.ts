@@ -231,3 +231,99 @@ describe('generated Dockerfiles are kaniko-safe (classic syntax only)', () => {
     expect(df).toMatch(/^FROM /m);
   });
 });
+
+describe('generated Dockerfiles are cache-friendly (install before full COPY)', () => {
+  // For the registry layer cache (docs/BUILD_CACHE.md) to HIT, the dependency
+  // install must come BEFORE the full-source `COPY . .`, so an app-only change
+  // reuses the network-heavy install layer. These tests lock that ordering in.
+
+  it('Node server: COPY package*.json + install precede COPY . .', () => {
+    const df =
+      detectFramework(
+        signals({ rootEntries: ['package.json'], packageJson: { dependencies: { express: '4' } } }),
+      )?.dockerfile ?? '';
+    expect(df.indexOf('COPY package*.json ./')).toBeLessThan(df.indexOf('COPY . .'));
+    expect(df.indexOf('RUN npm')).toBeLessThan(df.indexOf('COPY . .'));
+  });
+
+  it('Static SPA (Vite): COPY package*.json + install precede COPY . .', () => {
+    const df =
+      detectFramework(
+        signals({ rootEntries: ['package.json'], packageJson: { devDependencies: { vite: '5' } } }),
+      )?.dockerfile ?? '';
+    expect(df.indexOf('COPY package*.json ./')).toBeLessThan(df.indexOf('COPY . .'));
+    expect(df.indexOf('RUN npm')).toBeLessThan(df.indexOf('COPY . .'));
+  });
+
+  it('Go: COPY go.* + go mod download precede COPY . .', () => {
+    const df = detectFramework(signals({ rootEntries: ['go.mod', 'main.go'] }))?.dockerfile ?? '';
+    expect(df.indexOf('COPY go.* ./')).toBeLessThan(df.indexOf('COPY . .'));
+    expect(df.indexOf('RUN go mod download')).toBeLessThan(df.indexOf('COPY . .'));
+  });
+
+  it('Python with requirements.txt: COPY requirements.txt + pip install precede COPY . .', () => {
+    const df =
+      detectFramework(
+        signals({ rootEntries: ['requirements.txt', 'main.py'], requirementsTxt: 'fastapi\nuvicorn' }),
+      )?.dockerfile ?? '';
+    expect(df).toContain('COPY requirements.txt ./');
+    expect(df).toContain('RUN pip install --no-cache-dir -r requirements.txt');
+    expect(df.indexOf('COPY requirements.txt ./')).toBeLessThan(df.indexOf('COPY . .'));
+    expect(df.indexOf('RUN pip install --no-cache-dir -r requirements.txt')).toBeLessThan(
+      df.indexOf('COPY . .'),
+    );
+  });
+
+  it('Python requirements.txt with `-e .` copies full source BEFORE install (no broken split)', () => {
+    // An editable/local install (`-e .`) needs setup.py/pyproject present when
+    // pip runs, so the cache-friendly manifest-only split would break the build.
+    const df =
+      detectFramework(
+        signals({ rootEntries: ['requirements.txt', 'main.py'], requirementsTxt: '-e .\nfastapi' }),
+      )?.dockerfile ?? '';
+    expect(df).not.toContain('COPY requirements.txt ./');
+    expect(df.indexOf('COPY . .')).toBeLessThan(
+      df.indexOf('RUN pip install --no-cache-dir -r requirements.txt'),
+    );
+  });
+
+  it('Python requirements.txt with `-r base.txt` copies full source BEFORE install', () => {
+    // A `-r sibling.txt` reference needs that sibling file on disk at install
+    // time → must copy the whole context first, not just requirements.txt.
+    const df =
+      detectFramework(
+        signals({ rootEntries: ['requirements.txt', 'main.py'], requirementsTxt: '-r base.txt' }),
+      )?.dockerfile ?? '';
+    expect(df).not.toContain('COPY requirements.txt ./');
+    expect(df.indexOf('COPY . .')).toBeLessThan(
+      df.indexOf('RUN pip install --no-cache-dir -r requirements.txt'),
+    );
+  });
+
+  it('Python with an empty requirements.txt installs nothing (no useless pip layer)', () => {
+    const df =
+      detectFramework(
+        signals({ rootEntries: ['requirements.txt', 'main.py'], requirementsTxt: '   \n' }),
+      )?.dockerfile ?? '';
+    expect(df).toContain('COPY . .');
+    expect(df).not.toContain('pip install');
+  });
+
+  it('Python with pyproject.toml installs the project from full source (no deps-only split)', () => {
+    // `pip install .` builds the project itself, so the source must be present
+    // first — there is no clean deps-only layer to cache here, by design.
+    const df =
+      detectFramework(
+        signals({ rootEntries: ['pyproject.toml', 'main.py'], hasPyproject: true }),
+      )?.dockerfile ?? '';
+    expect(df).toContain('RUN pip install --no-cache-dir .');
+    expect(df).not.toContain('COPY requirements.txt');
+  });
+
+  it('Python with no declared deps (manage.py, no requirements.txt) installs nothing', () => {
+    const df =
+      detectFramework(signals({ rootEntries: ['manage.py'], hasManagePy: true }))?.dockerfile ?? '';
+    expect(df).toContain('COPY . .');
+    expect(df).not.toContain('pip install');
+  });
+});

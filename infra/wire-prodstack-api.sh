@@ -146,6 +146,7 @@ az containerapp update $APP --set-env-vars \
   OWNER_GITHUB_ID="${OWNER_GITHUB_ID:?set to your GitHub numeric user id (curl -s https://api.github.com/users/<login> | jq .id)}" \
   ENABLE_CLEANUP_JOBS=true \
   RETENTION_DAYS_IMAGES=30 \
+  RETENTION_DAYS_CACHE=7 \
   RETENTION_DAYS_LOGS=30 \
   RETENTION_DAYS_BUILDS=90 \
   ENABLE_DEMO="${ENABLE_DEMO:-true}" \

@@ -32,6 +32,15 @@ const KANIKO_IMAGE = 'gcr.io/kaniko-project/executor:v1.24.0';
 /** Grace period after an abort's SIGTERM before escalating to SIGKILL. */
 const ABORT_KILL_GRACE_MS = 10_000;
 
+/**
+ * ACR repo-path prefix for the registry layer cache (docs/BUILD_CACHE.md). The
+ * builder pushes cache layers under `${prefix}<projectId>` (runBuild.ts) and the
+ * image GC keys the shorter `RETENTION_DAYS_CACHE` window off the same prefix
+ * (cleanupImages.ts) — this one constant is the cross-module contract between
+ * the producer and the GC, so they can never drift out of lockstep.
+ */
+export const BUILD_CACHE_REPO_PREFIX = 'buildcache/';
+
 export interface KanikoOptions {
   contextDir: string;
   /**
@@ -56,6 +65,15 @@ export interface KanikoOptions {
   /** Hard timeout; killed with SIGKILL if exceeded. */
   timeoutMs: number;
   signal?: AbortSignal;
+  /**
+   * Registry-backed layer cache (docs/BUILD_CACHE.md). When set, Kaniko pushes
+   * each built layer to `repo` (an ACR path keyed per project) and pulls it on
+   * the next build instead of rebuilding — surviving the scale-to-zero builder
+   * because the cache lives in ACR, not on local disk. Setting this also DROPS
+   * `--single-snapshot` (which collapses the image into one layer and defeats
+   * per-layer caching). Unset → byte-identical argv to the pre-cache build.
+   */
+  cache?: { repo: string; ttl: string };
 }
 
 export interface KanikoResult {
@@ -131,6 +149,19 @@ export function buildArgFlags(buildArgs: KanikoOptions['buildArgs'] = []): strin
   return buildArgs.map((a) => `--build-arg=${a.name}=${a.value}`);
 }
 
+/**
+ * Layer-snapshot flags. Caching and `--single-snapshot` are mutually exclusive:
+ * `--single-snapshot` collapses the image into ONE layer, which defeats per-layer
+ * caching, so when a registry cache is configured we drop it and emit the cache
+ * flags instead. With no cache we keep `--single-snapshot` exactly as before, so
+ * the argv is byte-identical to the pre-cache build (the flag's literal position
+ * in `buildCommand` is preserved). Shared by both runner modes.
+ */
+export function cacheOrSnapshotFlags(cache: KanikoOptions['cache']): string[] {
+  if (!cache) return ['--single-snapshot'];
+  return ['--cache=true', `--cache-repo=${cache.repo}`, `--cache-ttl=${cache.ttl}`];
+}
+
 export function buildCommand(
   opts: KanikoOptions,
   dockerConfigDir: string,
@@ -146,7 +177,7 @@ export function buildCommand(
       KANIKO_IMAGE,
       '--context=dir:///workspace',
       `--dockerfile=${path.posix.join('/workspace', path.relative(opts.contextDir, opts.dockerfile))}`,
-      '--single-snapshot',
+      ...cacheOrSnapshotFlags(opts.cache),
       ...buildArgFlags(opts.buildArgs),
       ...opts.destinations.map((d) => `--destination=${d}`),
     ];
@@ -167,7 +198,7 @@ export function buildCommand(
       `--context=dir://${opts.contextDir}`,
       `--dockerfile=${opts.dockerfile}`,
       `--ignore-path=${env.BUILD_WORK_DIR}`,
-      '--single-snapshot',
+      ...cacheOrSnapshotFlags(opts.cache),
       ...buildArgFlags(opts.buildArgs),
       ...opts.destinations.map((d) => `--destination=${d}`),
     ],

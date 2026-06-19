@@ -178,22 +178,71 @@ function goDockerfile(port: number): string {
   ].join('\n');
 }
 
+/**
+ * Does this requirements.txt need the FULL build context present at install
+ * time (so the cache-friendly "copy the manifest alone, install, then source"
+ * split would break it)? True when it pulls in sibling files (`-r other.txt`,
+ * `-c constraints.txt`) or installs from the local source tree (`-e .`,
+ * `--editable .`, a bare/relative path, or a `file:` URL) — none of which exist
+ * on disk if only `requirements.txt` has been copied. A flat list of PyPI pins
+ * returns false and gets the cacheable split.
+ */
+function requirementsNeedsFullContext(requirementsTxt: string): boolean {
+  return requirementsTxt.split(/\r?\n/).some((raw) => {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) return false;
+    return (
+      /^(-r|-c|-e)\b/.test(line) ||
+      /^--(requirement|constraint|editable)\b/.test(line) ||
+      /^(\.|\/|file:)/.test(line)
+    );
+  });
+}
+
 /** Python web app (Django / FastAPI / Flask / generic). */
-function pythonDockerfile(opts: { startCmd: string; port: number; hasPyproject: boolean }): string {
-  const install = opts.hasPyproject
-    ? 'RUN pip install --no-cache-dir .'
-    : 'RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi';
-  return [
-    `FROM ${PYTHON_IMAGE}`,
-    'WORKDIR /app',
-    'COPY . .',
-    install,
+function pythonDockerfile(opts: {
+  startCmd: string;
+  port: number;
+  hasPyproject: boolean;
+  requirementsTxt: string | undefined;
+}): string {
+  const lines = [`FROM ${PYTHON_IMAGE}`, 'WORKDIR /app'];
+  const reqs = opts.requirementsTxt;
+  // Cache ordering (docs/BUILD_CACHE.md): install deps from a copied-first
+  // manifest BEFORE the full-source `COPY . .`, so an app-only change reuses the
+  // network-heavy pip layer instead of reinstalling every build. `pyproject`
+  // keeps its original precedence (it's the packaged-project signal).
+  if (opts.hasPyproject) {
+    // `pip install .` builds the project itself from source, so the full context
+    // must already be present — there's no clean deps-only layer to split out.
+    lines.push('COPY . .', 'RUN pip install --no-cache-dir .');
+  } else if (reqs !== undefined && reqs.trim() !== '') {
+    if (requirementsNeedsFullContext(reqs)) {
+      // requirements.txt references sibling files (`-r`/`-c`) or installs from
+      // the local tree (`-e .`, a path) → the source must be present when pip
+      // runs, so we can't hoist the install ahead of `COPY . .`.
+      lines.push('COPY . .', 'RUN pip install --no-cache-dir -r requirements.txt');
+    } else {
+      // The common case. requirements.txt is copied alone, installed, THEN source.
+      lines.push(
+        'COPY requirements.txt ./',
+        'RUN pip install --no-cache-dir -r requirements.txt',
+        'COPY . .',
+      );
+    }
+  } else {
+    // No declared dependencies (single main.py, or an empty requirements.txt) —
+    // nothing to install.
+    lines.push('COPY . .');
+  }
+  lines.push(
     'ENV PYTHONUNBUFFERED=1',
     `ENV PORT=${opts.port}`,
     `EXPOSE ${opts.port}`,
     `CMD ${opts.startCmd}`,
     '',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 function allNodeDeps(pkg: PackageJsonLike): Record<string, string> {
@@ -278,7 +327,12 @@ function detectPython(signals: RepoSignals): Detection {
     return {
       framework: 'Django',
       port: PORT,
-      dockerfile: pythonDockerfile({ startCmd, port: PORT, hasPyproject: signals.hasPyproject }),
+      dockerfile: pythonDockerfile({
+        startCmd,
+        port: PORT,
+        hasPyproject: signals.hasPyproject,
+        requirementsTxt: signals.requirementsTxt,
+      }),
     };
   }
 
@@ -291,6 +345,7 @@ function detectPython(signals: RepoSignals): Detection {
         startCmd: '["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]',
         port: PORT,
         hasPyproject: signals.hasPyproject,
+        requirementsTxt: signals.requirementsTxt,
       }),
     };
   }
@@ -304,6 +359,7 @@ function detectPython(signals: RepoSignals): Detection {
         startCmd: '["sh", "-c", "gunicorn app:app --bind 0.0.0.0:$PORT"]',
         port: PORT,
         hasPyproject: signals.hasPyproject,
+        requirementsTxt: signals.requirementsTxt,
       }),
     };
   }
@@ -317,6 +373,7 @@ function detectPython(signals: RepoSignals): Detection {
         startCmd: '["python", "main.py"]',
         port: PORT,
         hasPyproject: signals.hasPyproject,
+        requirementsTxt: signals.requirementsTxt,
       }),
     };
   }
@@ -330,6 +387,7 @@ function detectPython(signals: RepoSignals): Detection {
       startCmd: '["python", "app.py"]',
       port: PORT,
       hasPyproject: signals.hasPyproject,
+      requirementsTxt: signals.requirementsTxt,
     }),
   };
 }
