@@ -4,9 +4,11 @@ import { Router, type Request } from 'express';
 
 import { prisma } from '../db.js';
 import { env } from '../env.js';
-import { OAUTH_NEXT_COOKIE, OAUTH_STATE_COOKIE, clearOAuthCookies, clearSessionCookie, setOAuthNextCookie, setOAuthStateCookie, setSessionCookie } from '../lib/cookies.js';
+import { OAUTH_NEXT_COOKIE, OAUTH_STATE_COOKIE, clearOAuthCookies, clearOAuthNextCookie, clearSessionCookie, setOAuthNextCookie, setOAuthStateCookie, setSessionCookie } from '../lib/cookies.js';
 import { encrypt } from '../lib/crypto.js';
 import { signSession } from '../lib/jwt.js';
+import { OAUTH_SCOPES } from '../lib/oauthScopes.js';
+import { isSafeNextPath } from '../lib/safeNext.js';
 import { authLimiter } from '../middleware/rateLimit.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
@@ -30,7 +32,6 @@ import { exchangeCodeForToken, fetchGithubProfile } from '../services/github.js'
  */
 
 const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize';
-const OAUTH_SCOPES = 'repo admin:repo_hook';
 
 const router = Router();
 
@@ -41,6 +42,10 @@ router.get('/github/begin', authLimiter, (req, res) => {
   const nextRaw = req.query.next;
   if (typeof nextRaw === 'string' && isSafeNextPath(nextRaw)) {
     setOAuthNextCookie(res, nextRaw);
+  } else {
+    // Drop any `oauth_next` from a prior begin so this login can't inherit a
+    // stale redirect target the user didn't ask for this time.
+    clearOAuthNextCookie(res);
   }
 
   const params = new URLSearchParams({
@@ -150,22 +155,6 @@ function readNextCookie(req: Request): string | null {
     return null;
   }
   return raw;
-}
-
-/**
- * Allow only paths that look like `/safe/path?query#hash`. Rejects:
- *   - protocol-relative `//evil.com/...`
- *   - backslash-as-separator (`/\evil.com`) — browsers normalize to `//`
- *   - whitespace (which some browsers strip before URL parsing)
- *   - anything outside a conservative ASCII path/query/fragment alphabet
- */
-const SAFE_NEXT_RE = /^\/[A-Za-z0-9_\-./~%?&=#:]*$/;
-function isSafeNextPath(raw: string): boolean {
-  if (raw.length === 0 || raw.length > 512) return false;
-  if (!raw.startsWith('/')) return false;
-  if (raw.startsWith('//') || raw.startsWith('/\\')) return false;
-  if (/\s/.test(raw)) return false;
-  return SAFE_NEXT_RE.test(raw);
 }
 
 function safeEqualStrings(a: string, b: string): boolean {

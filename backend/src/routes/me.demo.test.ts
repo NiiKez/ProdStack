@@ -28,6 +28,7 @@ const state = vi.hoisted(() => ({
 
 const mocks = vi.hoisted(() => ({
   userFindUnique: vi.fn(),
+  userUpdate: vi.fn(),
   userDelete: vi.fn(),
   projectCount: vi.fn(),
   projectFindMany: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock('../db.js', () => ({
   prisma: {
     user: {
       findUnique: mocks.userFindUnique,
+      update: mocks.userUpdate,
       delete: mocks.userDelete,
     },
     project: { count: mocks.projectCount, findMany: mocks.projectFindMany },
@@ -80,6 +82,7 @@ function asUser(isDemo: boolean) {
 beforeEach(() => {
   asUser(true);
   mocks.userFindUnique.mockReset();
+  mocks.userUpdate.mockReset();
   mocks.userDelete.mockReset();
   mocks.projectCount.mockReset();
   mocks.projectFindMany.mockReset();
@@ -87,6 +90,7 @@ beforeEach(() => {
   mocks.pingAzure.mockReset();
 
   mocks.userFindUnique.mockResolvedValue({ githubTokenCiphertext: Buffer.from([1, 2, 3]) });
+  mocks.userUpdate.mockResolvedValue({});
   mocks.userDelete.mockResolvedValue({});
   mocks.projectCount.mockResolvedValue(0);
   mocks.projectFindMany.mockResolvedValue([]);
@@ -118,6 +122,31 @@ describe('POST /api/account/azure/test — demo isolation', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true });
     expect(mocks.pingAzure).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('POST /api/account/disconnect-github — demo isolation', () => {
+  it('blocks a demo session with 403 and never touches the demo row', async () => {
+    asUser(true);
+    const res = await supertest(createApp())
+      .post('/api/account/disconnect-github')
+      .set('X-Requested-With', 'XMLHttpRequest');
+    // Demo sessions carry a placeholder token + are TTL-reaped; disconnecting
+    // would corrupt the sandbox for no reason. The guard must fire BEFORE any DB
+    // read/write — so the active-project count never runs and the row is intact.
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ error: 'DEMO_NOT_SUPPORTED' });
+    expect(mocks.userUpdate).not.toHaveBeenCalled();
+    expect(mocks.projectCount).not.toHaveBeenCalled();
+  });
+
+  it('still disconnects a real (non-demo) session', async () => {
+    asUser(false);
+    const res = await supertest(createApp())
+      .post('/api/account/disconnect-github')
+      .set('X-Requested-With', 'XMLHttpRequest');
+    expect(res.status).toBe(204);
+    expect(mocks.userUpdate).toHaveBeenCalledTimes(1);
   });
 });
 

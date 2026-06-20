@@ -144,6 +144,102 @@ describe('GET /api/auth/github/callback — state is single-use', () => {
   });
 });
 
+describe('GET /api/auth/github/begin — ?next handling', () => {
+  function setCookieHeader(res: { headers: Record<string, unknown> }): string {
+    const h = res.headers['set-cookie'];
+    return Array.isArray(h) ? h.join('\n') : String(h ?? '');
+  }
+
+  it('redirects to GitHub and stores a SAFE next as a signed oauth_next cookie', async () => {
+    const res = await request(buildApp())
+      .get('/api/auth/github/begin')
+      .query({ next: '/projects' })
+      .redirects(0);
+
+    expect(res.status).toBe(302);
+    expect(String(res.headers.location)).toMatch(/^https:\/\/github\.com\/login\/oauth\/authorize\?/);
+    const cookies = setCookieHeader(res);
+    // oauth_next was set (signed → value is URL-encoded, `s:` → `s%3A`) and NOT expired.
+    expect(cookies).toMatch(/^oauth_next=s%3A/m);
+    expect(cookies).not.toMatch(/^oauth_next=.*Expires=Thu, 01 Jan 1970/m);
+  });
+
+  it('does NOT store an UNSAFE (off-origin) next — and clears any stale one', async () => {
+    for (const next of ['//evil.com', 'https://evil.com', '/\\evil.com']) {
+      const res = await request(buildApp())
+        .get('/api/auth/github/begin')
+        .query({ next })
+        .redirects(0);
+      expect(res.status).toBe(302);
+      const cookies = setCookieHeader(res);
+      // oauth_next is emitted only as an expiring clear (a signed-empty value),
+      // and the off-site host never lands in ANY cookie value.
+      expect(cookies, next).toMatch(/^oauth_next=.*Expires=Thu, 01 Jan 1970/m);
+      expect(cookies.toLowerCase(), next).not.toContain('evil');
+    }
+  });
+
+  it('clears a stale oauth_next when a fresh begin carries no next', async () => {
+    const res = await request(buildApp()).get('/api/auth/github/begin').redirects(0);
+    expect(res.status).toBe(302);
+    // A bare begin must not inherit an earlier ?next= — it emits an expiring
+    // oauth_next so a prior value can't survive into this login's callback.
+    expect(setCookieHeader(res)).toMatch(/^oauth_next=.*Expires=Thu, 01 Jan 1970/m);
+  });
+});
+
+describe('GET /api/auth/github/callback — safe ?next round-trip', () => {
+  it('redirects to WEB_ORIGIN + the stored safe next path', async () => {
+    (exchangeCodeForToken as ReturnType<typeof vi.fn>).mockResolvedValue({ accessToken: 'gho_x' });
+    (fetchGithubProfile as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 4242,
+      login: 'octocat',
+      email: null,
+      avatarUrl: null,
+    });
+    (prisma.user.upsert as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'user_1' });
+
+    const signedState = signCookieValue('state-abc', COOKIE_SECRET);
+    const signedNext = signCookieValue('/projects?tab=builds', COOKIE_SECRET);
+    const res = await request(buildApp())
+      .get('/api/auth/github/callback')
+      .query({ code: 'code-1', state: 'state-abc' })
+      .set('Cookie', [`oauth_state=s:${signedState}`, `oauth_next=s:${signedNext}`])
+      .redirects(0);
+
+    expect(res.status).toBe(302);
+    // Lands back on our own origin at the requested path — never off-site.
+    expect(res.headers.location).toBe('http://localhost:5173/projects?tab=builds');
+  });
+});
+
+describe('OWNER_GITHUB_ID gate — unset (self-host default)', () => {
+  it('lets ANY GitHub user through and persists their session when the gate is unset', async () => {
+    // This suite never sets process.env.OWNER_GITHUB_ID, so the single-user gate
+    // is a no-op — the documented open-source/self-host behavior (auth.ts).
+    (exchangeCodeForToken as ReturnType<typeof vi.fn>).mockResolvedValue({ accessToken: 'gho_x' });
+    (fetchGithubProfile as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 999, // not any "owner" — would be bounced if a gate were configured
+      login: 'random-dev',
+      email: null,
+      avatarUrl: null,
+    });
+    const upsert = prisma.user.upsert as ReturnType<typeof vi.fn>;
+    upsert.mockResolvedValue({ id: 'user_random' });
+
+    const signedState = signCookieValue('state-1', COOKIE_SECRET);
+    const res = await request(buildApp())
+      .get('/api/auth/github/callback')
+      .query({ code: 'c', state: 'state-1' })
+      .set('Cookie', [`oauth_state=s:${signedState}`])
+      .redirects(0);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('http://localhost:5173/dashboard');
+    expect(upsert).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('requireXRequestedWith middleware', () => {
   it('blocks POST without the X-Requested-With header (403 CSRF)', async () => {
     const app = buildApp();

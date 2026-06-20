@@ -70,3 +70,10 @@ export function clearOAuthCookies(res: Response): void {
   res.clearCookie(OAUTH_STATE_COOKIE, { ...baseOptions(), signed: true });
   res.clearCookie(OAUTH_NEXT_COOKIE, { ...baseOptions(), signed: true });
 }
+
+// Clear only the post-auth redirect cookie. Used by `/github/begin` to drop a
+// stale `oauth_next` left over from a prior begin, so a bare begin can't inherit
+// an earlier `?next=` and redirect somewhere the user didn't ask for.
+export function clearOAuthNextCookie(res: Response): void {
+  res.clearCookie(OAUTH_NEXT_COOKIE, { ...baseOptions(), signed: true });
+}

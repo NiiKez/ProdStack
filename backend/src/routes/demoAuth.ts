@@ -8,6 +8,7 @@ import { env } from '../env.js';
 import { setSessionCookie } from '../lib/cookies.js';
 import { encrypt } from '../lib/crypto.js';
 import { signSession } from '../lib/jwt.js';
+import { isSafeNextPath } from '../lib/safeNext.js';
 import { demoLoginLimiter } from '../middleware/rateLimit.js';
 import { seedDemoWorkspace } from '../services/demo/demoOrchestrator.js';
 
@@ -182,9 +183,10 @@ async function admitDemoUser(): Promise<{ id: string }> {
 }
 
 /**
- * Honour an optional safe `?next=` path (same conservative validation auth.ts
- * uses), defaulting to `/dashboard`. Rejects protocol-relative / off-site /
- * whitespace-bearing values so the redirect can't be hijacked.
+ * Honour an optional safe `?next=` path (the shared {@link isSafeNextPath}
+ * validation auth.ts also uses), defaulting to `/dashboard`. Rejects
+ * protocol-relative / off-site / whitespace-bearing values so the redirect
+ * can't be hijacked.
  */
 function resolveNext(req: Request): string {
   const raw = req.query.next;
@@ -192,15 +194,6 @@ function resolveNext(req: Request): string {
     return raw;
   }
   return '/dashboard';
-}
-
-const SAFE_NEXT_RE = /^\/[A-Za-z0-9_\-./~%?&=#:]*$/;
-function isSafeNextPath(raw: string): boolean {
-  if (raw.length === 0 || raw.length > 512) return false;
-  if (!raw.startsWith('/')) return false;
-  if (raw.startsWith('//') || raw.startsWith('/\\')) return false;
-  if (/\s/.test(raw)) return false;
-  return SAFE_NEXT_RE.test(raw);
 }
 
 export default router;

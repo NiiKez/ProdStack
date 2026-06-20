@@ -126,6 +126,21 @@ describe('GET /api/auth/demo-login (ENABLE_DEMO=true)', () => {
     expect(cookieHeader).toMatch(/^session=/m);
   });
 
+  it('honours a SAFE ?next but falls back to /dashboard for an UNSAFE one (no open redirect)', async () => {
+    const safe = await request(buildApp()).get('/api/auth/demo-login?next=/projects').redirects(0);
+    expect(safe.status).toBe(302);
+    expect(safe.headers.location).toBe('/projects');
+
+    for (const next of ['//evil.com', 'https://evil.com', '/\\evil.com', '/a b']) {
+      const res = await request(buildApp())
+        .get(`/api/auth/demo-login?next=${encodeURIComponent(next)}`)
+        .redirects(0);
+      expect(res.status).toBe(302);
+      // An off-origin / whitespace-bearing next can never hijack the redirect.
+      expect(res.headers.location, next).toBe('/dashboard');
+    }
+  });
+
   it('returns 503 DEMO_AT_CAPACITY (and creates no user) when the active demo count is at the cap', async () => {
     mocks.userCount.mockResolvedValueOnce(50); // == DEMO_MAX_ACTIVE
     const app = buildApp();
