@@ -178,9 +178,19 @@ describe('POST /api/account/disconnect-github', () => {
     expect(res.status).toBe(204);
     expect(mocks.userUpdate).toHaveBeenCalledTimes(1);
     const call = mocks.userUpdate.mock.calls[0]![0] as {
-      data: { githubTokenCiphertext: Buffer; githubTokenKeyVersion: number };
+      data: {
+        githubTokenCiphertext: Buffer;
+        githubTokenIv: Buffer;
+        githubTokenAuthTag: Buffer;
+        githubTokenKeyVersion: number;
+      };
     };
+    // ALL FOUR credential columns must be zeroed — a partial wipe (e.g. clearing
+    // the ciphertext but leaving the iv/authTag) would still look like a stored
+    // credential to anything that length-checks a different column.
     expect(call.data.githubTokenCiphertext.length).toBe(0);
+    expect(call.data.githubTokenIv.length).toBe(0);
+    expect(call.data.githubTokenAuthTag.length).toBe(0);
     expect(call.data.githubTokenKeyVersion).toBe(0);
     const setCookie = res.headers['set-cookie'];
     const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : (setCookie ?? '');
@@ -206,6 +216,34 @@ describe('DELETE /api/account', () => {
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ error: 'CONFIRMATION_REQUIRED' });
     expect(mocks.userDelete).not.toHaveBeenCalled();
+  });
+
+  it('rejects a wrong-cased / partial X-Confirm value (exact match required)', async () => {
+    const app = createApp();
+    // NB: HTTP trims surrounding whitespace in header values, so a trailing-space
+    // variant isn't a distinct case — these are the real wrong values.
+    for (const value of ['delete', 'Delete', 'DELETED', 'yes']) {
+      const res = await supertest(app)
+        .delete('/api/account')
+        .set('X-Requested-With', 'XMLHttpRequest')
+        .set('X-Confirm', value);
+      expect(res.status, value).toBe(400);
+      expect(res.body).toMatchObject({ error: 'CONFIRMATION_REQUIRED' });
+    }
+    expect(mocks.userDelete).not.toHaveBeenCalled();
+  });
+
+  it('skips Azure teardown when the user has no live projects', async () => {
+    // Default projectFindMany → [] : the delete still succeeds and the teardown
+    // loop is simply skipped (no container apps to reap).
+    const app = createApp();
+    const res = await supertest(app)
+      .delete('/api/account')
+      .set('X-Requested-With', 'XMLHttpRequest')
+      .set('X-Confirm', 'DELETE');
+    expect(res.status).toBe(204);
+    expect(mocks.userDelete).toHaveBeenCalledWith({ where: { id: 'u1' } });
+    expect(mocks.deleteContainerApp).not.toHaveBeenCalled();
   });
 
   it('deletes the user and tears down live container apps best-effort', async () => {

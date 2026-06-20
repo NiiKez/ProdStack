@@ -109,6 +109,49 @@ describe('requireAuth — expired demo session', () => {
     expect(cookieHeader).toMatch(/Expires=Thu, 01 Jan 1970/);
   });
 
+  it('fails closed at the EXACT boundary (demoExpiresAt === now → 401, pinning the <= not <)', async () => {
+    // Invoke requireAuth directly with a pinned clock so demoExpiresAt.getTime()
+    // equals Date.now() to the millisecond — a `< now` check would (wrongly) let
+    // this through; the `<= now` in requireAuth must reject it.
+    const now = 1_700_000_000_000;
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: 'demo_boundary',
+        githubLogin: 'demo-edge',
+        email: null,
+        avatarUrl: null,
+        isDemo: true,
+        demoExpiresAt: new Date(now), // exactly now
+      });
+
+      const req = { signedCookies: { session: signSession('demo_boundary') } } as never;
+      const res = {
+        statusCode: 0,
+        body: null as unknown,
+        status(n: number) {
+          this.statusCode = n;
+          return this;
+        },
+        json(b: unknown) {
+          this.body = b;
+          return this;
+        },
+        clearCookie: vi.fn(),
+      };
+      const next = vi.fn();
+
+      await requireAuth(req, res as never, next as never);
+
+      expect(res.statusCode).toBe(401);
+      expect(res.body).toEqual({ error: 'UNAUTHORIZED' });
+      expect(res.clearCookie).toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
   it('still authenticates a demo user whose demoExpiresAt is in the FUTURE', async () => {
     const app = buildApp();
     (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({

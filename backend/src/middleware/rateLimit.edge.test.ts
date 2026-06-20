@@ -15,7 +15,7 @@ vi.hoisted(() => {
   process.env.EDGE_PROXY_SECRET = 'edge-secret-abcdefghijklmnop';
 });
 
-const { ipRateLimitKey } = await import('./rateLimit.js');
+const { ipRateLimitKey, userOrIpKey } = await import('./rateLimit.js');
 
 /** Minimal Request stand-in exercising the fields ipRateLimitKey reads. */
 function fakeReq(opts: {
@@ -104,5 +104,20 @@ describe('ipRateLimitKey (edge-authenticated, EDGE_PROXY_SECRET set)', () => {
     const a = ipRateLimitKey(fakeReq({ edgeHeader: EDGE_SECRET, ip: '2001:db8:abcd:1234::1' }));
     const b = ipRateLimitKey(fakeReq({ edgeHeader: EDGE_SECRET, ip: '2001:db8:abcd:1234::dead:beef' }));
     expect(a).toBe(b); // same /56 → same bucket
+  });
+});
+
+describe('userOrIpKey — anonymous fallback inherits the spoof-resistant IP key', () => {
+  it('keys an authenticated user on u:<id>, ignoring any IP/XFF', () => {
+    const withUser = { ...fakeReq({ ip: '6.6.6.6', xff: '1.1.1.1, 198.51.100.5' }), user: { id: 'alice' } } as unknown as Request;
+    expect(userOrIpKey(withUser)).toBe('u:alice');
+  });
+
+  it('for an ANONYMOUS direct hit, keys on the Envoy-appended peer — not a forged XFF prefix', () => {
+    // No user + no edge secret → the fallback must run through ipRateLimitKey, so
+    // an attacker prepending fakes still buckets on the real (last) peer. This is
+    // the path that stops an unauthenticated flood from minting fresh buckets.
+    const key = userOrIpKey(fakeReq({ xff: 'aa.aa.aa.aa, bb.bb.bb.bb, 198.51.100.5' }));
+    expect(key).toBe(ipKeyGenerator('198.51.100.5'));
   });
 });

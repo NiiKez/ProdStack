@@ -5,6 +5,7 @@ import { env } from '../env.js';
 import { HttpError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
 import { clearSessionCookie } from '../lib/cookies.js';
+import { OAUTH_SCOPE_LIST } from '../lib/oauthScopes.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 import { deleteContainerApp, pingAzure } from '../services/azure/index.js';
 
@@ -28,12 +29,6 @@ function getUser(req: Request): {
   };
 }
 
-// GitHub scopes requested during OAuth (mirrors `OAUTH_SCOPES` in auth.ts).
-// Reported to the Settings page so it can show what access the stored token
-// grants. Kept in sync by hand — auth.ts owns the authoritative space-joined
-// string; we surface it as an array.
-const GITHUB_OAUTH_SCOPES = ['repo', 'admin:repo_hook'] as const;
-
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = getUser(req);
@@ -55,7 +50,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       githubLogin: user.githubLogin,
       email: user.email,
       avatarUrl: user.avatarUrl,
-      github: { connected, scopes: [...GITHUB_OAUTH_SCOPES] },
+      github: { connected, scopes: [...OAUTH_SCOPE_LIST] },
       azure: {
         mode: env.AZURE_STUB ? 'stub' : 'managed-identity',
         region: env.AZURE_REGION,
@@ -75,6 +70,15 @@ router.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = getUser(req);
+
+      // Demo sessions carry a placeholder (non-GitHub) token and are reaped on
+      // TTL — "disconnecting" it would just zero the demo row's token columns and
+      // log the visitor out, corrupting an ephemeral sandbox to no purpose. Block
+      // it like the other mutating demo paths (azure/test, DELETE) and projects.ts.
+      if (req.user?.isDemo === true) {
+        throw new HttpError(403, 'DEMO_NOT_SUPPORTED', 'Disconnecting GitHub is not available in the demo.');
+      }
+
       const activeProjects = await prisma.project.count({
         where: { userId: user.id, deletedAt: null },
       });
