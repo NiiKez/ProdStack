@@ -48,7 +48,7 @@
     "@vitest/coverage-v8": "^4.1.9",
     "eslint": "^9",
     "eslint-plugin-jsx-a11y": "^6",
-    "eslint-plugin-react-hooks": "^5",
+    "eslint-plugin-react-hooks": "^7",
     "jsdom": "^29.1.1",
     "msw": "^2.14.6",
     "tailwindcss": "^4.0.0",
