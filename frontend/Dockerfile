@@ -51,7 +51,7 @@ RUN npm run build --workspace=@prodstack/web
 # /etc/nginx/templates/*.template render below is unchanged.
 # The digest below is for nginxinc/nginx-unprivileged:1.31-alpine (Dependabot
 # keeps the tag + digest current; update both together, never the tag alone).
-FROM nginxinc/nginx-unprivileged:1.31-alpine@sha256:cc300bd2e8776708a8c2c8686a74f06eadf221c5ce01e85d0e821955d7a730ab AS runner
+FROM nginxinc/nginx-unprivileged:1.31-alpine@sha256:054e14f543eb688809d59ec2ad1644d1a61678e247c87a318ad605977eb37eaf AS runner
 
 # Install our site config as an envsubst TEMPLATE. nginx:alpine's
 # /docker-entrypoint.d/20-envsubst-on-templates.sh renders every
