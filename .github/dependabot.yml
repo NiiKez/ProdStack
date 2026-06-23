@@ -38,6 +38,14 @@ updates:
       # minor/patch still flow.
       - dependency-name: "pino"
         update-types: ["version-update:semver-major"]
+      # eslint-plugin-react-hooks 6+ folds the React Compiler rule set into its
+      # `recommended` preset (react-hooks/purity, set-state-in-effect,
+      # incompatible-library, …), which flags pre-existing, intentional patterns
+      # (prop-sync setState-in-effect, Date.now timestamps, RHF watch()) as hard
+      # errors. Adopting it is a deliberate lint migration + code refactor, not a
+      # weekly auto-bump. 5.x minor/patch still flow.
+      - dependency-name: "eslint-plugin-react-hooks"
+        update-types: ["version-update:semver-major"]
 
   # --- GitHub Actions (keeps the SHA pins fresh; Dependabot updates pin + comment) ---
   - package-ecosystem: github-actions
