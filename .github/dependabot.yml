@@ -46,6 +46,20 @@ updates:
       # weekly auto-bump. 5.x minor/patch still flow.
       - dependency-name: "eslint-plugin-react-hooks"
         update-types: ["version-update:semver-major"]
+      # @vitejs/plugin-react 6+ imports `vite/internal` and requires Vite 7; the
+      # frontend is on Vite 6, so the bump fails the build (ERR_PACKAGE_PATH_NOT_EXPORTED).
+      # It's coupled to a Vite-7 major — adopt both together as a deliberate
+      # migration. 4.x/5.x minor/patch still flow.
+      - dependency-name: "@vitejs/plugin-react"
+        update-types: ["version-update:semver-major"]
+      # Prisma 7 is a breaking DB-layer migration: `datasource.url` is removed from
+      # schema.prisma in favour of prisma.config.ts + a driver adapter passed to the
+      # PrismaClient constructor (P1012). That touches migrate-on-boot and the worker
+      # on a live prod DB — a conscious migration, not a weekly bump. 6.x flows.
+      - dependency-name: "prisma"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@prisma/client"
+        update-types: ["version-update:semver-major"]
 
   # --- GitHub Actions (keeps the SHA pins fresh; Dependabot updates pin + comment) ---
   - package-ecosystem: github-actions
