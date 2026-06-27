@@ -38,6 +38,12 @@ updates:
       # minor/patch still flow.
       - dependency-name: "pino"
         update-types: ["version-update:semver-major"]
+      # pino-http 11 bumps its own pino dependency to ^10, so it drags in the pino
+      # 10 major above out of band — the app's pino-9 logger then throws
+      # `logger[stringifySym] is not a function` on every request. Pinned in
+      # lockstep with `pino`: adopt both as one deliberate migration. 10.x flows.
+      - dependency-name: "pino-http"
+        update-types: ["version-update:semver-major"]
       # eslint-plugin-react-hooks 6+ folds the React Compiler rule set into its
       # `recommended` preset (react-hooks/purity, set-state-in-effect,
       # incompatible-library, …), which flags pre-existing, intentional patterns
