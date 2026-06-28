@@ -46,6 +46,7 @@ import {
   teardownPreview,
 } from '../services/previews/previewService.js';
 import { loadDecryptedEnvVars, loadEnvVarMeta } from '../services/projectEnv.js';
+import { recordSecurityEvent } from '../services/securityEvents.js';
 import { containerAppName, dedupedSlug, slugify } from '../services/slug.js';
 
 const router = Router();
@@ -568,6 +569,17 @@ router.post(
           await rollbackContainerApp(appName);
           throw err;
         }
+      });
+
+      // Audit the project creation (keys-only: slug + repo id, no secrets).
+      await recordSecurityEvent({
+        action: 'project.created',
+        outcome: 'success',
+        userId: user.id,
+        targetType: 'project',
+        targetId: created.id,
+        ip: req.ip ?? null,
+        metadata: { slug: created.slug, githubRepoId: created.githubRepoId },
       });
 
       res.status(201).json(reshapeProject(created));
@@ -1152,6 +1164,10 @@ router.patch(
       // that against what's stored.
       const envVarsProvided = body.envVars !== undefined && body.envVars !== null;
       let envVarsChanged = false;
+      // The exact set of env-var KEYS that changed (added / edited / removed) —
+      // keys only, never values. Reused for the redeploy gate and the audit
+      // event written after the save commits.
+      const changedEnvKeys: string[] = [];
       // The desired final value for each submitted key: a fresh value to encrypt,
       // or `undefined` to signal "keep the stored ciphertext untouched". Built
       // once here (it needs the decrypted existing set) and reused in the tx.
@@ -1192,17 +1208,22 @@ router.patch(
           desiredEnvValues.set(entry.key, hasNewValue ? entry.value! : undefined);
         }
 
-        // Structural diff by (key → final value): added/removed key or any value
-        // change triggers the redeploy; a no-op save doesn't. A kept value (no
-        // new value submitted) matches the existing one by definition, so it
-        // never on its own marks the set as changed.
-        envVarsChanged =
-          existingMap.size !== desiredEnvValues.size ||
-          Array.from(desiredEnvValues.entries()).some(([key, newValue]) => {
-            if (!existingMap.has(key)) return true; // added key
-            if (newValue === undefined) return false; // kept → unchanged
-            return existingMap.get(key) !== newValue; // edited → changed iff different
-          });
+        // Structural diff by (key → final value): collect the exact KEYS that
+        // changed. Removed = stored key not resubmitted; added = submitted key
+        // not stored; edited = submitted key with a new value that differs. A
+        // kept value (no new value submitted) matches the existing one by
+        // definition, so it never marks the set as changed.
+        for (const key of existingMap.keys()) {
+          if (!desiredEnvValues.has(key)) changedEnvKeys.push(key); // removed
+        }
+        for (const [key, newValue] of desiredEnvValues) {
+          if (!existingMap.has(key)) {
+            changedEnvKeys.push(key); // added
+          } else if (newValue !== undefined && existingMap.get(key) !== newValue) {
+            changedEnvKeys.push(key); // edited
+          }
+        }
+        envVarsChanged = changedEnvKeys.length > 0;
       }
 
       const refreshed = await prisma.$transaction(async (tx) => {
@@ -1264,6 +1285,24 @@ router.patch(
           include: projectWithRelations.include,
         });
       });
+
+      // Audit a successful env-var change — the save tx has committed. Record the
+      // CHANGED KEYS ONLY (added/edited/removed), never the values. A no-op save
+      // (no keys changed) isn't audited.
+      if (envVarsProvided && changedEnvKeys.length > 0) {
+        await recordSecurityEvent({
+          action: 'env.updated',
+          outcome: 'success',
+          userId: user.id,
+          targetType: 'project',
+          targetId: project.id,
+          ip: req.ip ?? null,
+          metadata: {
+            changedKeys: [...changedEnvKeys].sort(),
+            count: changedEnvKeys.length,
+          },
+        });
+      }
 
       // After the save commits, redeploy the current image with the new env
       // vars so the change is live immediately. This is best-effort: the env

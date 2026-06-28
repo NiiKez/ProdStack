@@ -270,4 +270,77 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   }
 });
 
+// --- GET /security-events (owner-gated read-back of the audit trail) --------
+//
+// Append-only security/audit events (`SecurityEvent`, written best-effort by
+// `services/securityEvents.ts`): login success, owner-gate denials, env-var
+// changes, etc. The router already mounts behind `requireAuth`; since the OAuth
+// owner-gate means only the owner ever holds a real session, an authenticated
+// non-demo user IS the owner. Demo sessions are rejected (403) — the global
+// audit trail is not theirs to read. The page is bounded (capped limit) and
+// keyset-paginated on the row id.
+const securityEventsQuerySchema = z.object({
+  // Narrow to a single action key (e.g. `auth.denied_not_owner`).
+  action: z.string().min(1).max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(40).optional(),
+});
+
+function serializeSecurityEvent(e: {
+  id: string;
+  createdAt: Date;
+  action: string;
+  outcome: string;
+  actorGithubId: number | null;
+  actorLogin: string | null;
+  userId: string | null;
+  targetType: string | null;
+  targetId: string | null;
+  ip: string | null;
+  metadata: unknown;
+}) {
+  return {
+    id: e.id,
+    createdAt: e.createdAt,
+    action: e.action,
+    outcome: e.outcome,
+    actorGithubId: e.actorGithubId,
+    actorLogin: e.actorLogin,
+    userId: e.userId,
+    targetType: e.targetType,
+    targetId: e.targetId,
+    ip: e.ip,
+    metadata: e.metadata,
+  };
+}
+
+router.get('/security-events', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // Throws 401 if the request somehow reached here without an authenticated user.
+    getUserId(req);
+    // Demo sessions must never read the platform-wide security/audit trail.
+    if ((req.user as { isDemo?: boolean } | undefined)?.isDemo === true) {
+      throw new HttpError(403, 'DEMO_NOT_SUPPORTED');
+    }
+    const q = securityEventsQuerySchema.parse(req.query);
+
+    const where = q.action ? { action: q.action } : {};
+    const rows = await prisma.securityEvent.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: q.limit + 1,
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+    });
+
+    const hasMore = rows.length > q.limit;
+    const items = hasMore ? rows.slice(0, q.limit) : rows;
+    res.json({
+      items: items.map(serializeSecurityEvent),
+      nextCursor: hasMore ? (items[items.length - 1]?.id ?? null) : null,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

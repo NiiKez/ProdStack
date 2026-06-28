@@ -62,6 +62,16 @@ export interface KanikoOptions {
   buildArgs?: Array<{ name: string; value: string }>;
   /** Called once per line of stdout/stderr emitted by kaniko. */
   onLine: (line: string, stream: 'stdout' | 'stderr') => void;
+  /**
+   * Secret values stripped from every stdout/stderr line BEFORE it reaches
+   * `onLine` (and therefore the persisted `LogLine` + the live SSE stream).
+   * Mirrors the git phase's `spawnLogged({ redact })`: kaniko reads our docker
+   * config (ACR push password + Docker Hub pull token) and can echo parts of it
+   * on a registry error, so the caller seeds this with every sensitive value the
+   * worker holds. Applied with the shared {@link redact} helper (longest-first).
+   * Omitted/empty → no redaction (byte-identical to the pre-redaction behaviour).
+   */
+  redactSecrets?: string[];
   /** Hard timeout; killed with SIGKILL if exceeded. */
   timeoutMs: number;
   signal?: AbortSignal;
@@ -184,6 +194,57 @@ export function cacheOrSnapshotFlags(cache: KanikoOptions['cache']): string[] {
   return ['--cache=true', `--cache-repo=${cache.repo}`, `--cache-ttl=${cache.ttl}`];
 }
 
+/**
+ * Non-secret env vars the spawned build process is allowed to inherit. Kaniko
+ * runs UNTRUSTED user-Dockerfile `RUN` steps, so it must NOT receive the worker's
+ * full `process.env` — that would hand a hostile Dockerfile every platform secret
+ * (ACR_PASSWORD, DATABASE_URL, DATA_ENC_KEY, JWT_SECRET, COOKIE_SECRET,
+ * DOCKERHUB_TOKEN, DEPLOY_TOKEN, ADMIN_TOKEN, …). Only these load-bearing,
+ * non-secret vars pass through; the caller adds the few it genuinely needs (e.g.
+ * DOCKER_CONFIG for the push creds) via {@link buildChildEnv}'s `extra`.
+ *
+ *  - PATH/HOME      — the executor needs to find binaries + a home directory.
+ *  - HTTP(S)_PROXY / NO_PROXY (+ lowercase) — corporate-proxy egress to the
+ *    registries (ACR / Docker Hub), forwarded only when present.
+ *  - DOCKER_HOST / DOCKER_TLS_VERIFY / DOCKER_CERT_PATH — docker-mode ONLY: how
+ *    the `docker` CLI reaches its daemon. Rootless/remote dev setups export
+ *    DOCKER_HOST (e.g. `unix:///run/user/<uid>/docker.sock`); without it a
+ *    docker-mode build on such a host can't connect. Non-secret; simply absent in
+ *    the prod kaniko mode, so it costs the real exposure nothing.
+ */
+const CHILD_ENV_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'DOCKER_HOST',
+  'DOCKER_TLS_VERIFY',
+  'DOCKER_CERT_PATH',
+] as const;
+
+/**
+ * Build the MINIMAL child environment for the spawned build process: only the
+ * {@link CHILD_ENV_ALLOWLIST} vars present in `source` (default `process.env`),
+ * plus any `extra` the caller injects (which wins on a key clash). Pure +
+ * exported with an injectable `source` so the allow-list can be unit-tested
+ * without mutating the real process env.
+ */
+export function buildChildEnv(
+  extra: NodeJS.ProcessEnv = {},
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const key of CHILD_ENV_ALLOWLIST) {
+    const value = source[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return { ...out, ...extra };
+}
+
 export function buildCommand(
   opts: KanikoOptions,
   dockerConfigDir: string,
@@ -203,11 +264,16 @@ export function buildCommand(
       ...buildArgFlags(opts.buildArgs),
       ...opts.destinations.map((d) => `--destination=${d}`),
     ];
-    return { command: 'docker', args, env: process.env };
+    // `docker run` does not forward the host env into the built container, but we
+    // still hand the `docker` CLI itself only the minimal allow-list (defense in
+    // depth) — the ACR/Docker Hub creds reach kaniko via the mounted config dir.
+    return { command: 'docker', args, env: buildChildEnv() };
   }
 
   // BUILD_RUNNER_MODE === 'kaniko'. Pass DOCKER_CONFIG in the child env so
-  // we don't mutate the parent process (concurrent builds, tests, etc).
+  // we don't mutate the parent process (concurrent builds, tests, etc) — and via
+  // the minimal allow-list so the untrusted Dockerfile's `RUN` steps never see
+  // any platform secret from the worker's process.env.
   //
   // `--ignore-path=BUILD_WORK_DIR`: kaniko's stage-transition `DeleteFilesystem`
   // walks `/` and `os.RemoveAll`s anything not on its ignore list. Without
@@ -224,7 +290,7 @@ export function buildCommand(
       ...buildArgFlags(opts.buildArgs),
       ...opts.destinations.map((d) => `--destination=${d}`),
     ],
-    env: { ...process.env, DOCKER_CONFIG: dockerConfigDir },
+    env: buildChildEnv({ DOCKER_CONFIG: dockerConfigDir }),
   };
 }
 
@@ -269,8 +335,11 @@ function spawnAndStream(
       opts.signal.addEventListener('abort', onAbort, { once: true });
     }
 
-    streamLines(child.stdout, (line) => opts.onLine(line, 'stdout'));
-    streamLines(child.stderr, (line) => opts.onLine(line, 'stderr'));
+    // Redact every secret the worker holds out of kaniko's output BEFORE it
+    // reaches onLine — same contract the git phase gets from `spawnLogged`.
+    const redactSecrets = opts.redactSecrets ?? [];
+    streamLines(child.stdout, (line) => opts.onLine(line, 'stdout'), redactSecrets);
+    streamLines(child.stderr, (line) => opts.onLine(line, 'stderr'), redactSecrets);
 
     child.on('error', (err) => {
       clearTimeout(timer);
@@ -295,6 +364,7 @@ function spawnAndStream(
 function streamLines(
   stream: NodeJS.ReadableStream | null,
   onLine: (line: string) => void,
+  redactSecrets: string[] = [],
 ): void {
   if (!stream) return;
   let buffer = '';
@@ -305,13 +375,36 @@ function streamLines(
     while ((idx = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, idx).replace(/\r$/, '');
       buffer = buffer.slice(idx + 1);
-      if (line.length > 0) onLine(line);
+      // Redact the assembled line. Both this per-line path and the trailing
+      // `end` (truncation/no-final-newline) path below strip secrets.
+      if (line.length > 0) onLine(redact(line, redactSecrets));
     }
   });
   stream.on('end', () => {
     const tail = buffer.trim();
-    if (tail.length > 0) onLine(tail);
+    if (tail.length > 0) onLine(redact(tail, redactSecrets));
   });
+}
+
+/**
+ * Strip every secret in `secret` from a log line before it is emitted (persisted
+ * as a `LogLine` + streamed over SSE). Shared by the git phase (`spawnLogged` in
+ * runBuild.ts — the raw GitHub token AND the `AUTHORIZATION: Basic …` header it
+ * sends) and the kaniko phase ({@link streamLines} above — the ACR push password
+ * and Docker Hub pull token kaniko can echo on a registry error). Secrets are
+ * stripped LONGEST-FIRST so a shorter secret that is a substring of a longer one
+ * (e.g. a raw token inside its own base64 auth blob) doesn't pre-empt redacting
+ * the wider value. Empty strings are ignored (a `''` secret would replace between
+ * every character). Lives here, the lower-level module runBuild.ts depends on, so
+ * both phases reuse one implementation with no import cycle.
+ */
+export function redact(line: string, secret: string | string[]): string {
+  const secrets = (Array.isArray(secret) ? secret : [secret])
+    .filter((s) => s.length > 0)
+    .sort((a, b) => b.length - a.length);
+  let out = line;
+  for (const s of secrets) out = out.split(s).join('***');
+  return out;
 }
 
 function requireAcrName(): string {

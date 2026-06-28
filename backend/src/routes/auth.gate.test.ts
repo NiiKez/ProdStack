@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   exchangeCodeForToken: vi.fn(),
   fetchGithubProfile: vi.fn(),
   userUpsert: vi.fn(),
+  securityEventCreate: vi.fn(),
 }));
 
 vi.mock('../services/github.js', () => ({
@@ -33,26 +34,36 @@ vi.mock('../services/github.js', () => ({
 }));
 
 vi.mock('../db.js', () => ({
-  prisma: { user: { upsert: mocks.userUpsert } },
+  prisma: {
+    user: { upsert: mocks.userUpsert },
+    securityEvent: { create: mocks.securityEventCreate },
+  },
 }));
 
 const { createApp } = await import('../app.js');
 const supertest = (await import('supertest')).default;
 
+// The OAuth access token + authorization code used end-to-end below — neither
+// may ever appear in a recorded audit event.
+const ACCESS_TOKEN = 'gho_secret_access_token';
+const OAUTH_CODE = 'oauth_code_xyz';
+
 async function completeCallback(profileId: number) {
-  mocks.exchangeCodeForToken.mockResolvedValue({ accessToken: 'gho_token' });
+  mocks.exchangeCodeForToken.mockResolvedValue({ accessToken: ACCESS_TOKEN });
   mocks.fetchGithubProfile.mockResolvedValue({
     id: profileId,
     login: 'someone',
     email: null,
     avatarUrl: null,
   });
-  mocks.userUpsert.mockResolvedValue({ id: 'user-1' });
+  // A fresh insert sets createdAt === updatedAt (drives the audit `created` flag).
+  const now = new Date('2026-06-28T10:00:00Z');
+  mocks.userUpsert.mockResolvedValue({ id: 'user-1', createdAt: now, updatedAt: now });
 
   const agent = supertest.agent(createApp());
   const begin = await agent.get('/api/auth/github/begin');
   const state = new URL(begin.headers.location as string).searchParams.get('state')!;
-  return agent.get(`/api/auth/github/callback?code=valid&state=${state}`);
+  return agent.get(`/api/auth/github/callback?code=${OAUTH_CODE}&state=${state}`);
 }
 
 describe('OWNER_GITHUB_ID gate', () => {
@@ -60,6 +71,8 @@ describe('OWNER_GITHUB_ID gate', () => {
     mocks.exchangeCodeForToken.mockReset();
     mocks.fetchGithubProfile.mockReset();
     mocks.userUpsert.mockReset();
+    mocks.securityEventCreate.mockReset();
+    mocks.securityEventCreate.mockResolvedValue({ id: 'ev1' });
   });
   afterEach(() => vi.clearAllMocks());
 
@@ -78,5 +91,40 @@ describe('OWNER_GITHUB_ID gate', () => {
     expect(res.headers.location).toBe('http://localhost:5173/?denied=not_owner');
     // Critical: a rejected user's OAuth token is never written to the DB.
     expect(mocks.userUpsert).not.toHaveBeenCalled();
+  });
+
+  it('records an auth.denied_not_owner audit event on a non-owner — with the attempting actor, no token/code', async () => {
+    await completeCallback(999);
+    expect(mocks.securityEventCreate).toHaveBeenCalledTimes(1);
+    const data = mocks.securityEventCreate.mock.calls[0]![0]!.data;
+    expect(data).toMatchObject({
+      action: 'auth.denied_not_owner',
+      outcome: 'denied',
+      actorGithubId: 999, // the REJECTED user, never the owner
+      actorLogin: 'someone',
+      userId: null,
+    });
+    // The OAuth token + code must never be captured in the audit row.
+    const serialized = JSON.stringify(data);
+    expect(serialized).not.toContain(ACCESS_TOKEN);
+    expect(serialized).not.toContain(OAUTH_CODE);
+  });
+
+  it('records an auth.login success audit event for the owner — userId + created flag, no token', async () => {
+    await completeCallback(123);
+    const loginCall = mocks.securityEventCreate.mock.calls.find(
+      (c) => (c[0] as { data: { action: string } }).data.action === 'auth.login',
+    );
+    expect(loginCall).toBeDefined();
+    const data = (loginCall![0] as { data: Record<string, unknown> }).data;
+    expect(data).toMatchObject({
+      action: 'auth.login',
+      outcome: 'success',
+      userId: 'user-1',
+      actorGithubId: 123,
+      actorLogin: 'someone',
+      metadata: { created: true },
+    });
+    expect(JSON.stringify(data)).not.toContain(ACCESS_TOKEN);
   });
 });

@@ -6,7 +6,7 @@ import { pinoHttp } from 'pino-http';
 
 import { env, isProd } from './env.js';
 import { errorMiddleware } from './lib/errors.js';
-import { logger } from './lib/logger.js';
+import { logger, safeReqSerializer } from './lib/logger.js';
 import { globalLimiter, webhookLimiter } from './middleware/rateLimit.js';
 import { requireAuth } from './middleware/requireAuth.js';
 import { requireXRequestedWith } from './middleware/requireXRequestedWith.js';
@@ -63,6 +63,11 @@ export function createApp(): Express {
   app.use(
     pinoHttp({
       logger,
+      // Log the request PATH only — the default Express serializer logs the full
+      // URL (and the parsed query object), which would leak the GitHub OAuth
+      // `code`/`state` on /api/auth/github/callback into Log Analytics. See
+      // safeReqSerializer in lib/logger.ts.
+      serializers: { req: safeReqSerializer },
       customProps: (req) => ({ clientIp: req.ip, xff: req.headers['x-forwarded-for'] }),
     }),
   );

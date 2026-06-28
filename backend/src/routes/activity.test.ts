@@ -13,12 +13,13 @@ process.env.LOG_LEVEL = 'silent';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const state = vi.hoisted(() => ({ stubAuth: true }));
+const state = vi.hoisted(() => ({ stubAuth: true, isDemo: false }));
 
 const mocks = vi.hoisted(() => ({
   buildFindMany: vi.fn(),
   deploymentFindMany: vi.fn(),
   projectFindMany: vi.fn(),
+  securityEventFindMany: vi.fn(),
 }));
 
 vi.mock('../db.js', () => ({
@@ -26,6 +27,7 @@ vi.mock('../db.js', () => ({
     build: { findMany: mocks.buildFindMany },
     deployment: { findMany: mocks.deploymentFindMany },
     project: { findMany: mocks.projectFindMany },
+    securityEvent: { findMany: mocks.securityEventFindMany },
   },
 }));
 
@@ -36,7 +38,7 @@ vi.mock('../middleware/requireAuth.js', () => ({
     next: () => void,
   ) => {
     if (state.stubAuth) {
-      req.user = { id: 'u1', githubLogin: 'octocat', email: null, avatarUrl: null };
+      req.user = { id: 'u1', githubLogin: 'octocat', email: null, avatarUrl: null, isDemo: state.isDemo };
       next();
       return;
     }
@@ -54,12 +56,15 @@ const supertest = (await import('supertest')).default;
 
 beforeEach(() => {
   state.stubAuth = true;
+  state.isDemo = false;
   mocks.buildFindMany.mockReset();
   mocks.deploymentFindMany.mockReset();
   mocks.projectFindMany.mockReset();
+  mocks.securityEventFindMany.mockReset();
   mocks.buildFindMany.mockResolvedValue([]);
   mocks.deploymentFindMany.mockResolvedValue([]);
   mocks.projectFindMany.mockResolvedValue([]);
+  mocks.securityEventFindMany.mockResolvedValue([]);
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -172,6 +177,85 @@ describe('GET /api/activity', () => {
 
     // Both siblings surface exactly once across the two pages — none lost.
     expect(new Set([firstId, secondId])).toEqual(new Set(['p1', 'p2']));
+  });
+});
+
+describe('GET /api/activity/security-events (owner-gated audit read-back)', () => {
+  const sampleRow = {
+    id: 'ev1',
+    createdAt: new Date('2026-06-28T10:00:00Z'),
+    action: 'auth.login',
+    outcome: 'success',
+    actorGithubId: 182921896,
+    actorLogin: 'NiiKez',
+    userId: 'u1',
+    targetType: null,
+    targetId: null,
+    ip: '203.0.113.7',
+    metadata: { created: false },
+  };
+
+  it('401 when unauthenticated', async () => {
+    state.stubAuth = false;
+    const res = await supertest(createApp()).get('/api/activity/security-events');
+    expect(res.status).toBe(401);
+    expect(mocks.securityEventFindMany).not.toHaveBeenCalled();
+  });
+
+  it('403 for a demo session (the global audit trail is not theirs to read)', async () => {
+    state.isDemo = true;
+    const res = await supertest(createApp()).get('/api/activity/security-events');
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ error: 'DEMO_NOT_SUPPORTED' });
+    expect(mocks.securityEventFindMany).not.toHaveBeenCalled();
+  });
+
+  it('returns recent events for the authenticated owner, newest-first + serialized', async () => {
+    mocks.securityEventFindMany.mockResolvedValue([sampleRow]);
+    const res = await supertest(createApp()).get('/api/activity/security-events');
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0]).toMatchObject({
+      id: 'ev1',
+      action: 'auth.login',
+      outcome: 'success',
+      actorLogin: 'NiiKez',
+      ip: '203.0.113.7',
+      metadata: { created: false },
+    });
+    expect(res.body.nextCursor).toBeNull();
+    // Bounded + ordered newest-first with a stable id tiebreak.
+    const args = mocks.securityEventFindMany.mock.calls[0]![0]!;
+    expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }]);
+    expect(args.take).toBe(51); // default limit 50 + 1 peek
+  });
+
+  it('caps the page and returns a nextCursor when there is more', async () => {
+    // limit=2 → take=3; return 3 rows so hasMore is true.
+    const rows = [1, 2, 3].map((n) => ({ ...sampleRow, id: `ev${n}` }));
+    mocks.securityEventFindMany.mockResolvedValue(rows);
+    const res = await supertest(createApp()).get('/api/activity/security-events?limit=2');
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    expect(res.body.nextCursor).toBe('ev2');
+    expect(mocks.securityEventFindMany.mock.calls[0]![0]!.take).toBe(3);
+  });
+
+  it('filters by action when provided', async () => {
+    mocks.securityEventFindMany.mockResolvedValue([]);
+    const res = await supertest(createApp()).get(
+      '/api/activity/security-events?action=auth.denied_not_owner',
+    );
+    expect(res.status).toBe(200);
+    expect(mocks.securityEventFindMany.mock.calls[0]![0]!.where).toEqual({
+      action: 'auth.denied_not_owner',
+    });
+  });
+
+  it('400s an over-cap limit (bounded)', async () => {
+    const res = await supertest(createApp()).get('/api/activity/security-events?limit=500');
+    expect(res.status).toBe(400);
+    expect(mocks.securityEventFindMany).not.toHaveBeenCalled();
   });
 });
 

@@ -19,13 +19,16 @@ process.env.RETENTION_DAYS_BUILDS = '90';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+  // The LogLine prune is an id-chunked loop: each pass reads a page of the
+  // oldest eligible ids (findMany) then deletes exactly those ids (deleteMany).
+  logLineFindMany: vi.fn(),
   logLineDeleteMany: vi.fn(),
   buildDeleteMany: vi.fn(),
 }));
 
 vi.mock('../../db.js', () => ({
   prisma: {
-    logLine: { deleteMany: mocks.logLineDeleteMany },
+    logLine: { findMany: mocks.logLineFindMany, deleteMany: mocks.logLineDeleteMany },
     build: { deleteMany: mocks.buildDeleteMany },
   },
 }));
@@ -34,25 +37,117 @@ const { cleanupBuilds } = await import('./cleanupBuilds.js');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * In-memory fake of the `LogLine` table so we can exercise the real chunked
+ * delete loop (findMany page → deleteMany ids → repeat) end-to-end and assert
+ * what actually survives, instead of stubbing fixed counts.
+ *
+ * findMany honours `where.ts.lt`, `orderBy.ts asc`, and `take` (the page size);
+ * deleteMany removes the rows named in `where.id.in` and reports the real count.
+ */
+interface FakeLogRow {
+  id: number;
+  ts: Date;
+}
+
+let logStore: FakeLogRow[] = [];
+
+function seedLogStore(rows: FakeLogRow[]): void {
+  logStore = [...rows];
+}
+
+function installLogStoreMocks(): void {
+  mocks.logLineFindMany.mockImplementation(async (args: { where: { ts: { lt: Date } }; take: number }) => {
+    const cutoff = args.where.ts.lt;
+    return logStore
+      .filter((r) => r.ts < cutoff)
+      .sort((a, b) => a.ts.getTime() - b.ts.getTime())
+      .slice(0, args.take)
+      .map((r) => ({ id: r.id }));
+  });
+  mocks.logLineDeleteMany.mockImplementation(async (args: { where: { id: { in: number[] } } }) => {
+    const ids = new Set(args.where.id.in);
+    const before = logStore.length;
+    logStore = logStore.filter((r) => !ids.has(r.id));
+    return { count: before - logStore.length };
+  });
+}
+
 describe('cleanupBuilds', () => {
   beforeEach(() => {
-    mocks.logLineDeleteMany.mockReset().mockResolvedValue({ count: 12 });
+    mocks.logLineFindMany.mockReset();
+    mocks.logLineDeleteMany.mockReset();
     mocks.buildDeleteMany.mockReset().mockResolvedValue({ count: 3 });
+    seedLogStore([]); // empty by default; per-test seeding overrides
+    installLogStoreMocks();
   });
   afterEach(() => vi.clearAllMocks());
 
-  it('deletes log lines older than RETENTION_DAYS_LOGS by ts', async () => {
+  it('selects log lines older than RETENTION_DAYS_LOGS by ts (the prune cutoff)', async () => {
     const before = Date.now();
     await cleanupBuilds();
     const after = Date.now();
 
-    expect(mocks.logLineDeleteMany).toHaveBeenCalledTimes(1);
-    const arg = mocks.logLineDeleteMany.mock.calls[0][0];
+    // The cutoff now drives findMany (the chunked loop's page query), not the
+    // single deleteMany it replaced.
+    expect(mocks.logLineFindMany).toHaveBeenCalled();
+    const arg = mocks.logLineFindMany.mock.calls[0][0];
     const cutoff = arg.where.ts.lt as Date;
     expect(cutoff).toBeInstanceOf(Date);
     // 30-day window: cutoff is ~now - 30d.
     expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - 30 * DAY_MS - 5);
     expect(cutoff.getTime()).toBeLessThanOrEqual(after - 30 * DAY_MS + 5);
+    // Oldest-first paging so a backlog drains from the tail.
+    expect(arg.orderBy).toEqual({ ts: 'asc' });
+  });
+
+  it('chunks the LogLine delete across MULTIPLE batches and removes every eligible row', async () => {
+    const now = Date.now();
+    const oldTs = (offsetDays: number) => new Date(now - (30 + offsetDays) * DAY_MS);
+    // 23 eligible rows with a batch size of 5 => pages of 5,5,5,5,3.
+    const eligible = Array.from({ length: 23 }, (_, i) => ({ id: i + 1, ts: oldTs(i + 1) }));
+    seedLogStore(eligible);
+
+    const res = await cleanupBuilds({ logDeleteBatchSize: 5 });
+
+    // All 23 eligible rows gone.
+    expect(logStore).toHaveLength(0);
+    expect(res.logLinesDeleted).toBe(23);
+
+    // ceil(23/5) = 5 full delete passes (the 5th page is short → loop ends).
+    expect(mocks.logLineDeleteMany).toHaveBeenCalledTimes(5);
+    const deletedPerBatch = mocks.logLineDeleteMany.mock.calls.map((c) => c[0].where.id.in.length);
+    expect(deletedPerBatch).toEqual([5, 5, 5, 5, 3]);
+    // Every delete is by id (the chunk), never an unbounded ts range.
+    for (const call of mocks.logLineDeleteMany.mock.calls) {
+      expect(call[0].where).toHaveProperty('id.in');
+      expect(call[0].where).not.toHaveProperty('ts');
+    }
+  });
+
+  it('preserves LogLine rows newer than the cutoff and counts only the deleted ones', async () => {
+    const now = Date.now();
+    const old = Array.from({ length: 12 }, (_, i) => ({ id: i + 1, ts: new Date(now - (40 + i) * DAY_MS) }));
+    const fresh = Array.from({ length: 4 }, (_, i) => ({ id: 100 + i, ts: new Date(now - (i + 1) * DAY_MS) }));
+    seedLogStore([...old, ...fresh]);
+
+    const res = await cleanupBuilds({ logDeleteBatchSize: 5 });
+
+    // Only the 12 old rows removed; the 4 fresh ones survive untouched.
+    expect(res.logLinesDeleted).toBe(12);
+    expect(logStore.map((r) => r.id).sort((a, b) => a - b)).toEqual([100, 101, 102, 103]);
+  });
+
+  it('makes a single page query and no deletes when nothing is eligible', async () => {
+    const now = Date.now();
+    seedLogStore([{ id: 1, ts: new Date(now - 5 * DAY_MS) }]); // well within retention
+
+    const res = await cleanupBuilds({ logDeleteBatchSize: 5 });
+
+    expect(res.logLinesDeleted).toBe(0);
+    expect(mocks.logLineFindMany).toHaveBeenCalledTimes(1);
+    expect(mocks.logLineDeleteMany).not.toHaveBeenCalled();
+    expect(logStore).toHaveLength(1);
   });
 
   it('deletes only TERMINAL builds older than RETENTION_DAYS_BUILDS by createdAt', async () => {
@@ -99,10 +194,13 @@ describe('cleanupBuilds', () => {
     ]);
   });
 
-  it('returns the counts reported by Prisma', async () => {
-    mocks.logLineDeleteMany.mockResolvedValue({ count: 100 });
+  it('returns the summed LogLine batch count and the Build delete count', async () => {
+    const now = Date.now();
+    seedLogStore(Array.from({ length: 100 }, (_, i) => ({ id: i + 1, ts: new Date(now - (40 + i) * DAY_MS) })));
     mocks.buildDeleteMany.mockResolvedValue({ count: 7 });
-    const res = await cleanupBuilds();
+
+    // Batch size of 5 means 100 rows drain over 20 passes; the total must equal 100.
+    const res = await cleanupBuilds({ logDeleteBatchSize: 5 });
     expect(res).toEqual({ logLinesDeleted: 100, buildsDeleted: 7 });
   });
 });

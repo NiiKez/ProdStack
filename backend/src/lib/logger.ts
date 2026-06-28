@@ -1,4 +1,4 @@
-import { pino, stdSerializers, type Logger } from 'pino';
+import { pino, stdSerializers, type Logger, type SerializedRequest } from 'pino';
 
 import { env, isProd } from '../env.js';
 
@@ -57,6 +57,37 @@ export const REDACT_PATHS = [
   'req.headers["x-hub-signature-256"]',
   'res.headers["set-cookie"]',
 ];
+
+/**
+ * pino-http request serializer that logs the request PATH but never the
+ * query-string VALUES. The default Express serializer puts `req.originalUrl`
+ * (query string included) on `url` AND copies Express's parsed `req.query`
+ * object — so `GET /api/auth/github/callback?code=…&state=…` would otherwise
+ * write the GitHub OAuth authorization `code`/`state` into Log Analytics on
+ * every login, where a wider audience than the OAuth handshake could replay
+ * them. Header redaction (REDACT_PATHS) does not cover the URL/query, so this
+ * is the dedicated guard for that leak vector.
+ *
+ * We keep the clean path and collapse the query to its KEY names only (never
+ * values), so "which params were sent" survives for debugging without leaking a
+ * secret. pino-http wraps this via pino-std-serializers' `wrapRequestSerializer`,
+ * so the argument is the ALREADY-serialized pino request (url/query/headers/…),
+ * not the raw IncomingMessage — hence both leak vectors (`url` and `query`) are
+ * sanitized here. Exported so logger.test.ts guards this against regressions.
+ */
+export function safeReqSerializer(req: SerializedRequest): Record<string, unknown> {
+  const out = req as unknown as Record<string, unknown>;
+  if (typeof req.url === 'string') {
+    const queryStart = req.url.indexOf('?');
+    out.url = queryStart === -1 ? req.url : req.url.slice(0, queryStart);
+  }
+  // The std serializer also copies Express's parsed `req.query` (values and all);
+  // collapse it to the key list so no value can reach the log.
+  if (req.query && typeof req.query === 'object') {
+    out.query = Object.keys(req.query);
+  }
+  return out;
+}
 
 export const logger: Logger = pino({
   level: env.LOG_LEVEL,

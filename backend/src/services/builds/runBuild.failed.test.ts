@@ -97,8 +97,14 @@ vi.mock('../projectEnv.js', () => ({ loadDecryptedEnvVars: mocks.loadDecryptedEn
 vi.mock('../../lib/crypto.js', () => ({ decrypt: mocks.decrypt }));
 // Dockerfile resolution — skip the real fs walk / framework detection.
 vi.mock('./resolveDockerfile.js', () => ({ resolveDockerfile: mocks.resolveDockerfile }));
-// The build itself — our controlled seam. Returns failing KanikoResults.
-vi.mock('./kaniko.js', () => ({ runKaniko: mocks.runKaniko }));
+// The build itself — our controlled seam. Returns failing KanikoResults. Mock
+// ONLY runKaniko via importOriginal: runBuild's git path (`spawnLogged`) imports
+// the real `redact` from this same module, so a bare object mock would drop it
+// and crash every clone line with "No redact export".
+vi.mock('./kaniko.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./kaniko.js')>();
+  return { ...actual, runKaniko: mocks.runKaniko };
+});
 
 // The git-clone seam: runBuild's `cloneRepo` shells out to `git` via
 // node:child_process `spawn`. Mock it so every git invocation "succeeds"
@@ -227,6 +233,30 @@ describe('runBuild FAILURE path (real kaniko-mode orchestration)', () => {
     // A failed build must NEVER reach the Azure deploy chokepoint.
     expect(mocks.updateContainerApp).not.toHaveBeenCalled();
     expect(mocks.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('threads the kaniko redact set (ACR password + decrypted GitHub token, NOT usernames) into runKaniko', async () => {
+    // Finding 1: the kaniko output path must redact the worker's secrets, same as
+    // the git path. runRealBuild builds the redact set and passes it to runKaniko;
+    // kaniko.ts applies it inside streamLines. Here we capture the runKaniko call
+    // and assert the set's contents (the redaction mechanics are proven against a
+    // real child in kaniko.redact.test.ts).
+    mocks.runKaniko.mockResolvedValue({ exitCode: 1, timedOut: false });
+
+    await runBuild('build-1');
+
+    expect(mocks.runKaniko).toHaveBeenCalledTimes(1);
+    const opts = mocks.runKaniko.mock.calls[0]![0] as { redactSecrets?: string[] };
+    // ACR_PASSWORD (hoisted env) + the decrypted GitHub token (mocked decrypt).
+    expect(opts.redactSecrets).toEqual(
+      expect.arrayContaining(['acr-password', 'ghp_faketoken']),
+    );
+    // Usernames are NOT secrets and the ACR username equals the registry name
+    // (it appears in every *.azurecr.io destination we want visible), so it must
+    // never be in the redact set — redacting it would mangle legitimate output.
+    expect(opts.redactSecrets).not.toContain('prodstacktest');
+    // No empty strings (DOCKERHUB_TOKEN is unset in this env → filtered out).
+    expect(opts.redactSecrets).not.toContain('');
   });
 
   it('kaniko times out → build ends FAILED with a timeout errorMessage and NEVER deploys', async () => {

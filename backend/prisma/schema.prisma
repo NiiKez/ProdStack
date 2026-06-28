@@ -73,6 +73,7 @@ model User {
   updatedAt              DateTime  @updatedAt
 
   projects               Project[]
+  securityEvents         SecurityEvent[]
 
   // Drives the hourly demo reaper (cleanupDemo): purge expired demo users
   // (cascade removes all their projects/builds/deployments/logs/env vars).
@@ -260,6 +261,9 @@ model LogLine {
 
   @@unique([buildId, seq])
   @@index([buildId, id])
+  // `ts` index backs the log-pruning cleanup job's `LogLine` age query
+  // (delete rows older than RETENTION_DAYS_LOGS) so it doesn't full-scan.
+  @@index([ts])
 }
 
 model WebhookEvent {
@@ -308,4 +312,49 @@ model PreviewEnvironment {
   // it isn't dropped as drift; prod uses `migrate deploy` (committed SQL only).
   @@index([projectId, createdAt])
   @@index([status, expiresAt])
+}
+
+// Append-only security / audit event trail. App-level security events (login
+// success, owner-gate denials, env-var changes, webhook signature failures, ...)
+// were previously emitted to Container App stdout only — un-queryable once the
+// revision rolled and the logs aged out. This model persists each as a queryable
+// row so the owner can review who did what, when, and from where.
+//
+// APPEND-ONLY: rows are only ever inserted (`recordSecurityEvent`) and read (the
+// owner-gated `GET /api/activity/security-events` endpoint). Nothing in app code
+// updates or deletes a row. Writes are best-effort — a failed audit insert is
+// logged and swallowed (see `services/securityEvents.ts`) so it can never break
+// the request it's auditing.
+//
+// `action` and `outcome` are plain strings (not enums) so a new event type never
+// requires a migration. `metadata` carries keys-only structured context (e.g. the
+// changed env-var KEY names, a created-vs-updated flag) — NEVER values, secrets,
+// tokens, or OAuth codes.
+model SecurityEvent {
+  id            String   @id @default(cuid())
+  createdAt     DateTime @default(now())
+  // Dotted action key: `auth.login`, `auth.denied_not_owner`,
+  // `auth.oauth_state_mismatch`, `env.updated`, `project.created`,
+  // `webhook.signature_invalid`, ...
+  action        String
+  // `allowed` | `denied` | `success` | `failure`.
+  outcome       String
+  // The GitHub identity that triggered the event. Nullable: a denial can carry a
+  // NON-owner actor (the rejected login), and some events have no GitHub actor.
+  actorGithubId Int?
+  actorLogin    String?
+  // The owning User row, when the event maps to one (login success, env change).
+  // Nullable + SetNull on delete so the audit row OUTLIVES the user it references
+  // (an audit trail you can erase by deleting the actor is not an audit trail).
+  userId        String?
+  // Optional subject of the event, e.g. `targetType:"project"`, `targetId:<id>`.
+  targetType    String?
+  targetId      String?
+  ip            String?
+  metadata      Json?
+
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([action])
 }
