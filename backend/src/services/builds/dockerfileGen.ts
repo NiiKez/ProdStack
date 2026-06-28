@@ -40,6 +40,14 @@ export interface RepoSignals {
   hasPyproject: boolean;
   /** Whether a `Pipfile` exists. */
   hasPipfile: boolean;
+  /**
+   * Whether a `Pipfile.lock` exists. When present we install with
+   * `pipenv install --deploy --ignore-pipfile` (reproducible, fails loudly if
+   * the lock is stale); when absent pipenv resolves the Pipfile at build time.
+   * Optional so existing `RepoSignals` construction sites don't have to set it
+   * (treated as "no lock").
+   */
+  hasPipfileLock?: boolean;
   /** Whether a Django `manage.py` exists at the root. */
   hasManagePy: boolean;
   /**
@@ -192,7 +200,9 @@ function requirementsNeedsFullContext(requirementsTxt: string): boolean {
     const line = raw.trim();
     if (line === '' || line.startsWith('#')) return false;
     return (
-      /^(-r|-c|-e)\b/.test(line) ||
+      // Short options in either spaced (`-r base.txt`) or attached (`-rbase.txt`)
+      // form — both are valid pip syntax, so no `\b` after the flag letter.
+      /^-[rce]/.test(line) ||
       /^--(requirement|constraint|editable)\b/.test(line) ||
       /^(\.|\/|file:)/.test(line)
     );
@@ -204,6 +214,8 @@ function pythonDockerfile(opts: {
   startCmd: string;
   port: number;
   hasPyproject: boolean;
+  hasPipfile?: boolean;
+  hasPipfileLock?: boolean;
   requirementsTxt: string | undefined;
 }): string {
   const lines = [`FROM ${PYTHON_IMAGE}`, 'WORKDIR /app'];
@@ -230,6 +242,22 @@ function pythonDockerfile(opts: {
         'COPY . .',
       );
     }
+  } else if (opts.hasPipfile) {
+    // Pipenv project (a Pipfile, no requirements.txt/pyproject). Without this
+    // branch `isPython` still selects Python but NO dependency install is
+    // emitted → the app starts with `ModuleNotFoundError`. Install pipenv, then
+    // materialize the locked deps into the system site-packages. `COPY Pipfile*`
+    // grabs the lock too (when present) and keeps the manifest-before-source
+    // cache split. `--deploy --ignore-pipfile` is the reproducible CI install
+    // when a lock exists; without a lock we let pipenv resolve the Pipfile.
+    const pipenvInstall = opts.hasPipfileLock
+      ? 'pipenv install --system --deploy --ignore-pipfile'
+      : 'pipenv install --system';
+    lines.push(
+      'COPY Pipfile* ./',
+      `RUN pip install --no-cache-dir pipenv && ${pipenvInstall}`,
+      'COPY . .',
+    );
   } else {
     // No declared dependencies (single main.py, or an empty requirements.txt) —
     // nothing to install.
@@ -263,6 +291,39 @@ function detectNode(pkg: PackageJsonLike, signals: RepoSignals, buildArgKeys: st
         hasLock: signals.hasPackageLock,
         buildStep: 'npm run build',
         startCmd: '["npm", "run", "start"]',
+        port: 3000,
+        buildArgKeys,
+      }),
+    };
+  }
+
+  // Server-rendered meta-frameworks built ON Vite. They ALSO carry `vite` in
+  // their dep tree, so they MUST be matched before the bare-Vite static-SPA
+  // heuristic below — otherwise they'd be misdetected as a static site and we'd
+  // try to serve a `dist/` that either doesn't exist (SvelteKit emits `build/`,
+  // Nuxt `.output/`) or holds only the client half of an SSR app. Each runs a
+  // long-lived Node server, so we build then start it. Start commands follow
+  // each framework's documented Node-adapter output path.
+  const ssrMeta =
+    (has('nuxt') && { label: 'Nuxt', start: '["node", ".output/server/index.mjs"]' }) ||
+    (has('@sveltejs/kit') && { label: 'SvelteKit', start: '["node", "build"]' }) ||
+    ((has('@astrojs/node') && has('astro')) && {
+      label: 'Astro (SSR)',
+      start: '["node", "./dist/server/entry.mjs"]',
+    }) ||
+    ((has('@remix-run/node') || has('@remix-run/serve')) && {
+      label: 'Remix',
+      start: '["npm", "start"]',
+    }) ||
+    null;
+  if (ssrMeta) {
+    return {
+      framework: ssrMeta.label,
+      port: 3000,
+      dockerfile: nodeServerDockerfile({
+        hasLock: signals.hasPackageLock,
+        buildStep: 'npm run build',
+        startCmd: ssrMeta.start,
         port: 3000,
         buildArgKeys,
       }),
@@ -313,27 +374,34 @@ function detectNode(pkg: PackageJsonLike, signals: RepoSignals, buildArgKeys: st
   };
 }
 
-function detectPython(signals: RepoSignals): Detection {
+/** Valid Python dotted module path (e.g. `myproj.wsgi`). */
+const PY_MODULE_RE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+
+function detectPython(signals: RepoSignals): Detection | null {
   const reqs = (signals.requirementsTxt ?? '').toLowerCase();
   const reqHas = (name: string): boolean => reqs.includes(name);
   const PORT = 8000;
+  // Common install-shape opts shared by every Python recipe.
+  const installOpts = {
+    port: PORT,
+    hasPyproject: signals.hasPyproject,
+    hasPipfile: signals.hasPipfile,
+    hasPipfileLock: signals.hasPipfileLock,
+    requirementsTxt: signals.requirementsTxt,
+  };
 
   // Django — prefer gunicorn against the discovered wsgi module; otherwise the
   // dev server (still serves traffic, just not production-grade).
   if (signals.hasManagePy || reqHas('django')) {
-    const startCmd = signals.djangoWsgiModule
-      ? `["sh", "-c", "gunicorn ${signals.djangoWsgiModule}:application --bind 0.0.0.0:$PORT"]`
-      : '["sh", "-c", "python manage.py runserver 0.0.0.0:$PORT"]';
-    return {
-      framework: 'Django',
-      port: PORT,
-      dockerfile: pythonDockerfile({
-        startCmd,
-        port: PORT,
-        hasPyproject: signals.hasPyproject,
-        requirementsTxt: signals.requirementsTxt,
-      }),
-    };
+    // Defense-in-depth: the wsgi module is interpolated verbatim into the CMD,
+    // so re-assert it's a plain dotted identifier here (callers already guard
+    // it, but a future caller might not) and fall back to runserver otherwise.
+    const wsgi = signals.djangoWsgiModule;
+    const startCmd =
+      wsgi !== undefined && PY_MODULE_RE.test(wsgi)
+        ? `["sh", "-c", "gunicorn ${wsgi}:application --bind 0.0.0.0:$PORT"]`
+        : '["sh", "-c", "python manage.py runserver 0.0.0.0:$PORT"]';
+    return { framework: 'Django', port: PORT, dockerfile: pythonDockerfile({ startCmd, ...installOpts }) };
   }
 
   // FastAPI — ASGI via uvicorn (expects `main:app`).
@@ -343,9 +411,7 @@ function detectPython(signals: RepoSignals): Detection {
       port: PORT,
       dockerfile: pythonDockerfile({
         startCmd: '["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]',
-        port: PORT,
-        hasPyproject: signals.hasPyproject,
-        requirementsTxt: signals.requirementsTxt,
+        ...installOpts,
       }),
     };
   }
@@ -357,39 +423,26 @@ function detectPython(signals: RepoSignals): Detection {
       port: PORT,
       dockerfile: pythonDockerfile({
         startCmd: '["sh", "-c", "gunicorn app:app --bind 0.0.0.0:$PORT"]',
-        port: PORT,
-        hasPyproject: signals.hasPyproject,
-        requirementsTxt: signals.requirementsTxt,
+        ...installOpts,
       }),
     };
   }
 
-  // Generic Python entrypoint.
-  if (signals.rootEntries.includes('main.py')) {
-    return {
-      framework: 'Python',
-      port: PORT,
-      dockerfile: pythonDockerfile({
-        startCmd: '["python", "main.py"]',
+  // Generic Python entrypoint — only when an actual runnable file is present.
+  for (const entry of ['main.py', 'app.py']) {
+    if (signals.rootEntries.includes(entry)) {
+      return {
+        framework: 'Python',
         port: PORT,
-        hasPyproject: signals.hasPyproject,
-        requirementsTxt: signals.requirementsTxt,
-      }),
-    };
+        dockerfile: pythonDockerfile({ startCmd: `["python", "${entry}"]`, ...installOpts }),
+      };
+    }
   }
 
-  // Python project with no recognizable entrypoint — let the caller decide it's
-  // unsupported by returning the generic template only when one exists.
-  return {
-    framework: 'Python',
-    port: PORT,
-    dockerfile: pythonDockerfile({
-      startCmd: '["python", "app.py"]',
-      port: PORT,
-      hasPyproject: signals.hasPyproject,
-      requirementsTxt: signals.requirementsTxt,
-    }),
-  };
+  // Python project with no recognizable entrypoint: return null so the caller
+  // surfaces the friendly "add a Dockerfile" error instead of building an image
+  // that crashes at runtime with `python: can't open file 'app.py'`.
+  return null;
 }
 
 /**
@@ -408,6 +461,17 @@ export function detectFramework(
   opts: { buildArgKeys?: string[] } = {},
 ): Detection | null {
   const buildArgKeys = opts.buildArgKeys ?? [];
+
+  // A Django project frequently also ships a `package.json` (Tailwind, esbuild,
+  // webpack for its frontend assets). `manage.py` is an unambiguous "this is a
+  // Python/Django app" marker that a Node project never has, so let Python win
+  // over the package.json here — otherwise we'd build + serve the Node tooling
+  // and the actual Django server would never run.
+  if (signals.hasManagePy) {
+    const py = detectPython(signals);
+    if (py) return py;
+  }
+
   if (signals.packageJson) {
     return detectNode(signals.packageJson, signals, buildArgKeys);
   }

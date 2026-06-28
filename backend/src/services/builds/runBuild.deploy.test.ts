@@ -131,6 +131,34 @@ describe('runBuild deploy reconcile (stub mode)', () => {
     expect(createCall?.[0]).toMatchObject({ data: { active: true } });
   });
 
+  it('records a real durationMs when startedAt is null at fetch (like every real QUEUED build)', async () => {
+    // Regression: a real Build is created QUEUED with startedAt=null. The runner
+    // writes startedAt to the DB at CLONING but must ALSO mirror it onto the
+    // in-memory row, or deploy-time durationMs collapses to finishedAt-finishedAt=0.
+    // Fake ONLY Date (timers stay real so the stub build still runs) and advance
+    // the clock 5s right before finishedAt is sampled.
+    const base = 1_750_000_000_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(base);
+    mocks.buildFindUniqueOrThrow.mockResolvedValue(stubBuildRow({ startedAt: null }));
+    mocks.$transaction.mockResolvedValue([]);
+    mocks.updateContainerApp.mockImplementation(async () => {
+      vi.setSystemTime(base + 5000);
+      return { revisionName: 'octocat-app--rev1', liveUrl: 'https://octocat-app.example.test' };
+    });
+
+    try {
+      await runBuild('build-1');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const readyWrite = mocks.buildUpdate.mock.calls
+      .map((c) => c[0] as { data?: { status?: string; durationMs?: number } })
+      .find((d) => d.data?.status === 'READY');
+    expect(readyWrite?.data?.durationMs).toBe(5000);
+  });
+
   it('P2002 active-slot race: marks the build READY (NOT FAILED) and records a non-active deployment', async () => {
     // First tx (the active-slot write) loses the race → P2002. Second tx
     // (the reconcile) succeeds.

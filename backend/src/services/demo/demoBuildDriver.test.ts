@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   deploymentUpdateMany: vi.fn(),
   deploymentCreate: vi.fn(),
   projectUpdate: vi.fn(),
+  projectFindUnique: vi.fn(),
   $transaction: vi.fn(),
 }));
 
@@ -35,7 +36,7 @@ const mocks = vi.hoisted(() => ({
 const txClient = {
   build: { updateMany: mocks.buildUpdateMany },
   deployment: { updateMany: mocks.deploymentUpdateMany, create: mocks.deploymentCreate },
-  project: { update: mocks.projectUpdate },
+  project: { update: mocks.projectUpdate, findUnique: mocks.projectFindUnique },
 };
 
 vi.mock('../../db.js', () => ({
@@ -84,6 +85,8 @@ beforeEach(() => {
   mocks.deploymentUpdateMany.mockResolvedValue({ count: 0 });
   mocks.deploymentCreate.mockResolvedValue({});
   mocks.projectUpdate.mockResolvedValue({});
+  // The in-tx soft-delete re-check: project is live by default.
+  mocks.projectFindUnique.mockResolvedValue({ deletedAt: null });
 });
 
 describe('runDemoReplay', () => {
@@ -175,6 +178,22 @@ describe('runDemoReplay', () => {
     // Lost the flip → never deactivate/create a deployment (no double-active row).
     expect(mocks.deploymentUpdateMany).not.toHaveBeenCalled();
     expect(mocks.deploymentCreate).not.toHaveBeenCalled();
+  });
+
+  it('does not finalize onto a project soft-deleted mid-replay (no resurrected deployment)', async () => {
+    // The project was live when the replay started but is deleted by the time the
+    // finalize tx runs — the in-tx re-check must bail before flipping or creating.
+    mocks.projectFindUnique.mockResolvedValue({ deletedAt: new Date() });
+    await runDemoReplay('build-1', { sleep: noSleep });
+
+    expect(mocks.$transaction).toHaveBeenCalledTimes(1);
+    // No READY flip, no deployment, no liveUrl write on the deleted project.
+    const readyFlip = mocks.buildUpdateMany.mock.calls
+      .map((c) => c[0])
+      .find((u) => u.data.status === 'READY');
+    expect(readyFlip).toBeUndefined();
+    expect(mocks.deploymentCreate).not.toHaveBeenCalled();
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
   });
 
   it('marks the build FAILED (without clobbering terminal state) if the replay throws mid-stream', async () => {

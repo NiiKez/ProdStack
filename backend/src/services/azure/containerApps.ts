@@ -251,6 +251,23 @@ async function stubStart(name: string): Promise<void> {
 
 let cachedClient: ContainerAppsAPIClient | undefined;
 
+/**
+ * Hard ceiling on any Azure long-running operation (create/update/delete/
+ * stop/start). The SDK's `pollUntilDone()` otherwise has NO deadline, so a
+ * Container App stuck `Provisioning` would leave a build wedged in `DEPLOYING`
+ * forever — and because the build process stays live, KEDA never reaps the
+ * (billed) builder slot. 10 minutes is far above a normal ACA roll (seconds to
+ * ~3 min); exceeding it aborts the operation so the build fails cleanly instead
+ * of hanging. The git/kaniko phases have their own GIT_TIMEOUT_MS/BUILD_TIMEOUT_MS;
+ * this is the equivalent bound for the deploy phase.
+ */
+const LRO_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** Per-operation options carrying the LRO abort deadline. */
+function lroOptions(): { abortSignal: AbortSignal } {
+  return { abortSignal: AbortSignal.timeout(LRO_TIMEOUT_MS) };
+}
+
 function requireSubscriptionId(): string {
   if (!env.AZURE_SUBSCRIPTION_ID) {
     throw new Error(
@@ -332,6 +349,7 @@ async function realCreate(opts: CreateContainerAppOpts): Promise<ContainerAppRef
     resourceGroup,
     opts.name,
     envelope,
+    lroOptions(),
   );
 
   return {
@@ -479,6 +497,7 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
     resourceGroup,
     opts.name,
     merged,
+    lroOptions(),
   );
   return {
     name: opts.name,
@@ -490,7 +509,7 @@ async function realUpdate(opts: UpdateContainerAppOpts): Promise<ContainerAppRef
 async function realDelete(name: string): Promise<void> {
   const client = getClient();
   const resourceGroup = requireResourceGroup();
-  await client.containerApps.beginDeleteAndWait(resourceGroup, name);
+  await client.containerApps.beginDeleteAndWait(resourceGroup, name, lroOptions());
 }
 
 /**
@@ -503,7 +522,7 @@ async function realDelete(name: string): Promise<void> {
 async function realStop(name: string): Promise<void> {
   const client = getClient();
   const resourceGroup = requireResourceGroup();
-  await client.containerApps.beginStopAndWait(resourceGroup, name);
+  await client.containerApps.beginStopAndWait(resourceGroup, name, lroOptions());
 }
 
 /**
@@ -515,7 +534,7 @@ async function realStop(name: string): Promise<void> {
 async function realStart(name: string): Promise<void> {
   const client = getClient();
   const resourceGroup = requireResourceGroup();
-  await client.containerApps.beginStartAndWait(resourceGroup, name);
+  await client.containerApps.beginStartAndWait(resourceGroup, name, lroOptions());
 }
 
 // --- Public API ------------------------------------------------------------

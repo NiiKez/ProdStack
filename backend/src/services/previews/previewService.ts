@@ -189,6 +189,34 @@ export async function teardownPreview(previewId: string): Promise<void> {
   });
 }
 
+/**
+ * Tear down EVERY open preview for a project. Called when a project is deleted:
+ * the project's webhook is removed in the same flow, so no future `pull_request
+ * closed` delivery can ever fire `teardownPreviewByPr` — without this, the per-PR
+ * Container Apps would keep serving their public URLs until the TTL reaper acts
+ * (up to PREVIEW_TTL_HOURS later, and only if cleanup jobs are enabled), or
+ * indefinitely otherwise. Each teardown is best-effort and independent: one
+ * Azure delete failing must not abort the rest. Returns the count torn down.
+ */
+export async function teardownAllForProject(projectId: string): Promise<number> {
+  const open = await prisma.previewEnvironment.findMany({
+    where: { projectId, closedAt: null },
+    select: { id: true },
+  });
+  let torn = 0;
+  for (const { id } of open) {
+    try {
+      await teardownPreview(id);
+      torn += 1;
+    } catch (err) {
+      // teardownPreview already swallows the Azure delete error; this guards the
+      // DB write too so a single failure can't strand the remaining previews.
+      logger.warn({ err, previewId: id, projectId }, 'teardownAllForProject: one preview failed');
+    }
+  }
+  return torn;
+}
+
 /** Tear down the open preview for a PR (PR-closed webhook). Returns whether one was found. */
 export async function teardownPreviewByPr(
   projectId: string,

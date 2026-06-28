@@ -40,7 +40,11 @@ import {
   GithubWebhookError,
   octokitForUser,
 } from '../services/github.js';
-import { listPreviews, teardownPreview } from '../services/previews/previewService.js';
+import {
+  listPreviews,
+  teardownAllForProject,
+  teardownPreview,
+} from '../services/previews/previewService.js';
 import { loadDecryptedEnvVars, loadEnvVarMeta } from '../services/projectEnv.js';
 import { containerAppName, dedupedSlug, slugify } from '../services/slug.js';
 
@@ -1343,6 +1347,19 @@ router.delete(
             { err, containerAppName: project.containerAppName },
             'deleteContainerApp failed during project delete',
           );
+        }
+
+        // Tear down any open preview environments too. We're about to remove the
+        // webhook, so no future `pull_request closed` delivery can reclaim them —
+        // without this their per-PR Container Apps keep serving public URLs until
+        // the TTL reaper (or forever if cleanup jobs are off). Best-effort.
+        try {
+          const torn = await teardownAllForProject(project.id);
+          if (torn > 0) {
+            logger.info({ projectId: project.id, torn }, 'tore down open previews on project delete');
+          }
+        } catch (err) {
+          logger.warn({ err, projectId: project.id }, 'preview teardown failed during project delete');
         }
       }
 

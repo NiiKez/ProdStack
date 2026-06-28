@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => ({
   userFindUnique: vi.fn(),
   octokitForUser: vi.fn(),
   octokitPaginate: vi.fn(),
+  octokitPaginateIterator: vi.fn(),
   octokitRequest: vi.fn(),
 }));
 
@@ -110,10 +111,18 @@ beforeEach(() => {
   mocks.userFindUnique.mockReset();
   mocks.octokitForUser.mockReset();
   mocks.octokitPaginate.mockReset();
+  mocks.octokitPaginateIterator.mockReset();
   mocks.octokitRequest.mockReset();
 
   mocks.userFindUnique.mockResolvedValue(userRow);
-  mocks.octokitPaginate.mockResolvedValue(ghRepoRows);
+  // listUserRepos now streams pages via `paginate.iterator` (early-break once
+  // MAX_REPOS is reached); the mock yields a single page of rows.
+  mocks.octokitPaginateIterator.mockImplementation(async function* () {
+    yield { data: ghRepoRows };
+  });
+  // Expose `.iterator` on the paginate fn, matching Octokit's shape.
+  (mocks.octokitPaginate as unknown as { iterator: unknown }).iterator =
+    mocks.octokitPaginateIterator;
   mocks.octokitForUser.mockReturnValue({
     paginate: mocks.octokitPaginate,
     request: mocks.octokitRequest,
@@ -152,8 +161,8 @@ describe('GET /api/github/repos', () => {
       },
     ]);
 
-    // Affiliation + sort params are passed through to GitHub.
-    expect(mocks.octokitPaginate).toHaveBeenCalledWith('GET /user/repos', {
+    // Affiliation + sort params are passed through to GitHub (via the iterator).
+    expect(mocks.octokitPaginateIterator).toHaveBeenCalledWith('GET /user/repos', {
       affiliation: 'owner,collaborator,organization_member',
       sort: 'pushed',
       direction: 'desc',
@@ -169,6 +178,32 @@ describe('GET /api/github/repos', () => {
       'octocat/recent',
       'acme/private-svc',
     ]);
+  });
+
+  it('stops paginating early once MAX_REPOS (300) repos are collected', async () => {
+    // A user with thousands of repos must not drain every page only to slice the
+    // tail off. Yield 100-row pages indefinitely; the consumer must break at 300.
+    let pagesYielded = 0;
+    mocks.octokitPaginateIterator.mockImplementation(async function* () {
+      for (let p = 0; p < 100; p++) {
+        pagesYielded++;
+        yield {
+          data: Array.from({ length: 100 }, (_, i) => ({
+            full_name: `octo/repo-${p}-${i}`,
+            html_url: 'https://github.com/x',
+            default_branch: 'main',
+            private: false,
+          })),
+        };
+      }
+    });
+
+    const app = createApp();
+    const res = await supertest(app).get('/api/github/repos');
+    expect(res.status).toBe(200);
+    expect(res.body.repos.length).toBe(300);
+    // 3 pages of 100 reach the cap → it must not have walked all 100 pages.
+    expect(pagesYielded).toBeLessThanOrEqual(4);
   });
 
   it('502 GITHUB_UNAVAILABLE when the user has no stored token', async () => {
@@ -188,18 +223,20 @@ describe('GET /api/github/repos', () => {
     const res = await supertest(app).get('/api/github/repos');
     expect(res.status).toBe(502);
     expect(res.body.error).toBe('GITHUB_UNAVAILABLE');
-    expect(mocks.octokitPaginate).not.toHaveBeenCalled();
+    expect(mocks.octokitPaginateIterator).not.toHaveBeenCalled();
   });
 
   it('502 GITHUB_UNAVAILABLE when GitHub returns 401', async () => {
-    mocks.octokitPaginate.mockImplementation(async () => {
-      const err: Error & { status?: number; response?: { data: { message: string } } } = new Error(
-        'Bad credentials',
-      );
-      err.status = 401;
-      err.response = { data: { message: 'Bad credentials' } };
-      throw err;
-    });
+    mocks.octokitPaginateIterator.mockImplementation(
+      // eslint-disable-next-line require-yield
+      async function* () {
+        const err: Error & { status?: number; response?: { data: { message: string } } } =
+          new Error('Bad credentials');
+        err.status = 401;
+        err.response = { data: { message: 'Bad credentials' } };
+        throw err;
+      },
+    );
 
     const app = createApp();
     const res = await supertest(app).get('/api/github/repos');
@@ -316,7 +353,7 @@ describe('demo mode canned data', () => {
     // Fail-closed: no token decrypt, no octokit.
     expect(mocks.userFindUnique).not.toHaveBeenCalled();
     expect(mocks.octokitForUser).not.toHaveBeenCalled();
-    expect(mocks.octokitPaginate).not.toHaveBeenCalled();
+    expect(mocks.octokitPaginateIterator).not.toHaveBeenCalled();
   });
 
   it('POST /api/github/detect returns a canned result without an octokit call', async () => {

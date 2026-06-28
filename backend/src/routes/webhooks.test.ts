@@ -516,4 +516,98 @@ describe('POST /api/webhooks/github', () => {
     expect(mocks.projectFindFirst).not.toHaveBeenCalled();
     expect(state.builds).toHaveLength(0);
   });
+
+  // The fail-closed header/signature contract. These guard the cheapest reject
+  // paths (before any project lookup / decrypt / HMAC) and the one load-bearing
+  // hex-decode length check — none of which had a test before.
+  describe('fail-closed header + signature validation', () => {
+    it('400 BAD_WEBHOOK_HEADERS when the signature header is missing (before any DB work)', async () => {
+      const body = pushPayload();
+      const res = await supertest(createApp())
+        .post('/api/webhooks/github')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Event', 'push')
+        .set('X-GitHub-Delivery', 'd-nosig')
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: 'BAD_WEBHOOK_HEADERS' });
+      expect(mocks.projectFindFirst).not.toHaveBeenCalled();
+      expect(state.builds).toHaveLength(0);
+    });
+
+    it('400 BAD_WEBHOOK_HEADERS when the signature is not sha256= prefixed', async () => {
+      const body = pushPayload();
+      const res = await supertest(createApp())
+        .post('/api/webhooks/github')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Event', 'push')
+        .set('X-GitHub-Delivery', 'd-badprefix')
+        .set('X-Hub-Signature-256', 'sha1=deadbeef')
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: 'BAD_WEBHOOK_HEADERS' });
+      expect(mocks.projectFindFirst).not.toHaveBeenCalled();
+    });
+
+    it('400 BAD_WEBHOOK_HEADERS when the delivery id is missing', async () => {
+      const body = pushPayload();
+      const res = await supertest(createApp())
+        .post('/api/webhooks/github')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Event', 'push')
+        .set('X-Hub-Signature-256', sign(body))
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: 'BAD_WEBHOOK_HEADERS' });
+    });
+
+    it('400 BAD_WEBHOOK_HEADERS for a malformed delivery id (fails DELIVERY_ID_RE)', async () => {
+      const body = pushPayload();
+      const res = await supertest(createApp())
+        .post('/api/webhooks/github')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Event', 'push')
+        .set('X-GitHub-Delivery', 'has spaces!')
+        .set('X-Hub-Signature-256', sign(body))
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: 'BAD_WEBHOOK_HEADERS' });
+    });
+
+    it('400 BAD_WEBHOOK_HEADERS when the event header is missing', async () => {
+      const body = pushPayload();
+      const res = await supertest(createApp())
+        .post('/api/webhooks/github')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Delivery', 'd-noevent')
+        .set('X-Hub-Signature-256', sign(body))
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: 'BAD_WEBHOOK_HEADERS' });
+    });
+
+    it('401 INVALID_SIGNATURE for a correct-length but NON-HEX signature (hex-decode length guard)', async () => {
+      // `sha256=` + 64 non-hex chars: passes the prefix + string-length checks,
+      // but Buffer.from(...,'hex') silently truncates → the decoded-buffer-length
+      // guard must catch it and 401, never timingSafeEqual a short/empty buffer.
+      const body = pushPayload();
+      const res = await supertest(createApp())
+        .post('/api/webhooks/github')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Event', 'push')
+        .set('X-GitHub-Delivery', 'd-nonhex')
+        .set('X-Hub-Signature-256', `sha256=${'z'.repeat(64)}`)
+        .send(body);
+
+      expect(res.status).toBe(401);
+      expect(res.body).toMatchObject({ error: 'INVALID_SIGNATURE' });
+      expect(state.builds).toHaveLength(0);
+      expect(state.webhookEvents.size).toBe(0);
+    });
+  });
 });

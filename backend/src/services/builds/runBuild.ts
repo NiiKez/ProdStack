@@ -321,6 +321,11 @@ export async function runBuild(buildId: string): Promise<void> {
     if (!cancel.signal.aborted && (await checkCancelled())) cancel.abort();
 
     await setStatus(buildId, 'CLONING', { startedAt });
+    // Keep the in-memory row in sync with the DB write above. `build` was fetched
+    // while still QUEUED (startedAt null) and is later read by deployAndRecord /
+    // deployPreviewAndRecord to compute durationMs. Without this, startedAt stays
+    // null there and durationMs collapses to finishedAt - finishedAt = 0.
+    build.startedAt = startedAt;
 
     if (env.BUILD_RUNNER_MODE === 'stub') {
       await runStubBuild(build, ctx, cancel.signal);

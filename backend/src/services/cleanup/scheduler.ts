@@ -51,6 +51,33 @@ export interface CleanupSchedulerHandle {
   stop: () => void;
 }
 
+/**
+ * Wrap a cleanup job so a still-running invocation can't overlap the next cron
+ * tick — node-cron does NOT serialize ticks, so a slow run (ACR throttling, a
+ * big prune) could otherwise double-walk ACR / double-prune Postgres if the
+ * schedule fires again before it finishes. If a job is already in progress we
+ * log and skip. (This guards a single process; cross-replica overlap would need
+ * a DB lock, but the API is pinned to one replica.) Exported for unit testing.
+ */
+export function withOverlapGuard(
+  name: string,
+  job: () => Promise<void>,
+): () => Promise<void> {
+  let running = false;
+  return async () => {
+    if (running) {
+      log.warn({ job: name }, 'previous cleanup run still in progress — skipping this tick');
+      return;
+    }
+    running = true;
+    try {
+      await job();
+    } finally {
+      running = false;
+    }
+  };
+}
+
 async function runImageCleanup(): Promise<void> {
   log.info('image cleanup job starting');
   try {
@@ -105,18 +132,24 @@ export function startCleanupScheduler(): CleanupSchedulerHandle {
     'cleanup scheduler starting',
   );
 
+  // Wrap each runner once so its `running` flag persists across ticks.
+  const imageJob = withOverlapGuard('image', runImageCleanup);
+  const buildJob = withOverlapGuard('build', runBuildCleanup);
+  const demoJob = withOverlapGuard('demo', runDemoCleanup);
+  const previewJob = withOverlapGuard('preview', runPreviewCleanup);
+
   const tasks: ScheduledTask[] = [
     cron.schedule(CRON_SCHEDULE, () => {
-      void runImageCleanup();
+      void imageJob();
     }),
     cron.schedule(CRON_SCHEDULE, () => {
-      void runBuildCleanup();
+      void buildJob();
     }),
     cron.schedule(DEMO_CRON_SCHEDULE, () => {
-      void runDemoCleanup();
+      void demoJob();
     }),
     cron.schedule(PREVIEW_CRON_SCHEDULE, () => {
-      void runPreviewCleanup();
+      void previewJob();
     }),
   ];
 

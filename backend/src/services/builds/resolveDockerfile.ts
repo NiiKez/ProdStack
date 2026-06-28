@@ -12,13 +12,23 @@
  * The generated file is written INSIDE `repoDir` (never the auth dir) so both
  * `BUILD_RUNNER_MODE=kaniko` and `=docker` resolve its path correctly.
  */
-import { access, readFile, readdir, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { access, open, readdir, writeFile, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 
 import { detectFramework, type PackageJsonLike, type RepoSignals } from './dockerfileGen.js';
 
 /** Name of the synthesized Dockerfile written into the build context. */
 export const GENERATED_DOCKERFILE_NAME = '.prodstack.Dockerfile';
+
+/**
+ * Hard cap on a manifest file we'll read into memory during detection. The
+ * builder runs at 4 GiB and kaniko already pressures it, so a pathological
+ * multi-MB `package.json`/`requirements.txt` (or a symlink to a huge file)
+ * must not be slurped. 2 MiB is far above any real manifest. A file over the
+ * cap — or a symlink (rejected by `O_NOFOLLOW` at open) — is treated as absent.
+ */
+const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 
 export interface ResolvedDockerfile {
   /** Absolute path to the Dockerfile kaniko should build. */
@@ -41,9 +51,10 @@ async function fileExists(p: string): Promise<boolean> {
 }
 
 async function readJsonIfPresent(p: string): Promise<PackageJsonLike | undefined> {
-  if (!(await fileExists(p))) return undefined;
+  const text = await readTextIfPresent(p);
+  if (text === undefined) return undefined;
   try {
-    return JSON.parse(await readFile(p, 'utf8')) as PackageJsonLike;
+    return JSON.parse(text) as PackageJsonLike;
   } catch {
     // A malformed package.json shouldn't crash detection — treat as absent.
     return undefined;
@@ -51,11 +62,23 @@ async function readJsonIfPresent(p: string): Promise<PackageJsonLike | undefined
 }
 
 async function readTextIfPresent(p: string): Promise<string | undefined> {
-  if (!(await fileExists(p))) return undefined;
+  // Open ONCE with `O_NOFOLLOW`, then stat + read on the SAME descriptor. This
+  // closes two holes at once: `O_NOFOLLOW` makes the open fail (ELOOP) if the
+  // final path component is a symlink (no symlink-to-arbitrary-file read), and
+  // doing the size check via `fstat` on the open handle — not a second path
+  // lookup — removes the check/use gap a `lstat` + `readFile(path)` pair has
+  // (the file could be swapped between them: a TOCTOU race, CodeQL
+  // js/file-system-race). Any error (ENOENT/ELOOP/EISDIR/read failure) → absent.
+  let handle: FileHandle | undefined;
   try {
-    return await readFile(p, 'utf8');
+    handle = await open(p, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const s = await handle.stat();
+    if (!s.isFile() || s.size > MAX_MANIFEST_BYTES) return undefined;
+    return await handle.readFile('utf8');
   } catch {
     return undefined;
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -77,7 +100,8 @@ export function parseExposedPort(dockerfile: string): number | null {
     const m = /^EXPOSE\s+(.+)$/i.exec(line);
     if (m === null) continue;
     for (const token of m[1].split(/\s+/)) {
-      const portMatch = /^(\d{1,5})(?:\/(?:tcp|udp))?$/i.exec(token);
+      // Accept any `/<proto>` suffix (tcp/udp/sctp/…) — only the port matters.
+      const portMatch = /^(\d{1,5})(?:\/[a-z]+)?$/i.exec(token);
       if (portMatch === null) continue; // skip $PORT / ${PORT} / junk
       const port = Number(portMatch[1]);
       if (port >= 1 && port <= 65535) return port;
@@ -110,6 +134,25 @@ async function findDjangoWsgiModule(repoDir: string, rootEntries: string[]): Pro
   return undefined;
 }
 
+/**
+ * Write a minimal `.dockerignore` (excluding `.git`) into the build context for
+ * a generated Dockerfile, unless the repo already ships one. kaniko honors
+ * `.dockerignore`, so this keeps the git directory out of every `COPY` — most
+ * importantly the static template's blanket copy into the public web root.
+ * Exported for unit testing.
+ */
+export async function ensureDockerignore(repoDir: string, logs: ResolveLogger): Promise<void> {
+  const dockerignorePath = path.join(repoDir, '.dockerignore');
+  if (await fileExists(dockerignorePath)) {
+    await logs.write(
+      'INFO',
+      'repository ships a .dockerignore — respecting it (ensure it excludes .git)',
+    );
+    return;
+  }
+  await writeFile(dockerignorePath, '.git\n', 'utf8');
+}
+
 async function gatherSignals(repoDir: string): Promise<RepoSignals> {
   const dirents = await readdir(repoDir, { withFileTypes: true });
   const rootEntries = dirents.map((d) => d.name);
@@ -125,6 +168,7 @@ async function gatherSignals(repoDir: string): Promise<RepoSignals> {
     requirementsTxt,
     hasPyproject: rootEntries.includes('pyproject.toml'),
     hasPipfile: rootEntries.includes('Pipfile'),
+    hasPipfileLock: rootEntries.includes('Pipfile.lock'),
     hasManagePy,
     djangoWsgiModule: hasManagePy ? await findDjangoWsgiModule(repoDir, rootEntries) : undefined,
   };
@@ -193,6 +237,14 @@ export async function resolveDockerfile(
   );
   const generatedPath = path.join(repoDir, GENERATED_DOCKERFILE_NAME);
   await writeFile(generatedPath, detection.dockerfile, 'utf8');
+
+  // Keep `.git` out of the build context for OUR generated recipes. The static
+  // template does `COPY . /usr/share/nginx/html`, so without this the repo's
+  // whole `.git` history would be baked into the public web root and fetchable
+  // at `https://<app>/.git/...` (classic exposed-.git disclosure); for the
+  // other templates it also trims image bloat. We only write this when the repo
+  // ships no `.dockerignore` of its own — never clobber the user's.
+  await ensureDockerignore(repoDir, logs);
 
   return {
     dockerfilePath: generatedPath,

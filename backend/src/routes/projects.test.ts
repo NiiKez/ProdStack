@@ -103,6 +103,7 @@ const mocks = vi.hoisted(() => ({
   redeployWithCurrentEnv: vi.fn(),
   getAppMetrics: vi.fn(),
   queryRuntimeLogs: vi.fn(),
+  teardownAllForProject: vi.fn(),
 }));
 
 vi.mock('../db.js', () => ({
@@ -175,6 +176,16 @@ vi.mock('../services/github.js', async () => {
   };
 });
 
+// Keep the real previewService except teardownAllForProject, which the delete
+// handler calls — overridden so we can assert it's invoked without a real DB.
+vi.mock('../services/previews/previewService.js', async () => {
+  const actual = (await vi.importActual('../services/previews/previewService.js')) as Record<
+    string,
+    unknown
+  >;
+  return { ...actual, teardownAllForProject: mocks.teardownAllForProject };
+});
+
 vi.mock('../services/azure/index.js', () => ({
   createContainerApp: mocks.createContainerApp,
   updateContainerApp: mocks.updateContainerApp,
@@ -239,6 +250,8 @@ beforeEach(() => {
   mocks.redeployWithCurrentEnv.mockReset();
   mocks.getAppMetrics.mockReset();
   mocks.queryRuntimeLogs.mockReset();
+  mocks.teardownAllForProject.mockReset();
+  mocks.teardownAllForProject.mockResolvedValue(0);
 
   mocks.userFindUnique.mockResolvedValue(userRow);
   mocks.projectFindMany.mockImplementation(
@@ -756,6 +769,16 @@ describe('DELETE /api/projects/:id', () => {
     );
     expect(deleteCall).toBeDefined();
     expect(deleteCall![1]).toMatchObject({ owner: 'octocat', repo: 'hello', hook_id: 99 });
+  });
+
+  it('tears down the project\'s open preview environments on delete', async () => {
+    seedProject({ webhookId: 99 });
+    const app = createApp();
+    const res = await supertest(app)
+      .delete('/api/projects/p1')
+      .set('X-Requested-With', 'XMLHttpRequest');
+    expect(res.status).toBe(204);
+    expect(mocks.teardownAllForProject).toHaveBeenCalledWith('p1');
   });
 
   it('still returns 204 when GitHub webhook delete fails with 500', async () => {

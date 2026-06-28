@@ -47,7 +47,7 @@ vi.mock('./cleanupBuilds.js', () => ({ cleanupBuilds: mocks.cleanupBuilds }));
 vi.mock('./cleanupDemo.js', () => ({ cleanupDemo: mocks.cleanupDemo }));
 vi.mock('./cleanupPreviews.js', () => ({ cleanupExpiredPreviews: mocks.cleanupPreviews }));
 
-const { startCleanupScheduler } = await import('./scheduler.js');
+const { startCleanupScheduler, withOverlapGuard } = await import('./scheduler.js');
 
 describe('startCleanupScheduler', () => {
   beforeEach(() => {
@@ -95,5 +95,37 @@ describe('startCleanupScheduler', () => {
     // Invoking the tick callback must not reject — the job wraps its own errors.
     for (const task of mocks.scheduled) expect(() => task.fn()).not.toThrow();
     await vi.waitFor(() => expect(mocks.cleanupImages).toHaveBeenCalled());
+  });
+});
+
+describe('withOverlapGuard', () => {
+  it('skips a second invocation while the first is still running', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const job = vi.fn().mockReturnValue(gate);
+    const guarded = withOverlapGuard('image', job);
+
+    const first = guarded(); // starts + awaits the gate (running=true synchronously)
+    await guarded(); // overlapping tick while first is in-flight → skipped
+    expect(job).toHaveBeenCalledTimes(1);
+
+    release(); // unblock the first run
+    await first;
+
+    // After completion a later tick runs again (the gate is already resolved).
+    await guarded();
+    expect(job).toHaveBeenCalledTimes(2);
+  });
+
+  it('resets the running flag even when the job throws', async () => {
+    const job = vi.fn().mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce(undefined);
+    const guarded = withOverlapGuard('build', job);
+
+    await expect(guarded()).rejects.toThrow('boom');
+    // The flag must have reset in `finally`, so the next tick is allowed.
+    await guarded();
+    expect(job).toHaveBeenCalledTimes(2);
   });
 });
