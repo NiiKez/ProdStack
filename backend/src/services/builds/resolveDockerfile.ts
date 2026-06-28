@@ -12,7 +12,8 @@
  * The generated file is written INSIDE `repoDir` (never the auth dir) so both
  * `BUILD_RUNNER_MODE=kaniko` and `=docker` resolve its path correctly.
  */
-import { access, lstat, readFile, readdir, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { access, open, readdir, writeFile, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 
 import { detectFramework, type PackageJsonLike, type RepoSignals } from './dockerfileGen.js';
@@ -25,7 +26,7 @@ export const GENERATED_DOCKERFILE_NAME = '.prodstack.Dockerfile';
  * builder runs at 4 GiB and kaniko already pressures it, so a pathological
  * multi-MB `package.json`/`requirements.txt` (or a symlink to a huge file)
  * must not be slurped. 2 MiB is far above any real manifest. A file over the
- * cap — or a symlink (lstat → not a regular file) — is treated as absent.
+ * cap — or a symlink (rejected by `O_NOFOLLOW` at open) — is treated as absent.
  */
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 
@@ -61,14 +62,23 @@ async function readJsonIfPresent(p: string): Promise<PackageJsonLike | undefined
 }
 
 async function readTextIfPresent(p: string): Promise<string | undefined> {
+  // Open ONCE with `O_NOFOLLOW`, then stat + read on the SAME descriptor. This
+  // closes two holes at once: `O_NOFOLLOW` makes the open fail (ELOOP) if the
+  // final path component is a symlink (no symlink-to-arbitrary-file read), and
+  // doing the size check via `fstat` on the open handle — not a second path
+  // lookup — removes the check/use gap a `lstat` + `readFile(path)` pair has
+  // (the file could be swapped between them: a TOCTOU race, CodeQL
+  // js/file-system-race). Any error (ENOENT/ELOOP/EISDIR/read failure) → absent.
+  let handle: FileHandle | undefined;
   try {
-    // `lstat` (not `stat`) so a symlink resolves to "not a regular file" and is
-    // skipped — closes a symlink-to-arbitrary-file read while we're here.
-    const s = await lstat(p);
+    handle = await open(p, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const s = await handle.stat();
     if (!s.isFile() || s.size > MAX_MANIFEST_BYTES) return undefined;
-    return await readFile(p, 'utf8');
+    return await handle.readFile('utf8');
   } catch {
     return undefined;
+  } finally {
+    await handle?.close();
   }
 }
 
