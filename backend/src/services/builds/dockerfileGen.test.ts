@@ -149,6 +149,140 @@ describe('detectFramework — Python', () => {
     expect(d?.framework).toBe('Python');
     expect(d?.dockerfile).toContain('CMD ["python", "main.py"]');
   });
+
+  it('detects an app.py entrypoint when there is no main.py', () => {
+    const d = detectFramework(
+      signals({ rootEntries: ['requirements.txt', 'app.py'], requirementsTxt: 'requests' }),
+    );
+    expect(d?.framework).toBe('Python');
+    expect(d?.dockerfile).toContain('CMD ["python", "app.py"]');
+  });
+
+  it('returns null for a Python project with no recognizable entrypoint (no crashing app.py guess)', () => {
+    // A pyproject/Pipfile project with no main.py/app.py and no web framework
+    // must NOT build an image that crashes at runtime with `can't open 'app.py'`;
+    // it falls through to the friendly "add a Dockerfile" error instead.
+    expect(
+      detectFramework(signals({ rootEntries: ['pyproject.toml', 'lib'], hasPyproject: true })),
+    ).toBeNull();
+    expect(
+      detectFramework(signals({ rootEntries: ['Pipfile', 'src'], hasPipfile: true })),
+    ).toBeNull();
+  });
+
+  it('installs Pipenv deps for a Pipfile-only project (no silent zero-install image)', () => {
+    const d = detectFramework(
+      signals({ rootEntries: ['Pipfile', 'main.py'], hasPipfile: true }),
+    );
+    expect(d?.framework).toBe('Python');
+    expect(d?.dockerfile).toContain('COPY Pipfile* ./');
+    expect(d?.dockerfile).toContain('pip install --no-cache-dir pipenv');
+    expect(d?.dockerfile).toContain('pipenv install --system');
+    // No lock → resolve at build time (no --deploy), and manifest copied before source.
+    expect(d?.dockerfile).not.toContain('--deploy');
+    const df = d?.dockerfile ?? '';
+    expect(df.indexOf('COPY Pipfile* ./')).toBeLessThan(df.indexOf('COPY . .'));
+  });
+
+  it('uses a reproducible Pipenv install when a Pipfile.lock is present', () => {
+    const d = detectFramework(
+      signals({
+        rootEntries: ['Pipfile', 'Pipfile.lock', 'main.py'],
+        hasPipfile: true,
+        hasPipfileLock: true,
+      }),
+    );
+    expect(d?.dockerfile).toContain('pipenv install --system --deploy --ignore-pipfile');
+  });
+
+  it('lets a Django manage.py win over a frontend-tooling package.json', () => {
+    // A Django repo commonly ships a package.json for Tailwind/esbuild. manage.py
+    // is the unambiguous Python-app marker, so Python must win — otherwise we'd
+    // build the Node tooling and never run the Django server.
+    const d = detectFramework(
+      signals({
+        rootEntries: ['manage.py', 'package.json', 'requirements.txt'],
+        hasManagePy: true,
+        requirementsTxt: 'Django==5.0',
+        packageJson: { devDependencies: { tailwindcss: '3' }, scripts: { build: 'tailwind' } },
+      }),
+    );
+    expect(d?.framework).toBe('Django');
+    expect(d?.dockerfile).toContain('manage.py runserver');
+  });
+
+  it('rejects a hostile djangoWsgiModule even inside the pure module (defense-in-depth)', () => {
+    const d = detectFramework(
+      signals({
+        rootEntries: ['manage.py'],
+        hasManagePy: true,
+        djangoWsgiModule: 'evil:application"]\nRUN echo pwned\n#',
+      }),
+    );
+    expect(d?.framework).toBe('Django');
+    expect(d?.dockerfile).not.toContain('RUN echo pwned');
+    expect(d?.dockerfile).toContain('manage.py runserver');
+  });
+});
+
+describe('detectFramework — Vite SSR meta-frameworks (not static SPAs)', () => {
+  // These all carry `vite` in their dep tree but are server-rendered — they must
+  // NOT be served as a static dist/ SPA (the dist/ either doesn't exist or holds
+  // only the client half). They get a long-lived Node server instead.
+  it('detects Nuxt as a Node server, not a static SPA', () => {
+    const d = detectFramework(
+      signals({
+        rootEntries: ['package.json'],
+        packageJson: { dependencies: { nuxt: '3', vite: '5' } },
+      }),
+    );
+    expect(d?.framework).toBe('Nuxt');
+    expect(d?.port).toBe(3000);
+    expect(d?.dockerfile).toContain('.output/server/index.mjs');
+    expect(d?.dockerfile).not.toContain('/usr/share/nginx/html');
+  });
+
+  it('detects SvelteKit as a Node server, not a static SPA', () => {
+    const d = detectFramework(
+      signals({
+        rootEntries: ['package.json'],
+        packageJson: { devDependencies: { '@sveltejs/kit': '2', vite: '5' } },
+      }),
+    );
+    expect(d?.framework).toBe('SvelteKit');
+    expect(d?.dockerfile).toContain('CMD ["node", "build"]');
+    expect(d?.dockerfile).not.toContain('/usr/share/nginx/html');
+  });
+
+  it('detects Astro SSR only when the node adapter is present', () => {
+    const ssr = detectFramework(
+      signals({
+        rootEntries: ['package.json'],
+        packageJson: { dependencies: { astro: '4', '@astrojs/node': '8', vite: '5' } },
+      }),
+    );
+    expect(ssr?.framework).toBe('Astro (SSR)');
+    expect(ssr?.dockerfile).toContain('./dist/server/entry.mjs');
+  });
+
+  it('detects Remix as a Node server', () => {
+    const d = detectFramework(
+      signals({
+        rootEntries: ['package.json'],
+        packageJson: { dependencies: { '@remix-run/node': '2', vite: '5' } },
+      }),
+    );
+    expect(d?.framework).toBe('Remix');
+    expect(d?.dockerfile).toContain('CMD ["npm", "start"]');
+  });
+
+  it('still treats a plain Vite app as a static SPA (no regression)', () => {
+    const d = detectFramework(
+      signals({ rootEntries: ['package.json'], packageJson: { devDependencies: { vite: '5' } } }),
+    );
+    expect(d?.framework).toBe('Vite (static SPA)');
+    expect(d?.dockerfile).toContain('/usr/share/nginx/html');
+  });
 });
 
 describe('detectFramework — static + no match', () => {
@@ -293,6 +427,19 @@ describe('generated Dockerfiles are cache-friendly (install before full COPY)', 
     const df =
       detectFramework(
         signals({ rootEntries: ['requirements.txt', 'main.py'], requirementsTxt: '-r base.txt' }),
+      )?.dockerfile ?? '';
+    expect(df).not.toContain('COPY requirements.txt ./');
+    expect(df.indexOf('COPY . .')).toBeLessThan(
+      df.indexOf('RUN pip install --no-cache-dir -r requirements.txt'),
+    );
+  });
+
+  it('Python requirements.txt with an attached-form `-rbase.txt` copies full source first', () => {
+    // Attached-form short options (`-rbase.txt`, no space) are valid pip syntax
+    // and still pull in a sibling file → the manifest-only split would break.
+    const df =
+      detectFramework(
+        signals({ rootEntries: ['requirements.txt', 'main.py'], requirementsTxt: '-rbase.txt' }),
       )?.dockerfile ?? '';
     expect(df).not.toContain('COPY requirements.txt ./');
     expect(df.indexOf('COPY . .')).toBeLessThan(

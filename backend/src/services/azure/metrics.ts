@@ -306,16 +306,20 @@ function aggregationField(
 function pointsFromResult(result: MetricsQueryResult, spec: MetricSpec): MetricPoint[] {
   const metric = result.metrics[0];
   const data = metric?.timeseries?.[0]?.data ?? [];
-  return data.map((datum) => {
+  const points: MetricPoint[] = [];
+  for (const datum of data) {
+    const ts =
+      datum.timeStamp instanceof Date
+        ? datum.timeStamp
+        : new Date(datum.timeStamp as unknown as string);
+    // A malformed/missing timestamp must not throw a RangeError out of
+    // `.toISOString()` (which the caller catches by degrading the ENTIRE metric
+    // to []). Skip just that one bucket instead of nuking the whole series.
+    if (Number.isNaN(ts.getTime())) continue;
     const raw = aggregationField(datum, spec.aggregation);
-    return {
-      t:
-        datum.timeStamp instanceof Date
-          ? datum.timeStamp.toISOString()
-          : new Date(datum.timeStamp as unknown as string).toISOString(),
-      v: raw === undefined ? null : spec.convert(raw),
-    };
-  });
+    points.push({ t: ts.toISOString(), v: raw === undefined ? null : spec.convert(raw) });
+  }
+  return points;
 }
 
 async function realMetricSeries(

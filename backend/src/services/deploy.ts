@@ -123,6 +123,12 @@ export async function rollbackToDeployment(opts: {
     name: target.project.containerAppName,
     image,
     envVars,
+    // Force a fresh revision even when rolling back to a build whose image SHA
+    // equals the currently-active one (a rebuild/revert of the same commit
+    // produces an identical `:<sha>` tag). Without this the template is
+    // byte-identical → ACA no-ops the re-PUT → the re-applied env vars never
+    // reach the running replica (the "save didn't take effect" failure mode).
+    forceNewRevision: true,
   });
 
   try {

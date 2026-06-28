@@ -316,6 +316,61 @@ describe('cleanupImages', () => {
     expect(deletedTags).not.toContain('old-live');
   });
 
+  it('aborts the whole run (zero deletes) when a PLATFORM app image read fails', async () => {
+    // A platform app's live-image read can be its only strong protection (the
+    // scaled-to-zero builder). A transient read failure must fail closed, not
+    // proceed and delete with weakened protection.
+    mocks.getContainerAppImage.mockImplementation(async (name: string) => {
+      if (name === 'prodstack-builder') throw new Error('ACA read 503');
+      return null;
+    });
+    mocks.listRepositories.mockResolvedValue(['proj-app']);
+    mocks.listTags.mockResolvedValue([tag('old', 200)]);
+
+    await expect(cleanupImages()).rejects.toThrow(/refusing to delete with weakened protection/);
+    // Nothing was deleted — collectProtectedTags throws before the delete loop.
+    expect(mocks.deleteManifestByTag).not.toHaveBeenCalled();
+    expect(mocks.listRepositories).not.toHaveBeenCalled();
+  });
+
+  it('only SKIPS (does not abort) when a PREVIEW app image read fails', async () => {
+    // A preview app has DB/recency/newest-5 protection layers, so a read failure
+    // there is non-fatal — the run continues and still GCs unprotected tags.
+    mocks.findManyPreviews.mockResolvedValue([
+      { lastBuildId: null, containerAppName: 'pr7-deadbeef' },
+    ]);
+    mocks.getContainerAppImage.mockImplementation(async (name: string) => {
+      if (name === 'pr7-deadbeef') throw new Error('preview mid-teardown');
+      return null;
+    });
+    mocks.listRepositories.mockResolvedValue(['proj-app']);
+    mocks.listTags.mockResolvedValue([
+      tag('n1', 40),
+      tag('n2', 45),
+      tag('n3', 50),
+      tag('n4', 55),
+      tag('n5', 60),
+      tag('junk', 210),
+    ]);
+
+    const res = await cleanupImages();
+    const deletedTags = mocks.deleteManifestByTag.mock.calls.map((c) => c[1]);
+    expect(deletedTags).toContain('junk');
+    expect(res.deleted).toBe(1);
+  });
+
+  it('aborts with zero deletes when the protected-set DB query throws (load-bearing fail-safe)', async () => {
+    // collectProtectedTags is the keep-set source; if its DB read throws, the GC
+    // must delete NOTHING rather than run with an empty protected set.
+    mocks.findManyDeployments.mockRejectedValue(new Error('db connection reset'));
+    mocks.listRepositories.mockResolvedValue(['proj-app']);
+    mocks.listTags.mockResolvedValue([tag('old', 200)]);
+
+    await expect(cleanupImages()).rejects.toThrow();
+    expect(mocks.deleteManifestByTag).not.toHaveBeenCalled();
+    expect(mocks.listRepositories).not.toHaveBeenCalled();
+  });
+
   it('protects a manifest across repos when a kept tag elsewhere shares its digest', async () => {
     mocks.listRepositories.mockResolvedValue(['repo-a', 'repo-b']);
     mocks.listTags.mockImplementation(async (repo: string) =>

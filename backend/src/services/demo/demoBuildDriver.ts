@@ -95,6 +95,19 @@ async function finalizeDemoBuild(build: {
   const revisionName = `${build.project.containerAppName}--demo-${build.id.slice(0, 8)}`;
 
   return prisma.$transaction(async (tx) => {
+    // Don't finalize onto a soft-deleted project. A demo delete is a soft-delete
+    // that does NOT block an in-flight replay, so a visitor can create a project,
+    // trigger a build, then delete it while the replay is still running. Without
+    // this guard the replay would resurrect an active Deployment + liveUrl on a
+    // `deletedAt` row. Re-reading inside the tx (not trusting the passed-in
+    // object, which was fetched before the replay started) closes the
+    // delete-during-replay race; the recovery path also pre-filters these.
+    const live = await tx.project.findUnique({
+      where: { id: build.projectId },
+      select: { deletedAt: true },
+    });
+    if (live === null || live.deletedAt !== null) return false;
+
     const flip = await tx.build.updateMany({
       where: { id: build.id, status: { notIn: TERMINAL_STATUSES } },
       data: { status: 'READY', finishedAt, durationMs, imageTag: fixture.imageTag },

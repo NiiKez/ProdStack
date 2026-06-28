@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -141,6 +141,59 @@ describe('resolveDockerfile', () => {
     expect(res.dockerfilePath).toBe(path.join(repoDir, 'Dockerfile'));
     const written = await readFile(res.dockerfilePath, 'utf8');
     expect(written).toBe('FROM scratch\n');
+  });
+
+  it('writes a .dockerignore excluding .git for a generated static site (no exposed .git)', async () => {
+    // The static template does `COPY . /usr/share/nginx/html`; without the
+    // .dockerignore the repo's .git would be baked into the public web root.
+    await writeFile(path.join(repoDir, 'index.html'), '<html></html>');
+    const res = await resolveDockerfile(repoDir, logs);
+    expect(res.framework).toBe('Static site');
+    const ignore = await readFile(path.join(repoDir, '.dockerignore'), 'utf8');
+    expect(ignore).toMatch(/^\.git$/m);
+  });
+
+  it('does not clobber a repo .dockerignore', async () => {
+    await writeFile(path.join(repoDir, 'index.html'), '<html></html>');
+    await writeFile(path.join(repoDir, '.dockerignore'), 'node_modules\n');
+    await resolveDockerfile(repoDir, logs);
+    const ignore = await readFile(path.join(repoDir, '.dockerignore'), 'utf8');
+    expect(ignore).toBe('node_modules\n');
+  });
+
+  it('does not write a .dockerignore when the user ships a Dockerfile (we never touch their context)', async () => {
+    await writeFile(path.join(repoDir, 'Dockerfile'), 'FROM scratch\n');
+    await resolveDockerfile(repoDir, logs);
+    await expect(readFile(path.join(repoDir, '.dockerignore'), 'utf8')).rejects.toThrow();
+  });
+
+  it('detects Pipfile.lock so generated Pipenv installs are reproducible', async () => {
+    await writeFile(path.join(repoDir, 'Pipfile'), '[packages]\nflask = "*"\n');
+    await writeFile(path.join(repoDir, 'Pipfile.lock'), '{}');
+    await writeFile(path.join(repoDir, 'main.py'), 'print("hi")');
+    const res = await resolveDockerfile(repoDir, logs);
+    const written = await readFile(res.dockerfilePath, 'utf8');
+    expect(written).toContain('pipenv install --system --deploy --ignore-pipfile');
+  });
+
+  it('treats an oversized package.json as absent (OOM guard)', async () => {
+    // 3 MiB of valid-ish JSON — over the 2 MiB manifest cap, so detection skips
+    // it rather than slurping it into the 4 GiB builder.
+    await writeFile(path.join(repoDir, 'package.json'), `{"x":"${'a'.repeat(3 * 1024 * 1024)}"}`);
+    await writeFile(path.join(repoDir, 'index.html'), '<html></html>');
+    const res = await resolveDockerfile(repoDir, logs);
+    // Falls through the (skipped) Node detection to the static-site branch.
+    expect(res.framework).toBe('Static site');
+  });
+
+  it('skips a symlinked manifest (no arbitrary-file read)', async () => {
+    const secret = path.join(repoDir, 'secret.json');
+    await writeFile(secret, JSON.stringify({ dependencies: { express: '4' } }));
+    await symlink(secret, path.join(repoDir, 'package.json'));
+    await writeFile(path.join(repoDir, 'index.html'), '<html></html>');
+    const res = await resolveDockerfile(repoDir, logs);
+    // The symlinked package.json is ignored → not detected as Node.
+    expect(res.framework).toBe('Static site');
   });
 });
 

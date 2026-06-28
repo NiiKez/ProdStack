@@ -204,7 +204,22 @@ async function collectProtectedTags(): Promise<{
       if (!image) continue;
       protect(image, source);
     } catch (err) {
-      log.warn({ err, app: name }, 'could not read live container app image — skipping');
+      if (source.startsWith('platform:')) {
+        // A platform app (api/web/builder) is NOT in the Deployment table, so
+        // this live-image read can be its ONLY strong protection — e.g. the
+        // scaled-to-zero builder, manually rolled, whose live tag is
+        // legitimately >30d old AND outside newest-5. Proceeding past a
+        // transient read failure would let that in-use image become GC-eligible
+        // → un-pullable on the next 0→1 scale-up. Fail the whole run CLOSED
+        // instead: collectProtectedTags runs before any delete, so throwing
+        // here deletes nothing this cycle (it retries cleanly tomorrow).
+        throw new Error(
+          `aborting image GC: could not read live image for platform app ${name} — ` +
+            'refusing to delete with weakened protection',
+          { cause: err },
+        );
+      }
+      log.warn({ err, app: name }, 'could not read live preview app image — skipping');
     }
   }
 

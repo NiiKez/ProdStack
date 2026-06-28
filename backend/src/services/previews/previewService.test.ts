@@ -54,6 +54,7 @@ const {
   upsertPreviewAndEnqueueBuild,
   teardownPreview,
   teardownPreviewByPr,
+  teardownAllForProject,
   markPreviewFailedIfPending,
   listPreviews,
 } = await import('./previewService.js');
@@ -246,6 +247,55 @@ describe('teardownPreviewByPr', () => {
     mocks.previewFindFirst.mockResolvedValue(null);
     const found = await teardownPreviewByPr('p1', 99);
     expect(found).toBe(false);
+    expect(mocks.deleteContainerApp).not.toHaveBeenCalled();
+  });
+});
+
+describe('teardownAllForProject', () => {
+  it('tears down every open preview for the project and returns the count', async () => {
+    mocks.previewFindMany.mockResolvedValue([{ id: 'pv1' }, { id: 'pv2' }]);
+    // teardownPreview re-reads each row via findUnique.
+    mocks.previewFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) => ({
+      id: where.id,
+      containerAppName: `app-${where.id}`,
+      status: 'ACTIVE',
+      closedAt: null,
+    }));
+
+    const torn = await teardownAllForProject('p1');
+
+    expect(torn).toBe(2);
+    expect(mocks.previewFindMany).toHaveBeenCalledWith({
+      where: { projectId: 'p1', closedAt: null },
+      select: { id: true },
+    });
+    expect(mocks.deleteContainerApp).toHaveBeenCalledTimes(2);
+    expect(mocks.previewUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps tearing down the rest when one preview fails (independent best-effort)', async () => {
+    mocks.previewFindMany.mockResolvedValue([{ id: 'pv1' }, { id: 'pv2' }]);
+    mocks.previewFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) => ({
+      id: where.id,
+      containerAppName: `app-${where.id}`,
+      status: 'ACTIVE',
+      closedAt: null,
+    }));
+    // The DB flip for pv1 throws; pv2 must still be torn down.
+    mocks.previewUpdate
+      .mockRejectedValueOnce(new Error('db blip'))
+      .mockResolvedValue({});
+
+    const torn = await teardownAllForProject('p1');
+
+    expect(torn).toBe(1); // only pv2 counted
+    expect(mocks.previewUpdate).toHaveBeenCalledTimes(2); // both attempted
+  });
+
+  it('returns 0 when the project has no open previews', async () => {
+    mocks.previewFindMany.mockResolvedValue([]);
+    const torn = await teardownAllForProject('p1');
+    expect(torn).toBe(0);
     expect(mocks.deleteContainerApp).not.toHaveBeenCalled();
   });
 });

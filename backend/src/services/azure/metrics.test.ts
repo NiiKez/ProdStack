@@ -188,6 +188,37 @@ describe('getAppMetrics (real branch)', () => {
     expect(byKey.requests!.points[1]!.v).toBeNull();
   });
 
+  it('skips a datapoint with an unparseable timestamp instead of blanking the whole series', async () => {
+    mocks.queryResource.mockImplementation((_uri: string, metricNames: string[]) => {
+      const name = metricNames[0]!;
+      return Promise.resolve({
+        metrics: [
+          {
+            name,
+            timeseries: [
+              {
+                data: [
+                  { timeStamp: new Date('2026-06-03T10:00:00.000Z'), average: 1e9, maximum: 1, total: 3 },
+                  // Unparseable timestamp: must be dropped, not RangeError-thrown
+                  // (which would degrade the whole metric to []).
+                  { timeStamp: 'not-a-date', average: 2e9, maximum: 2, total: 4 },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+    });
+
+    const { getAppMetrics } = await import('./metrics.js');
+    const result = await getAppMetrics({ containerAppName: 'demo-app', range: '1h' });
+
+    expect(result.available).toBe(true);
+    const byKey = Object.fromEntries(result.series.map((s) => [s.key, s]));
+    // The valid bucket survives; the bad-timestamp bucket is dropped (NOT a blank series).
+    expect(byKey.cpu!.points).toEqual([{ t: '2026-06-03T10:00:00.000Z', v: 1 }]);
+  });
+
   it('degrades a single failing metric to an empty-points series instead of throwing', async () => {
     mocks.queryResource.mockImplementation((_uri: string, metricNames: string[]) => {
       if (metricNames[0] === 'Requests') {

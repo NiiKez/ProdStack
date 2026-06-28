@@ -141,6 +141,9 @@ describe('rollbackToDeployment', () => {
       name: 'octocat-app',
       image: 'prodstack.azurecr.io/app:sha',
       envVars: [],
+      // Same-SHA rollback must still roll a fresh revision so the re-applied env
+      // reaches the running replica (else ACA no-ops the byte-identical re-PUT).
+      forceNewRevision: true,
     });
     expect(mocks.txDeploymentUpdateMany).toHaveBeenCalledWith({
       where: { projectId: 'p1', active: true },

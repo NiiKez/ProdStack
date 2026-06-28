@@ -16,6 +16,29 @@ import type { PackageJsonLike, RepoSignals } from './builds/dockerfileGen.js';
 const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token';
 const GITHUB_API = 'https://api.github.com';
 
+/**
+ * Hard timeout on every GitHub HTTP call. Node's global `fetch` has no default
+ * timeout and Octokit v22 uses it directly, so without this a hung/blackholed
+ * GitHub connection would hang the Express handler (OAuth callback, repo picker,
+ * framework detect) indefinitely. The git CLONE path is already bounded by
+ * GIT_TIMEOUT_MS — this is the equivalent for the API/OAuth path.
+ */
+const GITHUB_HTTP_TIMEOUT_MS = 15_000;
+
+/**
+ * `fetch` with a hard timeout. If the caller already passed a signal (Octokit
+ * may, for its own aborts), we honor BOTH via `AbortSignal.any` so neither is
+ * lost. Shared by the OAuth `fetch` calls and the Octokit `request.fetch`.
+ */
+function fetchWithTimeout(
+  url: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+): ReturnType<typeof fetch> {
+  const timeout = AbortSignal.timeout(GITHUB_HTTP_TIMEOUT_MS);
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+  return fetch(url, { ...init, signal });
+}
+
 export interface GithubProfile {
   id: number;
   login: string;
@@ -35,6 +58,9 @@ export function octokitForUser(decryptedToken: string): Octokit {
   return new Octokit({
     auth: decryptedToken,
     userAgent: 'prodstack/0.1',
+    // Octokit v22 calls the global fetch (no built-in timeout) — wrap it so a
+    // hung GitHub connection can't hang the request forever.
+    request: { fetch: fetchWithTimeout },
   });
 }
 
@@ -218,19 +244,24 @@ const MAX_REPOS = 300;
  * failure throws `GithubReposError` so the route can branch on status.
  */
 export async function listUserRepos(octokit: Octokit): Promise<GithubRepo[]> {
-  let rows: Array<{
+  const rows: Array<{
     full_name: string;
     html_url: string;
     default_branch: string;
     private: boolean;
-  }>;
+  }> = [];
   try {
-    rows = await octokit.paginate('GET /user/repos', {
+    // Stream pages and STOP once we have MAX_REPOS — a user with thousands of
+    // repos otherwise triggers N sequential API calls only to slice the tail off.
+    for await (const page of octokit.paginate.iterator('GET /user/repos', {
       affiliation: 'owner,collaborator,organization_member',
       sort: 'pushed',
       direction: 'desc',
       per_page: 100,
-    });
+    })) {
+      rows.push(...page.data);
+      if (rows.length >= MAX_REPOS) break;
+    }
   } catch (err) {
     throw new GithubReposError(
       'failed to list user repos',
@@ -444,7 +475,7 @@ export async function deleteRepoWebhook(
 export async function exchangeCodeForToken(code: string): Promise<{ accessToken: string }> {
   let res: Response;
   try {
-    res = await fetch(GITHUB_TOKEN_URL, {
+    res = await fetchWithTimeout(GITHUB_TOKEN_URL, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -545,7 +576,7 @@ async function fetchPrimaryVerifiedEmail(token: string): Promise<string | null> 
 
 async function ghFetch(path: string, token: string): Promise<Response> {
   try {
-    return await fetch(`${GITHUB_API}${path}`, {
+    return await fetchWithTimeout(`${GITHUB_API}${path}`, {
       headers: {
         Accept: 'application/vnd.github+json',
         Authorization: `Bearer ${token}`,

@@ -92,9 +92,12 @@ describe('createContainerApp (real branch)', () => {
       'sub-test',
     );
     expect(mocks.beginCreateOrUpdateAndWait).toHaveBeenCalledTimes(1);
-    const [rg, name, envelope] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
+    const [rg, name, envelope, options] = mocks.beginCreateOrUpdateAndWait.mock.calls[0]!;
     expect(rg).toBe('prodstack');
     expect(name).toBe('octocat-demo');
+    // The LRO carries an abort deadline so a stuck Provisioning can't hang the
+    // build in DEPLOYING forever (and pin the billed builder).
+    expect(options).toMatchObject({ abortSignal: expect.any(AbortSignal) });
     expect(envelope).toMatchObject({
       location: 'francecentral',
       environmentId: process.env.CONTAINER_APPS_ENV_ID,
@@ -143,7 +146,12 @@ describe('deleteContainerApp (real branch)', () => {
     mocks.beginDeleteAndWait.mockResolvedValue(undefined);
     const { deleteContainerApp } = await import('./containerApps.js');
     await deleteContainerApp('octocat-demo');
-    expect(mocks.beginDeleteAndWait).toHaveBeenCalledWith('prodstack', 'octocat-demo');
+    // Carries an abort deadline so a hung LRO can't poll forever.
+    expect(mocks.beginDeleteAndWait).toHaveBeenCalledWith(
+      'prodstack',
+      'octocat-demo',
+      expect.objectContaining({ abortSignal: expect.any(AbortSignal) }),
+    );
   });
 });
 
@@ -152,7 +160,11 @@ describe('stopContainerApp / startContainerApp (real branch)', () => {
     mocks.beginStopAndWait.mockResolvedValue({});
     const { stopContainerApp } = await import('./containerApps.js');
     await stopContainerApp('octocat-demo');
-    expect(mocks.beginStopAndWait).toHaveBeenCalledWith('prodstack', 'octocat-demo');
+    expect(mocks.beginStopAndWait).toHaveBeenCalledWith(
+      'prodstack',
+      'octocat-demo',
+      expect.objectContaining({ abortSignal: expect.any(AbortSignal) }),
+    );
     // A stop must never roll/modify a revision (no create-or-update PUT).
     expect(mocks.beginCreateOrUpdateAndWait).not.toHaveBeenCalled();
   });
@@ -161,7 +173,11 @@ describe('stopContainerApp / startContainerApp (real branch)', () => {
     mocks.beginStartAndWait.mockResolvedValue({});
     const { startContainerApp } = await import('./containerApps.js');
     await startContainerApp('octocat-demo');
-    expect(mocks.beginStartAndWait).toHaveBeenCalledWith('prodstack', 'octocat-demo');
+    expect(mocks.beginStartAndWait).toHaveBeenCalledWith(
+      'prodstack',
+      'octocat-demo',
+      expect.objectContaining({ abortSignal: expect.any(AbortSignal) }),
+    );
     expect(mocks.beginCreateOrUpdateAndWait).not.toHaveBeenCalled();
   });
 
