@@ -124,6 +124,41 @@ az containerapp secret set -n $APP -g $RG --secrets \
   acr-password=keyvaultref:$KV/acr-password,$IDR \
   >/dev/null
 
+# --- 4b. Docker Hub pull auth (optional) -----------------------------------
+# Base images (FROM node:20-slim, …) are PULLED from Docker Hub, which rate-limits
+# ANONYMOUS pulls per source IP. The builder egresses through ACA's shared
+# outbound IP pool, so anonymous pulls share that quota with every other tenant
+# on the same egress IP → intermittent `TOOMANYREQUESTS: unauthenticated pull
+# rate limit` build failures (hits previews AND main-branch builds alike).
+# Authenticating moves the limit to a per-account quota. Stored in KV +
+# keyvaultref'd like the ACR pair above. The token must be a READ-ONLY Docker Hub
+# Personal Access Token, never the account password.
+#
+# Seed by exporting DOCKERHUB_USERNAME + DOCKERHUB_TOKEN before running this
+# script. If the KV secrets already exist, a re-provision without those vars set
+# leaves them untouched (no-op) — it never blanks them. The secretref + env-var
+# wiring is applied only once the KV secret exists, so a fresh provision with no
+# Docker Hub creds doesn't fail on a dangling keyvaultref (builds just fall back
+# to anonymous pulls until the creds are added).
+if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+  echo "==> Syncing Docker Hub pull credentials into Key Vault"
+  az keyvault secret set --vault-name $KV_NAME --name dockerhub-username --value "$DOCKERHUB_USERNAME" >/dev/null
+  az keyvault secret set --vault-name $KV_NAME --name dockerhub-token --value "$DOCKERHUB_TOKEN" >/dev/null
+fi
+if az keyvault secret show --vault-name $KV_NAME --name dockerhub-token >/dev/null 2>&1; then
+  echo "==> Wiring Docker Hub pull credentials"
+  az containerapp secret set -n $APP -g $RG --secrets \
+    dockerhub-username=keyvaultref:$KV/dockerhub-username,$IDR \
+    dockerhub-token=keyvaultref:$KV/dockerhub-token,$IDR \
+    >/dev/null
+  az containerapp update -n $APP -g $RG --set-env-vars \
+    DOCKERHUB_USERNAME=secretref:dockerhub-username \
+    DOCKERHUB_TOKEN=secretref:dockerhub-token \
+    >/dev/null
+else
+  echo "==> Docker Hub pull creds not found in Key Vault — skipping (anonymous pulls)"
+fi
+
 # --- 5. Environment variables ---------------------------------------------
 # Same 16 the API needs (env.ts is shared) plus 5 worker-specific knobs.
 # API origin derived from Azure at runtime. WEB_ORIGIN is the public browser

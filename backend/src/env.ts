@@ -175,6 +175,20 @@ const EnvSchema = z.object({
     .default('168h'),
   ACR_USERNAME: z.string().optional(),
   ACR_PASSWORD: z.string().optional(),
+  // Docker Hub pull auth (BUILDER-ONLY, optional). Generated and user-supplied
+  // Dockerfiles pull their base image (e.g. `FROM node:20-slim`) from Docker
+  // Hub, which rate-limits ANONYMOUS pulls per source IP. The builder egresses
+  // through Azure Container Apps' shared outbound IP pool, so it shares that
+  // anonymous quota with every other tenant on the same egress IP → intermittent
+  // `TOOMANYREQUESTS: unauthenticated pull rate limit` build failures. When BOTH
+  // are set, kaniko's docker config gets an authenticated `index.docker.io`
+  // entry so pulls count against this Docker Hub account's (much higher,
+  // per-account) limit instead of the shared IP. Both unset → anonymous pulls,
+  // byte-identical to the prior behaviour (safe no-op default for api/web/local
+  // dev — only the builder ever runs kaniko). The token should be a read-only
+  // Docker Hub Personal Access Token, never the account password.
+  DOCKERHUB_USERNAME: z.string().optional(),
+  DOCKERHUB_TOKEN: z.string().optional(),
   WORKER_ID: z.string().default(`worker-${process.pid}`),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
   // Poison-pill guard. `claimNextBuild` bumps `Build.attempts` on every claim; a
