@@ -92,4 +92,18 @@ describe('writeDockerConfig', () => {
     const mode = (await stat(configPath)).mode & 0o777;
     expect(mode).toBe(0o600);
   });
+
+  it('omits the Docker Hub entry when DOCKERHUB_* are unset (anonymous pulls)', async () => {
+    // This file hoists only the ACR creds, so DOCKERHUB_USERNAME/TOKEN are unset
+    // — the backward-compatible default: no `index.docker.io` auth entry, just
+    // the ACR push-auth registry. (The with-creds branch is covered in
+    // kaniko.dockerhub.test.ts, which needs its own frozen env.)
+    tmpDir = await mkdtemp(path.join(os.tmpdir(), 'kaniko-test-'));
+
+    const dockerDir = await writeDockerConfig(tmpDir);
+    const config = JSON.parse(await readFile(path.join(dockerDir, 'config.json'), 'utf8'));
+
+    expect(config.auths['https://index.docker.io/v1/']).toBeUndefined();
+    expect(Object.keys(config.auths)).toEqual([`${ACR_NAME}.azurecr.io`]);
+  });
 });

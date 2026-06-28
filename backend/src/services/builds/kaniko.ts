@@ -114,9 +114,19 @@ export function assertAuthDirIsolated(contextDir: string, authDir: string): void
 }
 
 /**
- * ACR push auth: write `<authDir>/.docker/config.json` with basic-auth creds
- * for the registry, then mount/point kaniko at that dir. The structure
- * matches what `docker login` produces, which is what kaniko reads.
+ * Registry auth: write `<authDir>/.docker/config.json` with basic-auth creds,
+ * then mount/point kaniko at that dir. The structure matches what `docker login`
+ * produces, which is what kaniko reads. Two registries:
+ *
+ *  - ACR (always): the `--destination` *push* target. Kaniko can't use the
+ *    managed identity for `docker push`, so it needs a username/password pair.
+ *  - Docker Hub (optional, when DOCKERHUB_USERNAME/TOKEN are set): the base-image
+ *    *pull* source. Anonymous Docker Hub pulls are rate-limited per source IP,
+ *    and the builder shares Azure's outbound IP pool with other tenants, so
+ *    anonymous pulls of `FROM node:20-slim` &c. intermittently fail with
+ *    `TOOMANYREQUESTS: unauthenticated pull rate limit`. Authenticating moves the
+ *    limit to a per-account quota. Unset → no entry, anonymous pulls exactly as
+ *    before (backward compatible).
  *
  * `authDir` is a sibling of the kaniko context, never inside it.
  */
@@ -130,11 +140,23 @@ export async function writeDockerConfig(authDir: string): Promise<string> {
     'utf8',
   ).toString('base64');
 
-  const config = {
-    auths: {
-      [registry]: { auth },
-    },
+  const auths: Record<string, { auth: string }> = {
+    [registry]: { auth },
   };
+
+  // The key MUST be exactly `https://index.docker.io/v1/`: go-containerregistry
+  // (kaniko's registry client) resolves the default Docker Hub registry against
+  // that canonical string, not `docker.io` / `index.docker.io`. This is the same
+  // entry `docker login` writes for Docker Hub.
+  if (env.DOCKERHUB_USERNAME && env.DOCKERHUB_TOKEN) {
+    const dockerHubAuth = Buffer.from(
+      `${env.DOCKERHUB_USERNAME}:${env.DOCKERHUB_TOKEN}`,
+      'utf8',
+    ).toString('base64');
+    auths['https://index.docker.io/v1/'] = { auth: dockerHubAuth };
+  }
+
+  const config = { auths };
   await writeFile(path.join(dir, 'config.json'), JSON.stringify(config), { mode: 0o600 });
   return dir;
 }
