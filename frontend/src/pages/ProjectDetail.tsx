@@ -66,7 +66,7 @@ import { useResumeProject } from '@/hooks/useResumeProject';
 import { useCancelBuild } from '@/hooks/useCancelBuild';
 import { MetricsChart } from '@/components/MetricsChart';
 import { PreviewsTab } from '@/components/PreviewsTab';
-import { formatLogClock } from '@/lib/runtimeLogs';
+import { RuntimeLogLine } from '@/components/RuntimeLogLine';
 import type { MetricKey, MetricRange } from '@/lib/metrics';
 import type {
   BuildSummary,
@@ -1025,17 +1025,7 @@ function LogsTab({ project }: { project: ProjectDetailType }) {
           className="max-h-[60vh] overflow-auto rounded-lg border border-slate-800 bg-slate-950/70 p-3 font-mono text-xs leading-relaxed"
         >
           {lines.map((line, i) => (
-            <div key={`${line.ts}-${i}`} className="flex gap-3">
-              <span className="shrink-0 select-none text-slate-600">{formatLogClock(line.ts)}</span>
-              <span
-                className={cn(
-                  'whitespace-pre-wrap break-all',
-                  line.stream === 'stderr' ? 'text-rose-300' : 'text-slate-300',
-                )}
-              >
-                {line.message}
-              </span>
-            </div>
+            <RuntimeLogLine key={`${line.ts}-${i}`} line={line} />
           ))}
         </div>
       )}
