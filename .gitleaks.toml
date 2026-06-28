@@ -1,0 +1,24 @@
+# gitleaks configuration — https://github.com/gitleaks/gitleaks
+#
+# The CI secret scan (.github/workflows/security.yml) runs gitleaks with the full
+# git history available. On push / pull_request events gitleaks-action scopes the
+# scan to the changed commits, but the weekly scheduled run scans the ENTIRE
+# history — where deterministic unit-test fixtures (e.g.
+# `process.env.JWT_SECRET = 'test-jwt-secret-…'`) trip the built-in
+# `generic-api-key` rule as high-entropy keys. Those are fake values that exist
+# only to exercise code paths in tests; real platform secrets live in a managed
+# secret store and never touch source.
+#
+# We keep every default gitleaks rule (`useDefault = true`) and only suppress
+# findings inside test files, so genuine secret detection over application and
+# infrastructure code is unchanged.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deterministic fake credentials in unit-test fixtures (never real secrets)."
+paths = [
+  '''.*\.test\.tsx?$''',
+  '''(^|/)test/''',
+]
