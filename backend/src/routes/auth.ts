@@ -13,6 +13,7 @@ import { authLimiter } from '../middleware/rateLimit.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { requireXRequestedWith } from '../middleware/requireXRequestedWith.js';
 import { exchangeCodeForToken, fetchGithubProfile } from '../services/github.js';
+import { recordSecurityEvent } from '../services/securityEvents.js';
 
 /**
  * Auth router — mounted by `app.ts` under `/api/auth`. Implements the four
@@ -72,6 +73,25 @@ router.get('/github/callback', authLimiter, async (req, res, next) => {
     expectedState.length === 0 ||
     !safeEqualStrings(state, expectedState)
   ) {
+    // Audit the rejected callback — this is the OAuth CSRF/replay guard tripping
+    // (tampered, replayed, or expired state). We record only a NON-secret reason
+    // CATEGORY, never the `code`/`state` values themselves (the very params
+    // safeReqSerializer also keeps out of the access log). No actor is known yet:
+    // the GitHub profile isn't fetched until the state validates.
+    const reason =
+      code.length === 0
+        ? 'missing_code'
+        : state.length === 0
+          ? 'missing_state'
+          : typeof expectedState !== 'string' || expectedState.length === 0
+            ? 'missing_state_cookie'
+            : 'state_mismatch';
+    await recordSecurityEvent({
+      action: 'auth.oauth_state_mismatch',
+      outcome: 'failure',
+      ip: req.ip ?? null,
+      metadata: { reason },
+    });
     clearOAuthCookies(res);
     res.status(400).json({ error: 'OAUTH_STATE_MISMATCH' });
     return;
@@ -92,6 +112,16 @@ router.get('/github/callback', authLimiter, async (req, res, next) => {
     // them at the repo to self-host. We reject *before* the upsert so a
     // non-owner's OAuth token is never persisted: no DB row, no stored token.
     if (env.OWNER_GITHUB_ID !== undefined && profile.id !== env.OWNER_GITHUB_ID) {
+      // Audit the owner-gate denial. The rejected user is NOT the owner, so the
+      // actor fields carry the *attempting* GitHub identity (never the owner's),
+      // and we never log the OAuth token/code — only the profile id/login + ip.
+      await recordSecurityEvent({
+        action: 'auth.denied_not_owner',
+        outcome: 'denied',
+        actorGithubId: profile.id,
+        actorLogin: profile.login,
+        ip: req.ip ?? null,
+      });
       res.redirect(302, `${env.WEB_ORIGIN}/?denied=not_owner`);
       return;
     }
@@ -119,7 +149,26 @@ router.get('/github/callback', authLimiter, async (req, res, next) => {
         githubTokenAuthTag: enc.authTag,
         githubTokenKeyVersion: enc.keyVersion,
       },
-      select: { id: true },
+      // createdAt/updatedAt let us derive whether the row was created vs updated
+      // for the audit event below — on a fresh insert both are the same now();
+      // an update bumps updatedAt past createdAt.
+      select: { id: true, createdAt: true, updatedAt: true },
+    });
+
+    // Audit the login + token persistence. Keys-only `created` flag (a new user
+    // row vs. a returning one); never log the OAuth token.
+    const created =
+      user.createdAt instanceof Date &&
+      user.updatedAt instanceof Date &&
+      user.createdAt.getTime() === user.updatedAt.getTime();
+    await recordSecurityEvent({
+      action: 'auth.login',
+      outcome: 'success',
+      userId: user.id,
+      actorGithubId: profile.id,
+      actorLogin: profile.login,
+      ip: req.ip ?? null,
+      metadata: { created },
     });
 
     const jwtToken = signSession(user.id);

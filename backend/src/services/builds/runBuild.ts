@@ -34,7 +34,7 @@ import { createContainerApp, deleteContainerApp, updateContainerApp } from '../a
 import { markPreviewFailedIfPending } from '../previews/previewService.js';
 import { loadDecryptedEnvVars } from '../projectEnv.js';
 import { selectBuildArgs } from './buildArgs.js';
-import { BUILD_CACHE_REPO_PREFIX, runKaniko } from './kaniko.js';
+import { BUILD_CACHE_REPO_PREFIX, redact, runKaniko } from './kaniko.js';
 import { resolveDockerfile, type ResolvedDockerfile } from './resolveDockerfile.js';
 
 const STUB_IMAGES = [
@@ -492,6 +492,20 @@ async function runRealBuild(
   await setStatus(ctx.buildId, 'BUILDING', { imageTag: shaTag });
   await ctx.logs.write('STEP', `building image → ${shaTag}`);
 
+  // Redact set for the kaniko phase — the build-side mirror of the git phase's
+  // `spawnLogged({ redact })`. Kaniko reads the docker config we wrote (ACR push
+  // password + the Docker Hub pull token) and runs untrusted user `RUN` steps, so
+  // strip every sensitive value the worker holds before any line is persisted as
+  // a LogLine or streamed over SSE. We deliberately omit the ACR/Docker Hub
+  // USERNAMES: they aren't secrets, and the ACR username equals the registry name
+  // (it appears in every `*.azurecr.io/...` destination we WANT visible in logs),
+  // so redacting it would mangle legitimate output. The build-arg VALUES are
+  // likewise NOT redacted — they're public-by-design (NEXT_PUBLIC_*/VITE_*) and
+  // meant to appear in the image.
+  const kanikoRedactSecrets = [env.ACR_PASSWORD, env.DOCKERHUB_TOKEN, token].filter(
+    (s): s is string => typeof s === 'string' && s.length > 0,
+  );
+
   const result = await runKaniko({
     contextDir: ctx.repoDir,
     authDir: ctx.authDir,
@@ -509,7 +523,10 @@ async function runRealBuild(
       : undefined,
     timeoutMs: env.BUILD_TIMEOUT_MS,
     signal,
+    redactSecrets: kanikoRedactSecrets,
     onLine: (line, stream) => {
+      // `line` is already redacted inside runKaniko (streamLines) — same as the
+      // git path, where spawnLogged redacts before the onLine callback fires.
       ctx.logs.emit(classifyLine(line), `${stream}: ${line}`);
     },
   });
@@ -851,23 +868,13 @@ export function spawnLogged(
   });
 }
 
-/**
- * Strip every secret in `secret` from a log line before it's persisted. We pass
- * BOTH forms the GitHub token can take: the raw token AND the
- * `AUTHORIZATION: Basic <base64(x-access-token:<token>)>` header value that git
- * actually emits (constructed via {@link authHeaderValue}, so the two can't
- * drift). Without the base64 form, a leaked `Authorization` header would slip
- * through redaction even though it's a working credential. Longest-first so a
- * raw-token substring of the header doesn't pre-empt redacting the wider blob.
- */
-export function redact(line: string, secret: string | string[]): string {
-  const secrets = (Array.isArray(secret) ? secret : [secret])
-    .filter((s) => s.length > 0)
-    .sort((a, b) => b.length - a.length);
-  let out = line;
-  for (const s of secrets) out = out.split(s).join('***');
-  return out;
-}
+// `redact` now lives in kaniko.ts (the lower-level module both build phases
+// depend on) so the git phase here and the kaniko phase there share ONE
+// implementation with no import cycle. Re-exported (it's already imported above
+// for cloneRepo's anonymous-retry path) so it stays part of runBuild's public
+// surface — the git-token redaction tests + any caller importing it from here
+// keep working.
+export { redact };
 
 // --- Stub path (mirrors M2.5) ---------------------------------------------
 

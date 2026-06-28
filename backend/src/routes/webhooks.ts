@@ -13,6 +13,7 @@ import {
   teardownPreviewByPr,
   upsertPreviewAndEnqueueBuild,
 } from '../services/previews/previewService.js';
+import { recordSecurityEvent } from '../services/securityEvents.js';
 
 const router = Router();
 
@@ -141,6 +142,17 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
     // signature can't crash the request.
     if (providedHex.length !== expectedHex.length) {
       logger.warn({ projectId: project.id, deliveryId }, 'webhook signature length mismatch');
+      await recordSecurityEvent({
+        action: 'webhook.signature_invalid',
+        outcome: 'failure',
+        targetType: 'project',
+        targetId: project.id,
+        ip: req.ip ?? null,
+        // `deliveryId` is GitHub's non-secret delivery GUID (already validated
+        // against DELIVERY_ID_RE above) — a correlation handle for the rejected
+        // delivery, not a credential.
+        metadata: { reason: 'length_mismatch', deliveryId },
+      });
       throw new HttpError(401, 'INVALID_SIGNATURE');
     }
     const providedBuf = Buffer.from(providedHex, 'hex');
@@ -150,6 +162,14 @@ router.post('/github', async (req: Request, res: Response, next: NextFunction) =
       !timingSafeEqual(providedBuf, expectedBuf)
     ) {
       logger.warn({ projectId: project.id, deliveryId }, 'webhook signature mismatch');
+      await recordSecurityEvent({
+        action: 'webhook.signature_invalid',
+        outcome: 'failure',
+        targetType: 'project',
+        targetId: project.id,
+        ip: req.ip ?? null,
+        metadata: { reason: 'hmac_mismatch', deliveryId },
+      });
       throw new HttpError(401, 'INVALID_SIGNATURE');
     }
 

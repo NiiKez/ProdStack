@@ -10,10 +10,13 @@ process.env.GITHUB_OAUTH_CALLBACK_URL = 'http://localhost:3000/api/auth/github/c
 process.env.AZURE_STUB = 'true';
 process.env.LOG_LEVEL = 'silent';
 
+import { EventEmitter } from 'node:events';
+
 import { pino } from 'pino';
+import { pinoHttp } from 'pino-http';
 import { describe, expect, it } from 'vitest';
 
-import { REDACT_PATHS, safeErrSerializer } from './logger.js';
+import { REDACT_PATHS, safeErrSerializer, safeReqSerializer } from './logger.js';
 
 describe('REDACT_PATHS', () => {
   it('redacts every auth/credential header so secrets never hit logs', () => {
@@ -60,6 +63,89 @@ describe('REDACT_PATHS', () => {
     expect(out).not.toContain('Basic leak-proxy');
     expect(out).not.toContain('sid=leak-me-too');
     expect(out).toContain('[REDACTED]');
+  });
+});
+
+describe('safeReqSerializer', () => {
+  const callbackUrl = '/api/auth/github/callback?code=SECRETCODE123&state=SECRETSTATE456';
+
+  it('strips the query string from url and keeps only the param keys', () => {
+    // Shape pino-std-serializers' wrapRequestSerializer hands us: the already
+    // serialized pino request, where the default Express path puts the full
+    // originalUrl on `url` and the parsed query object on `query`.
+    const out = safeReqSerializer({
+      id: undefined,
+      method: 'GET',
+      url: callbackUrl,
+      headers: {},
+      remoteAddress: '127.0.0.1',
+      remotePort: 4567,
+      params: {},
+      query: { code: 'SECRETCODE123', state: 'SECRETSTATE456' },
+      // raw is non-enumerable in the real shape; not needed by the serializer.
+    } as never);
+
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain('SECRETCODE123');
+    expect(serialized).not.toContain('SECRETSTATE456');
+    expect(out.url).toBe('/api/auth/github/callback');
+    // The param keys survive (never the values) so "which params were sent"
+    // is still diagnosable.
+    expect(out.query).toEqual(['code', 'state']);
+  });
+
+  it('leaves a query-less path untouched', () => {
+    const out = safeReqSerializer({
+      id: undefined,
+      method: 'GET',
+      url: '/api/health',
+      headers: {},
+      remoteAddress: '127.0.0.1',
+      remotePort: 4567,
+      params: {},
+      query: {},
+    } as never);
+    expect(out.url).toBe('/api/health');
+  });
+
+  it('does not leak OAuth code/state through the real pino-http access log', () => {
+    // End-to-end-ish: drive the actual pino-http middleware wired exactly as
+    // app.ts does (serializers.req = safeReqSerializer) and assert the captured
+    // access-log line never contains the authorization code/state.
+    const lines: string[] = [];
+    const captureLogger = pino(
+      { redact: { paths: REDACT_PATHS, censor: '[REDACTED]' } },
+      { write: (s: string) => lines.push(s) },
+    );
+    const middleware = pinoHttp({
+      logger: captureLogger,
+      serializers: { req: safeReqSerializer },
+    });
+
+    // Minimal Express-like request: originalUrl + parsed query are the two leak
+    // vectors the default serializer would copy.
+    const req = {
+      method: 'GET',
+      url: callbackUrl,
+      originalUrl: callbackUrl,
+      query: { code: 'SECRETCODE123', state: 'SECRETSTATE456' },
+      headers: { host: 'prodstack.live' },
+      socket: { remoteAddress: '127.0.0.1', remotePort: 4567 },
+    } as never;
+    const res = Object.assign(new EventEmitter(), {
+      statusCode: 302,
+      headersSent: true,
+      getHeaders: () => ({}),
+    }) as never;
+
+    middleware(req, res, () => {});
+    (res as unknown as EventEmitter).emit('finish');
+
+    const out = lines.join('');
+    expect(out).not.toContain('SECRETCODE123');
+    expect(out).not.toContain('SECRETSTATE456');
+    // The clean path is still recorded.
+    expect(out).toContain('/api/auth/github/callback');
   });
 });
 

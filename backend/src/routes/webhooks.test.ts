@@ -1,3 +1,5 @@
+process.env.LOG_LEVEL = 'silent';
+
 import { createHmac } from 'node:crypto';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -51,6 +53,7 @@ const mocks = vi.hoisted(() => ({
   projectFindFirst: vi.fn(),
   webhookEventCreate: vi.fn(),
   buildCreate: vi.fn(),
+  securityEventCreate: vi.fn(),
   transaction: vi.fn(),
 }));
 
@@ -64,6 +67,7 @@ vi.mock('../db.js', () => {
       project: { findFirst: mocks.projectFindFirst },
       webhookEvent: { create: mocks.webhookEventCreate },
       build: { create: mocks.buildCreate },
+      securityEvent: { create: mocks.securityEventCreate },
       $transaction: mocks.transaction.mockImplementation(
         async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
       ),
@@ -124,6 +128,7 @@ beforeEach(() => {
   mocks.projectFindFirst.mockReset();
   mocks.webhookEventCreate.mockReset();
   mocks.buildCreate.mockReset();
+  mocks.securityEventCreate.mockReset().mockResolvedValue({ id: 'ev1' });
 
   mocks.projectFindFirst.mockImplementation(
     async (args: {
@@ -270,6 +275,31 @@ describe('POST /api/webhooks/github', () => {
     expect(res.body).toMatchObject({ error: 'INVALID_SIGNATURE' });
     expect(state.builds).toHaveLength(0);
     expect(state.webhookEvents.size).toBe(0);
+  });
+
+  it('records a webhook.signature_invalid audit event on a forged signature', async () => {
+    const body = pushPayload();
+    // Correct-length but wrong-secret signature → the HMAC-compare arm rejects.
+    const res = await supertest(createApp())
+      .post('/api/webhooks/github')
+      .set('Content-Type', 'application/json')
+      .set('X-GitHub-Event', 'push')
+      .set('X-GitHub-Delivery', 'delivery-forged')
+      .set('X-Hub-Signature-256', sign(body, 'wrong-secret'))
+      .send(body);
+
+    expect(res.status).toBe(401);
+    expect(mocks.securityEventCreate).toHaveBeenCalledTimes(1);
+    const data = mocks.securityEventCreate.mock.calls[0]![0]!.data;
+    expect(data).toMatchObject({
+      action: 'webhook.signature_invalid',
+      outcome: 'failure',
+      targetType: 'project',
+      targetId: 'p1',
+      metadata: { reason: 'hmac_mismatch', deliveryId: 'delivery-forged' },
+    });
+    // No build is created and the rejection still wins (audit is best-effort).
+    expect(state.builds).toHaveLength(0);
   });
 
   it('returns 204 and creates no build when the ref is not the tracked branch', async () => {

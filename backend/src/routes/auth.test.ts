@@ -10,6 +10,7 @@ process.env.DATA_ENC_KEY = Buffer.alloc(32, 9).toString('base64');
 process.env.GITHUB_OAUTH_CLIENT_ID = 'test-client-id';
 process.env.GITHUB_OAUTH_CLIENT_SECRET = 'test-client-secret';
 process.env.GITHUB_OAUTH_CALLBACK_URL = 'http://localhost:3000/api/auth/github/callback';
+process.env.LOG_LEVEL = 'silent';
 
 import { createHmac } from 'node:crypto';
 
@@ -27,6 +28,7 @@ vi.mock('../db.js', () => ({
       upsert: vi.fn(),
       findUnique: vi.fn(),
     },
+    securityEvent: { create: vi.fn() },
   },
 }));
 
@@ -86,6 +88,32 @@ describe('GET /api/auth/github/callback', () => {
 
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: 'OAUTH_STATE_MISMATCH' });
+  });
+
+  it('records an auth.oauth_state_mismatch audit event without capturing the code/state values', async () => {
+    const app = buildApp();
+    const signedState = signCookieValue('cookie-state', COOKIE_SECRET);
+
+    const res = await request(app)
+      .get('/api/auth/github/callback')
+      .query({ code: 'SECRETCODE123', state: 'SECRETSTATE456' })
+      .set('Cookie', [`oauth_state=s:${signedState}`]);
+
+    expect(res.status).toBe(400);
+
+    const createMock = prisma.securityEvent.create as ReturnType<typeof vi.fn>;
+    expect(createMock).toHaveBeenCalledTimes(1);
+    const data = createMock.mock.calls[0]![0]!.data;
+    expect(data).toMatchObject({
+      action: 'auth.oauth_state_mismatch',
+      outcome: 'failure',
+      // CSRF/replay guard tripped: the query state didn't match the signed cookie.
+      metadata: { reason: 'state_mismatch' },
+    });
+    // The OAuth code + state must never be captured in the audit row.
+    const serialized = JSON.stringify(data);
+    expect(serialized).not.toContain('SECRETCODE123');
+    expect(serialized).not.toContain('SECRETSTATE456');
   });
 });
 
