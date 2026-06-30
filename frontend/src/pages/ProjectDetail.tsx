@@ -58,7 +58,7 @@ import { useDeleteProject } from '@/hooks/useDeleteProject';
 import { useProjectBuilds, type BuildFilters } from '@/hooks/useProjectBuilds';
 import { useProjectDeployments } from '@/hooks/useProjectDeployments';
 import { useProjectMetrics } from '@/hooks/useProjectMetrics';
-import { useRuntimeLogs } from '@/hooks/useRuntimeLogs';
+import { useRuntimeLogs, logsPollIntervalMs } from '@/hooks/useRuntimeLogs';
 import { useRollbackDeployment } from '@/hooks/useRollbackDeployment';
 import { useRebuildProject } from '@/hooks/useRebuildProject';
 import { useStopProject } from '@/hooks/useStopProject';
@@ -952,10 +952,32 @@ function DeploymentsTab({ project }: { project: ProjectDetailType }) {
 
 // --- Logs tab (the running app's stdout/stderr) ----------------------------
 
+// Look-back windows for the runtime-log snapshot. Capped at 30 days because that
+// is how long Azure Log Analytics retains console logs — a scaled-to-zero app's
+// past output stays queryable for the whole window, it just isn't "live".
+const LOG_RANGE_OPTIONS = [
+  { value: '15', label: 'Last 15 min' },
+  { value: '60', label: 'Last hour' },
+  { value: '360', label: 'Last 6 hours' },
+  { value: '1440', label: 'Last 24 hours' },
+  { value: '10080', label: 'Last 7 days' },
+  { value: '43200', label: 'Last 30 days' },
+];
+
 function LogsTab({ project }: { project: ProjectDetailType }) {
-  const logsQuery = useRuntimeLogs(project.id, { sinceMinutes: 15 });
+  const [sinceMinutes, setSinceMinutes] = useState(15);
+  const logsQuery = useRuntimeLogs(project.id, { sinceMinutes });
   const scrollRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+
+  const rangeLabel =
+    LOG_RANGE_OPTIONS.find((o) => o.value === String(sinceMinutes))?.label.toLowerCase() ??
+    `last ${sinceMinutes} min`;
+
+  // Auto-refresh cadence depends on the selected window (fast tail for narrow
+  // ranges, off for historical 7d/30d views) — the indicator must say what it
+  // actually does, not a hardcoded "every 8s".
+  const pollMs = logsPollIntervalMs(sinceMinutes);
 
   const data = logsQuery.data;
   const lines = useMemo(() => data?.lines ?? [], [data]);
@@ -982,6 +1004,12 @@ function LogsTab({ project }: { project: ProjectDetailType }) {
           Runtime logs
         </h2>
         <div className="flex items-center gap-3">
+          <Select
+            leadingLabel="Range"
+            options={LOG_RANGE_OPTIONS}
+            value={String(sinceMinutes)}
+            onChange={(e) => setSinceMinutes(Number(e.target.value))}
+          />
           <Button variant="ghost" size="sm" onClick={() => void logsQuery.refetch()}>
             Refresh
           </Button>
@@ -992,7 +1020,11 @@ function LogsTab({ project }: { project: ProjectDetailType }) {
                 logsQuery.isFetching ? 'animate-pulse bg-emerald-400' : 'bg-slate-600',
               )}
             />
-            {logsQuery.isFetching ? 'Refreshing' : 'Auto · every 8s'}
+            {logsQuery.isFetching
+              ? 'Refreshing'
+              : pollMs === false
+                ? 'Manual refresh'
+                : `Auto · every ${Math.round(pollMs / 1000)}s`}
           </span>
         </div>
       </div>
@@ -1015,8 +1047,8 @@ function LogsTab({ project }: { project: ProjectDetailType }) {
         </div>
       ) : lines.length === 0 ? (
         <p className="rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-400">
-          No output in the last 15 minutes. A scale-to-zero app that isn’t handling requests sits
-          idle — open its URL to wake it and logs will appear here.
+          No output in the {rangeLabel}. A scale-to-zero app that isn’t handling requests sits idle —
+          open its URL to wake it, or widen the range to see older logs (Azure keeps ~30 days).
         </p>
       ) : (
         <div
@@ -1030,7 +1062,8 @@ function LogsTab({ project }: { project: ProjectDetailType }) {
         </div>
       )}
       <p className="text-xs text-slate-400">
-        Streamed from Azure Log Analytics — a short ingestion delay (~1–2 min) is normal.
+        From Azure Log Analytics · ~1–2 min ingestion delay is normal · history kept ~30 days, even
+        while scaled to zero.
       </p>
     </Card>
   );

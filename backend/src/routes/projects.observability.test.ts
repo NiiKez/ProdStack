@@ -157,4 +157,15 @@ describe('GET /api/projects/:id/runtime/logs', () => {
     expect(res.body.available).toBe(true);
     expect(res.body.lines).toEqual([]);
   });
+
+  it('accepts a 30-day (43200-minute) look-back window', async () => {
+    const res = await supertest(createApp()).get('/api/projects/p1/runtime/logs?sinceMinutes=43200');
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(true);
+  });
+
+  it('400 when sinceMinutes exceeds the 30-day retention cap', async () => {
+    const res = await supertest(createApp()).get('/api/projects/p1/runtime/logs?sinceMinutes=43201');
+    expect(res.status).toBe(400);
+  });
 });

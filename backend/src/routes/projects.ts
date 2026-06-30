@@ -68,8 +68,11 @@ const metricsQuerySchema = z.object({
 });
 
 const runtimeLogsQuerySchema = z.object({
-  // Look-back window for the snapshot; the frontend defaults to 15m.
-  sinceMinutes: z.coerce.number().int().positive().max(1440).optional(),
+  // Look-back window for the snapshot; the frontend defaults to 15m and offers a
+  // range picker up to 30 days. The 43200-minute (30d) cap matches the Azure Log
+  // Analytics workspace retention — querying further back returns nothing because
+  // older console logs are already purged, so there's no point accepting it.
+  sinceMinutes: z.coerce.number().int().positive().max(43200).optional(),
   // Cursor for the auto-refresh "tail": only return lines newer than this ISO ts.
   afterTs: z.string().datetime().optional(),
   limit: z.coerce.number().int().positive().max(1000).optional(),
