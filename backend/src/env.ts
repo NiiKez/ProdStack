@@ -276,6 +276,18 @@ const EnvSchema = z.object({
   // can't multiply Container Apps / builds without bound.
   PREVIEW_MAX_ACTIVE_PER_PROJECT: z.coerce.number().int().positive().default(5),
 
+  // Pulsar dashboard — build/deploy event push (Phase 3 of the Pulsar app-log
+  // plan). On every build status transition the worker fire-and-forgets a
+  // structured event to Pulsar's public `ingest-events` endpoint so the
+  // dashboard can render a deploy timeline. BOTH must be set to enable; either
+  // unset → feature off (no outbound calls), byte-identical prior behavior. URL
+  // is Pulsar's function endpoint; KEY is the per-source bearer (source
+  // "prodstack") from Pulsar's EVENTS_INGEST_KEYS map. Min 16 on the key so a
+  // short/empty value can't half-enable. Best-effort: a Pulsar outage never
+  // fails or slows a build.
+  PULSAR_EVENTS_URL: z.string().url().optional(),
+  PULSAR_EVENTS_KEY: z.string().min(16, 'PULSAR_EVENTS_KEY must be at least 16 chars').optional(),
+
   // Feature gates
   ENABLE_WORKER: boolFromString(false),
   // Starts the in-process node-cron cleanup scheduler (image GC + build/log
