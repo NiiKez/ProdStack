@@ -34,6 +34,7 @@ import { createContainerApp, deleteContainerApp, updateContainerApp } from '../a
 import { markPreviewFailedIfPending } from '../previews/previewService.js';
 import { loadDecryptedEnvVars } from '../projectEnv.js';
 import { selectBuildArgs } from './buildArgs.js';
+import { emitPulsarDeployEvent, flushPulsarDeployEvents } from './pulsarNotify.js';
 import { BUILD_CACHE_REPO_PREFIX, redact, runKaniko } from './kaniko.js';
 import { resolveDockerfile, type ResolvedDockerfile } from './resolveDockerfile.js';
 
@@ -228,12 +229,22 @@ class LogSink {
   }
 }
 
+/**
+ * The single funnel for every non-terminal + FAILED/CANCELLED status write on
+ * the real-worker path. Also fire-and-forgets the transition to the Pulsar
+ * dashboard (best-effort, no-op unless configured). Takes the full `build` so
+ * the deploy event carries commit/branch/project metadata; READY is written
+ * elsewhere (inside the deploy transactions) and emits its own event there.
+ */
 async function setStatus(
-  buildId: string,
+  build: BuildWithRelations,
   status: BuildStatus,
   extra: Prisma.BuildUpdateInput = {},
 ): Promise<void> {
-  await prisma.build.update({ where: { id: buildId }, data: { status, ...extra } });
+  await prisma.build.update({ where: { id: build.id }, data: { status, ...extra } });
+  emitPulsarDeployEvent(build, status, {
+    errorMessage: typeof extra.errorMessage === 'string' ? extra.errorMessage : undefined,
+  });
 }
 
 /**
@@ -320,7 +331,7 @@ export async function runBuild(buildId: string): Promise<void> {
     // window must be honored without waiting a full poll interval.
     if (!cancel.signal.aborted && (await checkCancelled())) cancel.abort();
 
-    await setStatus(buildId, 'CLONING', { startedAt });
+    await setStatus(build, 'CLONING', { startedAt });
     // Keep the in-memory row in sync with the DB write above. `build` was fetched
     // while still QUEUED (startedAt null) and is later read by deployAndRecord /
     // deployPreviewAndRecord to compute durationMs. Without this, startedAt stays
@@ -341,7 +352,7 @@ export async function runBuild(buildId: string): Promise<void> {
       // isn't fully masked by the cancellation.
       logger.info({ buildId, err }, 'build cancelled by user');
       await ctx.logs.write('WARN', 'build cancelled by user');
-      await setStatus(buildId, 'CANCELLED', {
+      await setStatus(build, 'CANCELLED', {
         finishedAt: new Date(),
         errorMessage: 'cancelled by user',
       });
@@ -362,7 +373,7 @@ export async function runBuild(buildId: string): Promise<void> {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err, buildId }, 'build failed');
       await ctx.logs.write('ERROR', `build failed: ${message}`);
-      await setStatus(buildId, 'FAILED', {
+      await setStatus(build, 'FAILED', {
         finishedAt: new Date(),
         errorMessage: message,
       });
@@ -413,6 +424,10 @@ export async function runBuild(buildId: string): Promise<void> {
           { buildId },
           'build was left in a non-terminal state after the runner finished — force-failed it',
         );
+        // This force-fail bypasses setStatus (updateMany), so emit its event here.
+        emitPulsarDeployEvent(build, 'FAILED', {
+          errorMessage: 'build did not reach a terminal state (status write failed)',
+        });
       }
     } catch (err) {
       logger.error({ err, buildId }, 'failed to reconcile build to a terminal state');
@@ -421,6 +436,12 @@ export async function runBuild(buildId: string): Promise<void> {
     await rm(workDir, { recursive: true, force: true }).catch((err: unknown) => {
       logger.warn({ err, workDir }, 'failed to clean up build work dir');
     });
+
+    // Drain any in-flight Pulsar deploy-event POSTs before the runner returns —
+    // in single-use worker mode the process disconnects/exits right after, and
+    // an un-awaited terminal (READY/FAILED) POST would be dropped. No-op when the
+    // feature is unconfigured. Best-effort: never rejects (allSettled).
+    await flushPulsarDeployEvents();
   }
 }
 
@@ -489,7 +510,7 @@ async function runRealBuild(
   const shaTag = `${imageRepo}:${build.commitSha}`;
   const latestTag = `${imageRepo}:latest-success`;
 
-  await setStatus(ctx.buildId, 'BUILDING', { imageTag: shaTag });
+  await setStatus(build, 'BUILDING', { imageTag: shaTag });
   await ctx.logs.write('STEP', `building image → ${shaTag}`);
 
   // Redact set for the kaniko phase — the build-side mirror of the git phase's
@@ -546,7 +567,7 @@ async function runRealBuild(
 
   // Kaniko pushes during build; mark PUSHING briefly so the UI's stage
   // stepper has a visible "pushed" transition between build and deploy.
-  await setStatus(ctx.buildId, 'PUSHING');
+  await setStatus(build, 'PUSHING');
   await ctx.logs.write('STEP', `pushed → ${shaTag}`);
 
   // Last chance to bail before the (non-abortable) Azure deploy starts. Once
@@ -911,7 +932,7 @@ async function runStubBuild(
   await interruptibleSleep(1500, signal);
   if (signal.aborted) throw new Error('cancelled');
 
-  await setStatus(ctx.buildId, 'BUILDING', { imageTag: image });
+  await setStatus(build, 'BUILDING', { imageTag: image });
   await ctx.logs.write('STEP', `stub: pretending to build (target image=${image})`);
   await interruptibleSleep(1500, signal);
   if (signal.aborted) throw new Error('cancelled');
@@ -927,7 +948,7 @@ async function deployAndRecord(
   image: string,
   resolved?: ResolvedDockerfile,
 ): Promise<void> {
-  await setStatus(ctx.buildId, 'DEPLOYING');
+  await setStatus(build, 'DEPLOYING');
 
   // Preview / PR build: deploy to the ephemeral per-PR Container App instead of
   // the project's main app, and DON'T create a Deployment row or touch
@@ -1052,6 +1073,10 @@ async function deployAndRecord(
     ]);
   }
 
+  // READY is written inside the transaction(s) above (main + P2002 reconcile),
+  // not via setStatus — emit the terminal deploy event here for both paths.
+  emitPulsarDeployEvent(build, 'READY', { url: deploy.liveUrl, durationMs });
+
   await ctx.logs.write('SUCCESS', `deployed → ${deploy.liveUrl}`);
   logger.info(
     { buildId: ctx.buildId, image, liveUrl: deploy.liveUrl },
@@ -1100,6 +1125,7 @@ async function deployPreviewAndRecord(
       where: { id: ctx.buildId },
       data: { status: 'READY', finishedAt, durationMs, imageTag: image },
     });
+    emitPulsarDeployEvent(build, 'READY', { durationMs });
     return;
   }
 
@@ -1247,6 +1273,7 @@ async function deployPreviewAndRecord(
     return;
   }
 
+  emitPulsarDeployEvent(build, 'READY', { url: deploy.liveUrl, durationMs });
   await ctx.logs.write('SUCCESS', `preview deployed → ${deploy.liveUrl}`);
   logger.info(
     { buildId: ctx.buildId, previewId: preview.id, prNumber: preview.prNumber, liveUrl: deploy.liveUrl },
