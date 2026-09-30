@@ -1,6 +1,6 @@
 # ProdStack
 
-### ▶︎ Live at **[prodstack.live](https://prodstack.live)**
+### ▶︎ Live at **[prodstack.live](https://prodstack.live)** (currently offline) 
 
 The platform is deployed in production on Azure Container Apps and continuously ships its own updates from `main`. Sign-in is gated to the owner's GitHub account to protect a student cloud budget — but the **[public demo](https://prodstack.live)** (the "Launch demo" button) lets anyone explore the full product, end to end, with no account.
 
