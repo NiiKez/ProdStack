@@ -14,8 +14,42 @@ It is designed to run on Azure Container Apps and is **self-hostable on your own
 
 ---
 
+## Screenshots
+
+<table>
+  <tr>
+    <td colspan="2">
+      <a href=".github/assets/screenshots/01-landing.png"><img src=".github/assets/screenshots/01-landing.png" alt="Landing page" width="100%"></a>
+      <p align="center"><sub><b>1 · Landing</b> — launch the public demo or sign in with GitHub</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <a href=".github/assets/screenshots/02-dashboard.png"><img src=".github/assets/screenshots/02-dashboard.png" alt="Projects dashboard" width="100%"></a>
+      <p align="center"><sub><b>2 · Dashboard</b> — every project's status at a glance</sub></p>
+    </td>
+    <td width="50%">
+      <a href=".github/assets/screenshots/03-new-project.png"><img src=".github/assets/screenshots/03-new-project.png" alt="New project with framework detection" width="100%"></a>
+      <p align="center"><sub><b>3 · New project</b> — repo picker with zero-Dockerfile framework detection</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <a href=".github/assets/screenshots/04-builds.png"><img src=".github/assets/screenshots/04-builds.png" alt="Build history" width="100%"></a>
+      <p align="center"><sub><b>4 · Builds</b> — build history with status filters, range and sort</sub></p>
+    </td>
+    <td width="50%">
+      <a href=".github/assets/screenshots/05-failed-build.png"><img src=".github/assets/screenshots/05-failed-build.png" alt="Failed build with previous deployment still live" width="100%"></a>
+      <p align="center"><sub><b>5 · Failed build</b> — the previous deployment keeps serving traffic</sub></p>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## Table of contents
 
+- [Screenshots](#screenshots)
 - [What is ProdStack](#what-is-prodstack)
 - [Features](#features)
 - [How it works](#how-it-works)
